@@ -43,3 +43,15 @@
 -- CREATE INDEX `rocpd_region{{uuid}}_pid_idx` ON `rocpd_region{{uuid}}` ("pid");
 -- CREATE INDEX `rocpd_region{{uuid}}_start_idx` ON `rocpd_region{{uuid}}` ("start");
 -- CREATE INDEX `rocpd_region{{uuid}}_end_idx` ON `rocpd_region{{uuid}}` ("end");
+
+-- PC sampling indexes (active: table can hold millions of rows and is always queried by
+-- dispatch_id for correlation, timestamp for timeline, agent_id for per-GPU views, and
+-- code_object_id for instruction annotation).
+CREATE INDEX IF NOT EXISTS `rocpd_gpu_pc_sample{{uuid}}_dispatch_idx`
+    ON `rocpd_gpu_pc_sample{{uuid}}` ("dispatch_id");
+CREATE INDEX IF NOT EXISTS `rocpd_gpu_pc_sample{{uuid}}_timestamp_idx`
+    ON `rocpd_gpu_pc_sample{{uuid}}` ("timestamp");
+CREATE INDEX IF NOT EXISTS `rocpd_gpu_pc_sample{{uuid}}_agent_idx`
+    ON `rocpd_gpu_pc_sample{{uuid}}` ("agent_id");
+CREATE INDEX IF NOT EXISTS `rocpd_gpu_pc_sample{{uuid}}_code_object_idx`
+    ON `rocpd_gpu_pc_sample{{uuid}}` ("code_object_id", "code_object_offset");

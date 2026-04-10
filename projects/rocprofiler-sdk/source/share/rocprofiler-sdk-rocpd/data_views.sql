@@ -724,3 +724,40 @@ GROUP BY
     K.dispatch_id,
     PMC_I.name,
     K.agent_id;
+
+CREATE VIEW IF NOT EXISTS
+    `gpu_pc_sample_with_agents` AS
+SELECT
+    PS.id,
+    PS.guid,
+    PS.event_id,
+    PS.timestamp,
+    PS.nid,
+    PS.pid,
+    PS.tid,
+    A.name AS agent_name,
+    A.type AS agent_type,
+    PS.dispatch_id,
+    PS.stack_id,
+    PS.parent_stack_id,
+    PS.correlation_id AS corr_id,
+    PS.sampling_method,
+    PS.exec_mask,
+    PS.inst_index AS instruction,
+    CAST(NULL AS TEXT) AS instruction_comment,
+    PS.code_object_id,
+    PS.code_object_offset,
+    PS.wave_in_group,
+    PS.workgroup_id_x,
+    PS.workgroup_id_y,
+    PS.workgroup_id_z,
+    PS.wave_issued,
+    PS.inst_type,
+    PS.stall_reason,
+    PS.wave_count,
+    PS.extdata_schema_id,
+    PS.extdata_blob
+FROM
+    `rocpd_gpu_pc_sample{{uuid}}` PS
+    LEFT JOIN `rocpd_info_agent{{uuid}}` A ON A.id = PS.agent_id
+    AND A.guid = PS.guid;
