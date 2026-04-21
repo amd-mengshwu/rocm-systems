@@ -1,0 +1,415 @@
+# ──────────────────────────────────────────────────────────────
+# DME ↔ AMDSMI Integration CI
+# ──────────────────────────────────────────────────────────────
+# Architecture:
+#   GPU-Agent (C++) ──gRPC──▶ DME (Go) ──▶ Prometheus /metrics
+#       │                        │
+#       └── libamdsmi.so ◀───────┘  (built from projects/amdsmi)
+#
+# This workflow builds AMDSMI from the mono-repo, compiles
+# GPU-Agent and Device Metrics Exporter, then verifies that
+# Prometheus GPU metrics are exposed correctly.
+# ──────────────────────────────────────────────────────────────
+
+name: DME AMDSMI Integration CI
+
+on:
+  pull_request:
+    branches: [develop]
+    paths:
+      - 'projects/amdsmi/**'
+      - '.github/workflows/dme-amdsmi-ci.yml'
+  push:
+    branches: [develop]
+    paths:
+      - 'projects/amdsmi/**'
+      - '.github/workflows/dme-amdsmi-ci.yml'
+  workflow_dispatch:
+    inputs:
+      dme_branch:
+        description: 'DME branch/tag to test against'
+        default: 'main'
+        type: string
+      gpu_agent_branch:
+        description: 'GPU Agent branch/tag (fallback if submodule missing)'
+        default: 'main'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dme-amdsmi-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  BUILD_TYPE: Release
+  DME_REPO: https://github.com/ROCm/device-metrics-exporter.git
+  GPU_AGENT_REPO: https://github.com/ROCm/gpu-agent.git
+  DME_BRANCH: ${{ inputs.dme_branch || 'main' }}
+  GPU_AGENT_BRANCH: ${{ inputs.gpu_agent_branch || 'main' }}
+  GO_VERSION: '1.25.5'
+  DME_METRICS_PORT: 5000
+  DME_DIR: /tmp/dme
+  # GPU Agent Makefile hardcodes ABS_DIR to this path
+  GPU_AGENT_WORKDIR: /usr/src/github.com/ROCm/gpu-agent
+
+jobs:
+  integration-test:
+    name: DME Integration • ${{ matrix.os }}
+    runs-on: ${{ vars.RUNNER_TYPE }}
+    continue-on-error: true
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [Ubuntu22]
+    container:
+      image: ${{ vars[format('{0}_DOCKER_IMAGE', matrix.os)] }}
+      options: >-
+        --rm --privileged
+        --device=/dev/kfd
+        --device=/dev/dri
+        --group-add video
+
+    steps:
+      # ────────────────────────────────────────────────────────
+      # Setup
+      # ────────────────────────────────────────────────────────
+      - name: Checkout Super-repo
+        uses: actions/checkout@v4
+
+      - name: Set Project Directory
+        run: |
+          PROJECT_DIR=$(find "$(pwd)" -maxdepth 3 -name "CMakeLists.txt" \
+            -path "*/amdsmi/*" -exec dirname {} \; | head -1)
+          echo "AMDSMI_DIR=${PROJECT_DIR}" >> "$GITHUB_ENV"
+          echo "AMDSMI project: ${PROJECT_DIR}"
+
+      - name: Install System Dependencies
+        run: |
+          max_retries=3
+          for i in $(seq 1 $max_retries); do
+            apt-get update && break || sleep 5
+          done
+          apt-get install -y --no-install-recommends \
+            build-essential cmake git curl wget ca-certificates \
+            pkg-config libdrm-dev libpci-dev \
+            autoconf automake libtool unzip \
+            libunwind-dev
+
+      - name: Install Go ${{ env.GO_VERSION }}
+        run: |
+          wget -q "https://go.dev/dl/go${{ env.GO_VERSION }}.linux-amd64.tar.gz" \
+            -O /tmp/go.tar.gz
+          rm -rf /usr/local/go
+          tar -C /usr/local -xzf /tmp/go.tar.gz
+          rm -f /tmp/go.tar.gz
+          echo "/usr/local/go/bin"    >> "$GITHUB_PATH"
+          echo "${HOME}/go/bin"       >> "$GITHUB_PATH"
+          /usr/local/go/bin/go version
+
+      - name: Install Go Protobuf Plugins
+        run: |
+          export PATH="/usr/local/go/bin:${HOME}/go/bin:${PATH}"
+
+          # Install Go protobuf plugins (GPU Agent builds its own protoc from third-party)
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          go install github.com/gogo/protobuf/protoc-gen-gogofast@latest
+
+      # ────────────────────────────────────────────────────────
+      # Phase 1 — Build AMDSMI from the mono-repo
+      # ────────────────────────────────────────────────────────
+      - name: Build and Install AMDSMI
+        run: |
+          echo "::group::cmake configure"
+          cd "${{ env.AMDSMI_DIR }}"
+          mkdir -p build && cd build
+          cmake .. \
+            -DBUILD_TESTS=ON \
+            -DENABLE_ESMI_LIB=ON \
+            -DCMAKE_INSTALL_PREFIX=/opt/rocm \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+          echo "::endgroup::"
+
+          echo "::group::make"
+          make -j "$(nproc)"
+          echo "::endgroup::"
+
+          make install
+          ldconfig
+
+          echo "=== Verify AMDSMI installation ==="
+          ls -la /opt/rocm/lib/libamd_smi.so*
+          ls /opt/rocm/include/amd_smi/ | head -10
+
+      # ────────────────────────────────────────────────────────
+      # Phase 2 — Clone and prepare build environment
+      # ────────────────────────────────────────────────────────
+      - name: Clone Device Metrics Exporter
+        run: |
+          # Configure git to use HTTPS instead of SSH for GitHub (CI has no SSH keys)
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+
+          # Clone DME without submodules first (no depth limit to ensure submodule refs work)
+          git clone \
+            -b "${{ env.DME_BRANCH }}" \
+            "${{ env.DME_REPO }}" "${{ env.DME_DIR }}"
+
+          cd "${{ env.DME_DIR }}"
+
+          # Init gpuagent and libamdsmi separately so a failure in one
+          # doesn't mask the other (libamdsmi may be private/unavailable).
+          git submodule update --init --recursive -- gpuagent || true
+          git submodule update --init --recursive -- libamdsmi || true
+
+          # Verify gpu-agent top-level was cloned
+          if [ ! -d "${{ env.DME_DIR }}/gpuagent/sw" ]; then
+            echo "GPU Agent submodule not populated — cloning separately"
+            rm -rf "${{ env.DME_DIR }}/gpuagent"
+            git clone --recurse-submodules \
+              -b "${{ env.GPU_AGENT_BRANCH }}" \
+              "${{ env.GPU_AGENT_REPO }}" "${{ env.DME_DIR }}/gpuagent"
+          fi
+
+          # Ensure gpu-agent's nested third-party submodules are populated.
+          # The recursive init from the parent repo may silently skip these
+          # if any sibling submodule URL is unreachable.
+          cd "${{ env.DME_DIR }}/gpuagent"
+
+          # gpu-agent's .gitmodules uses SSH URLs (git@github.com:) for some
+          # dependencies (abseil, boost, libzmq). The global insteadOf config
+          # is not reliably applied during recursive submodule clones.
+          # Rewrite them to HTTPS directly in .gitmodules and sync.
+          if [ -f .gitmodules ]; then
+            sed -i 's|git@github.com:|https://github.com/|g' .gitmodules
+            sed -i 's|ssh://git@github.com/|https://github.com/|g' .gitmodules
+            git submodule sync --recursive
+          fi
+
+          git submodule update --init --recursive
+
+          # Hard-fail if protobuf submodule is empty (build-libs needs it first)
+          if [ ! -f "${{ env.DME_DIR }}/gpuagent/sw/nic/third-party/protobuf/autogen.sh" ] && \
+             [ ! -f "${{ env.DME_DIR }}/gpuagent/sw/nic/third-party/protobuf/CMakeLists.txt" ]; then
+            echo "::error::protobuf submodule is empty — nested submodule init failed"
+            echo "--- .gitmodules entries ---"
+            git config --file .gitmodules -l 2>/dev/null | grep -i proto || true
+            echo "--- submodule status ---"
+            git submodule status --recursive 2>/dev/null | head -20
+            exit 1
+          fi
+
+          echo "=== DME directory ==="
+          ls "${{ env.DME_DIR }}/"
+
+          echo "=== GPU Agent third-party libs ==="
+          ls "${{ env.DME_DIR }}/gpuagent/sw/nic/third-party/" || echo "third-party dir not found"
+
+          echo "=== Protobuf directory check ==="
+          ls "${{ env.DME_DIR }}/gpuagent/sw/nic/third-party/protobuf/" || echo "protobuf dir not found"
+
+      - name: Prepare GPU Agent Build Environment
+        run: |
+          GPUAGENT_SRC="${{ env.DME_DIR }}/gpuagent"
+
+          # GPU Agent Makefile hardcodes ABS_DIR — symlink to match
+          mkdir -p "$(dirname "${{ env.GPU_AGENT_WORKDIR }}")"
+          ln -sfn "${GPUAGENT_SRC}" "${{ env.GPU_AGENT_WORKDIR }}"
+
+          # Copy locally-built AMDSMI to gpu-agent's expected paths
+          AMDSMI_TP="${GPUAGENT_SRC}/sw/nic/third-party/rocm/amd_smi_lib"
+          mkdir -p "${AMDSMI_TP}/include" "${AMDSMI_TP}/x86_64/lib"
+          cp -v /opt/rocm/lib/libamd_smi.so*      "${AMDSMI_TP}/x86_64/lib/"
+          cp -rv /opt/rocm/include/amd_smi/*      "${AMDSMI_TP}/include/"
+
+          # Place libs in the runtime lib dir as well
+          BLD_LIB="${GPUAGENT_SRC}/sw/nic/build/x86_64/sim/lib"
+          mkdir -p "${BLD_LIB}"
+          cp -v /opt/rocm/lib/libamd_smi.so*      "${BLD_LIB}/"
+
+          echo "=== GPU Agent build environment ready ==="
+
+      # ────────────────────────────────────────────────────────
+      # Phase 3 — Build GPU Agent (C++ binary)
+      # ────────────────────────────────────────────────────────
+      - name: Build GPU Agent Third-party Libraries
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          export PATH="/usr/local/go/bin:${HOME}/go/bin:${PATH}"
+          cd "${{ env.GPU_AGENT_WORKDIR }}/sw/nic/gpuagent"
+
+          echo "Building third-party C++ libraries (protobuf, gRPC, abseil, …)"
+          echo "::group::build-libs"
+          set -o pipefail
+          make build-libs 2>&1 | tee /tmp/build-libs.log | tail -100
+          echo "::endgroup::"
+
+      - name: Build GPU Agent Binary
+        timeout-minutes: 30
+        run: |
+          export PATH="/usr/local/go/bin:${HOME}/go/bin:${PATH}"
+          cd "${{ env.GPU_AGENT_WORKDIR }}/sw/nic/gpuagent"
+
+          # The Makefile's built-in rule for compiling generated .pb.cc files
+          # uses bare g++ without -I flags, causing it to pick up older system
+          # protobuf headers instead of the ones built by make build-libs.
+          # Export CPLUS_INCLUDE_PATH so g++ finds the correct headers.
+          BLD_ROOT="${{ env.GPU_AGENT_WORKDIR }}/sw/nic/build"
+          export CPLUS_INCLUDE_PATH="${BLD_ROOT}/include:${BLD_ROOT}/x86_64/sim/gen/proto${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}}"
+
+          # Create a compiler/linker wrapper that appends -lunwind.
+          # libzmq.a references libunwind symbols (_Ux86_64_getcontext etc.)
+          # but the Makefile's hardcoded LDFLAGS don't include -lunwind.
+          # The wrapper ensures -lunwind appears at the end of the link line.
+          printf '#!/bin/sh\nexec g++ "$@" -lunwind\n' > /tmp/g++-wrap
+          chmod +x /tmp/g++-wrap
+
+          echo "::group::make gpuagent"
+          make gpuagent CC=/tmp/g++-wrap
+          echo "::endgroup::"
+
+          BLD_BIN="${{ env.GPU_AGENT_WORKDIR }}/sw/nic/build/x86_64/sim/bin"
+          echo "=== GPU Agent build artifacts ==="
+          ls -la "${BLD_BIN}/"
+
+      # ────────────────────────────────────────────────────────
+      # Phase 4 — Build Device Metrics Exporter (Go binary)
+      # ────────────────────────────────────────────────────────
+      - name: Build Device Metrics Exporter
+        timeout-minutes: 15
+        run: |
+          export PATH="/usr/local/go/bin:${HOME}/go/bin:${PATH}"
+          cd "${{ env.DME_DIR }}"
+
+          mkdir -p bin
+          CGO_ENABLED=0 go build -C cmd/exporter \
+            -o "$(pwd)/bin/amd-metrics-exporter"
+
+          ls -la bin/amd-metrics-exporter
+          echo "=== DME build complete ==="
+
+      # ────────────────────────────────────────────────────────
+      # Phase 5 — Integration Test
+      # ────────────────────────────────────────────────────────
+      - name: Start GPU Agent
+        run: |
+          BLD_DIR="${{ env.GPU_AGENT_WORKDIR }}/sw/nic/build/x86_64/sim"
+          export LD_LIBRARY_PATH="${BLD_DIR}/lib:/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
+
+          echo "=== Starting GPU Agent ==="
+          nohup "${BLD_DIR}/bin/gpuagent" > /tmp/gpuagent.log 2>&1 &
+          GPUAGENT_PID=$!
+          echo "GPUAGENT_PID=${GPUAGENT_PID}" >> "$GITHUB_ENV"
+
+          sleep 5
+
+          if kill -0 "${GPUAGENT_PID}" 2>/dev/null; then
+            echo "GPU Agent running (PID ${GPUAGENT_PID})"
+          else
+            echo "::error::GPU Agent failed to start"
+            cat /tmp/gpuagent.log
+            exit 1
+          fi
+
+      - name: Start Device Metrics Exporter
+        run: |
+          export LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
+
+          echo "=== Starting DME ==="
+          nohup "${{ env.DME_DIR }}/bin/amd-metrics-exporter" \
+            > /tmp/dme.log 2>&1 &
+          DME_PID=$!
+          echo "DME_PID=${DME_PID}" >> "$GITHUB_ENV"
+
+          sleep 5
+
+          if kill -0 "${DME_PID}" 2>/dev/null; then
+            echo "DME running (PID ${DME_PID})"
+          else
+            echo "::error::DME failed to start"
+            cat /tmp/dme.log
+            exit 1
+          fi
+
+      - name: Verify Prometheus Metrics Endpoint
+        run: |
+          MAX_RETRIES=5
+          RETRY_DELAY=3
+
+          for i in $(seq 1 ${MAX_RETRIES}); do
+            echo "Attempt ${i}/${MAX_RETRIES}: querying metrics …"
+            HTTP_CODE=$(curl -s -o /tmp/metrics_output.txt \
+              -w "%{http_code}" \
+              "http://localhost:${{ env.DME_METRICS_PORT }}/metrics" \
+              || echo "000")
+
+            if [ "${HTTP_CODE}" = "200" ]; then
+              echo "=== Metrics endpoint returned HTTP 200 ==="
+              head -50 /tmp/metrics_output.txt
+              echo "---"
+
+              if grep -q "^# HELP" /tmp/metrics_output.txt &&
+                 grep -q "^# TYPE" /tmp/metrics_output.txt; then
+                echo "=== Prometheus format verified ==="
+              else
+                echo "::warning::Response may not be standard Prometheus format"
+              fi
+              exit 0
+            fi
+
+            echo "HTTP ${HTTP_CODE} — retrying in ${RETRY_DELAY}s …"
+            sleep "${RETRY_DELAY}"
+          done
+
+          echo "::error::Metrics endpoint unreachable after ${MAX_RETRIES} attempts"
+          echo "--- gpu-agent log ---"
+          tail -100 /tmp/gpuagent.log 2>/dev/null || true
+          echo "--- dme log ---"
+          tail -100 /tmp/dme.log 2>/dev/null || true
+          exit 1
+
+      # ────────────────────────────────────────────────────────
+      # Cleanup & artifacts
+      # ────────────────────────────────────────────────────────
+      - name: Collect Logs
+        if: always()
+        run: |
+          mkdir -p /tmp/integration-logs
+          cp /tmp/gpuagent.log       /tmp/integration-logs/ 2>/dev/null || true
+          cp /tmp/dme.log            /tmp/integration-logs/ 2>/dev/null || true
+          cp /tmp/metrics_output.txt /tmp/integration-logs/ 2>/dev/null || true
+
+          {
+            echo "=== System ==="
+            uname -a
+            echo "=== GPU devices ==="
+            ls -la /dev/kfd /dev/dri/ 2>&1 || true
+            echo "=== AMDSMI libs ==="
+            ldconfig -p | grep amd_smi || true
+          } > /tmp/integration-logs/system-info.txt 2>&1
+
+      - name: Upload Integration Test Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dme-integration-logs-${{ matrix.os }}
+          path: /tmp/integration-logs/
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          for pid in "${{ env.DME_PID }}" "${{ env.GPUAGENT_PID }}"; do
+            [ -n "${pid}" ] || continue
+            kill "${pid}"   2>/dev/null || true
+          done
+          sleep 2
+          for pid in "${{ env.DME_PID }}" "${{ env.GPUAGENT_PID }}"; do
+            [ -n "${pid}" ] || continue
+            kill -9 "${pid}" 2>/dev/null || true
+          done
