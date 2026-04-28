@@ -6,9 +6,9 @@
 #       │                        │
 #       └── libamdsmi.so ◀───────┘  (built from projects/amdsmi)
 #
-# This workflow builds AMDSMI from the mono-repo, compiles
-# GPU-Agent and Device Metrics Exporter, then verifies that
-# Prometheus GPU metrics are exposed correctly.
+# The heavy lifting lives in Python helpers under
+# projects/amdsmi/tests/dme_integration/. Run any phase locally with:
+#     python3 -m dme_integration <subcommand>
 # ──────────────────────────────────────────────────────────────
 
 name: DME AMDSMI Integration CI
@@ -27,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       dme_branch:
-        description: 'DME branch/tag to test against'
+        description: 'DME branch/tag to test against (e.g. main, v1.2.3)'
         default: 'main'
         type: string
       gpu_agent_branch:
@@ -42,6 +42,13 @@ concurrency:
   group: dme-amdsmi-integration-${{ github.ref }}
   cancel-in-progress: true
 
+# Force bash for every `run:` step. The default container shell on
+# Debian/Ubuntu images is /bin/sh (dash), which does not support
+# `set -o pipefail` or other bashisms used below.
+defaults:
+  run:
+    shell: bash
+
 env:
   DEBIAN_FRONTEND: noninteractive
   BUILD_TYPE: Release
@@ -50,16 +57,23 @@ env:
   DME_BRANCH: ${{ inputs.dme_branch || 'main' }}
   GPU_AGENT_BRANCH: ${{ inputs.gpu_agent_branch || 'main' }}
   GO_VERSION: '1.25.5'
-  DME_METRICS_PORT: 5000
+  DME_METRICS_PORT: '5000'
+  # GPU Agent's default gRPC port; override if upstream changes.
+  GPU_AGENT_GRPC_PORT: '50051'
   DME_DIR: /tmp/dme
   # GPU Agent Makefile hardcodes ABS_DIR to this path
   GPU_AGENT_WORKDIR: /usr/src/github.com/ROCm/gpu-agent
+  # Pinned versions for go-installed protobuf plugins (reproducible builds)
+  PROTOC_GEN_GO_VERSION: v1.34.2
+  PROTOC_GEN_GO_GRPC_VERSION: v1.5.1
+  # TODO: gogo/protobuf is archived upstream — track gpu-agent migration
+  # away from gogofast and remove this pin when it is no longer needed.
+  PROTOC_GEN_GOGOFAST_VERSION: v1.3.2
 
 jobs:
   integration-test:
     name: DME Integration • ${{ matrix.os }}
     runs-on: ${{ vars.RUNNER_TYPE }}
-    continue-on-error: true
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -80,201 +94,134 @@ jobs:
       - name: Checkout Super-repo
         uses: actions/checkout@v4
 
-      - name: Set Project Directory
+      - name: Locate AMDSMI Project
         run: |
           PROJECT_DIR=$(find "$(pwd)" -maxdepth 3 -name "CMakeLists.txt" \
             -path "*/amdsmi/*" -exec dirname {} \; | head -1)
+          if [ -z "${PROJECT_DIR}" ]; then
+            echo "::error::Could not locate projects/amdsmi/CMakeLists.txt"
+            exit 1
+          fi
           echo "AMDSMI_DIR=${PROJECT_DIR}" >> "$GITHUB_ENV"
+          echo "AMDSMI_TESTS_DIR=${PROJECT_DIR}/tests" >> "$GITHUB_ENV"
           echo "AMDSMI project: ${PROJECT_DIR}"
 
       - name: Install System Dependencies
         run: |
-          max_retries=3
-          for i in $(seq 1 $max_retries); do
-            apt-get update && break || sleep 5
+          set -euo pipefail
+          ok=0
+          for i in 1 2 3; do
+            if apt-get update; then ok=1; break; fi
+            sleep 5
           done
+          if [ "${ok}" -ne 1 ]; then
+            echo "::error::apt-get update failed after 3 attempts"
+            exit 1
+          fi
           apt-get install -y --no-install-recommends \
             build-essential cmake git curl wget ca-certificates \
             pkg-config libdrm-dev libpci-dev \
             autoconf automake libtool unzip \
-            libunwind-dev
+            libunwind-dev python3
 
-      - name: Install Go ${{ env.GO_VERSION }}
+      # actions/setup-go pins by version + checksum. Resolves the previous
+      # wget-and-trust pattern that performed no integrity check on the
+      # downloaded Go toolchain.
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install Go Protobuf Plugins (pinned)
         run: |
-          wget -q "https://go.dev/dl/go${{ env.GO_VERSION }}.linux-amd64.tar.gz" \
-            -O /tmp/go.tar.gz
-          rm -rf /usr/local/go
-          tar -C /usr/local -xzf /tmp/go.tar.gz
-          rm -f /tmp/go.tar.gz
-          echo "/usr/local/go/bin"    >> "$GITHUB_PATH"
-          echo "${HOME}/go/bin"       >> "$GITHUB_PATH"
-          /usr/local/go/bin/go version
-
-      - name: Install Go Protobuf Plugins
-        run: |
-          export PATH="/usr/local/go/bin:${HOME}/go/bin:${PATH}"
-
-          # Install Go protobuf plugins (GPU Agent builds its own protoc from third-party)
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-          go install github.com/gogo/protobuf/protoc-gen-gogofast@latest
+          set -euo pipefail
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@${{ env.PROTOC_GEN_GO_VERSION }}
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${{ env.PROTOC_GEN_GO_GRPC_VERSION }}
+          go install github.com/gogo/protobuf/protoc-gen-gogofast@${{ env.PROTOC_GEN_GOGOFAST_VERSION }}
+          echo "${HOME}/go/bin" >> "$GITHUB_PATH"
 
       # ────────────────────────────────────────────────────────
       # Phase 1 — Build AMDSMI from the mono-repo
       # ────────────────────────────────────────────────────────
       - name: Build and Install AMDSMI
         run: |
-          echo "::group::cmake configure"
-          cd "${{ env.AMDSMI_DIR }}"
+          set -euo pipefail
+          cd "${AMDSMI_DIR}"
           mkdir -p build && cd build
+          echo "::group::cmake configure"
           cmake .. \
             -DBUILD_TESTS=ON \
             -DENABLE_ESMI_LIB=ON \
             -DCMAKE_INSTALL_PREFIX=/opt/rocm \
-            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+            -DCMAKE_BUILD_TYPE=${BUILD_TYPE}
           echo "::endgroup::"
-
           echo "::group::make"
           make -j "$(nproc)"
           echo "::endgroup::"
-
           make install
           ldconfig
-
           echo "=== Verify AMDSMI installation ==="
           ls -la /opt/rocm/lib/libamd_smi.so*
           ls /opt/rocm/include/amd_smi/ | head -10
 
       # ────────────────────────────────────────────────────────
-      # Phase 2 — Clone and prepare build environment
+      # Phase 2 — Clone DME and prepare submodules
       # ────────────────────────────────────────────────────────
-      - name: Clone Device Metrics Exporter
+      - name: Prepare DME Submodules
+        working-directory: ${{ env.AMDSMI_TESTS_DIR }}
         run: |
-          # Configure git to use HTTPS instead of SSH for GitHub (CI has no SSH keys)
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
-
-          # Clone DME without submodules first (no depth limit to ensure submodule refs work)
-          git clone \
-            -b "${{ env.DME_BRANCH }}" \
-            "${{ env.DME_REPO }}" "${{ env.DME_DIR }}"
-
-          cd "${{ env.DME_DIR }}"
-
-          # Init gpuagent and libamdsmi separately so a failure in one
-          # doesn't mask the other (libamdsmi may be private/unavailable).
-          git submodule update --init --recursive -- gpuagent || true
-          git submodule update --init --recursive -- libamdsmi || true
-
-          # Verify gpu-agent top-level was cloned
-          if [ ! -d "${{ env.DME_DIR }}/gpuagent/sw" ]; then
-            echo "GPU Agent submodule not populated — cloning separately"
-            rm -rf "${{ env.DME_DIR }}/gpuagent"
-            git clone --recurse-submodules \
-              -b "${{ env.GPU_AGENT_BRANCH }}" \
-              "${{ env.GPU_AGENT_REPO }}" "${{ env.DME_DIR }}/gpuagent"
-          fi
-
-          # Ensure gpu-agent's nested third-party submodules are populated.
-          # The recursive init from the parent repo may silently skip these
-          # if any sibling submodule URL is unreachable.
-          cd "${{ env.DME_DIR }}/gpuagent"
-
-          # gpu-agent's .gitmodules uses SSH URLs (git@github.com:) for some
-          # dependencies (abseil, boost, libzmq). The global insteadOf config
-          # is not reliably applied during recursive submodule clones.
-          # Rewrite them to HTTPS directly in .gitmodules and sync.
-          if [ -f .gitmodules ]; then
-            sed -i 's|git@github.com:|https://github.com/|g' .gitmodules
-            sed -i 's|ssh://git@github.com/|https://github.com/|g' .gitmodules
-            git submodule sync --recursive
-          fi
-
-          git submodule update --init --recursive
-
-          # Hard-fail if protobuf submodule is empty (build-libs needs it first)
-          if [ ! -f "${{ env.DME_DIR }}/gpuagent/sw/nic/third-party/protobuf/autogen.sh" ] && \
-             [ ! -f "${{ env.DME_DIR }}/gpuagent/sw/nic/third-party/protobuf/CMakeLists.txt" ]; then
-            echo "::error::protobuf submodule is empty — nested submodule init failed"
-            echo "--- .gitmodules entries ---"
-            git config --file .gitmodules -l 2>/dev/null | grep -i proto || true
-            echo "--- submodule status ---"
-            git submodule status --recursive 2>/dev/null | head -20
-            exit 1
-          fi
-
-          echo "=== DME directory ==="
-          ls "${{ env.DME_DIR }}/"
-
-          echo "=== GPU Agent third-party libs ==="
-          ls "${{ env.DME_DIR }}/gpuagent/sw/nic/third-party/" || echo "third-party dir not found"
-
-          echo "=== Protobuf directory check ==="
-          ls "${{ env.DME_DIR }}/gpuagent/sw/nic/third-party/protobuf/" || echo "protobuf dir not found"
+          python3 -m dme_integration prepare-submodules \
+            --dme-repo "${DME_REPO}" \
+            --dme-branch "${DME_BRANCH}" \
+            --dme-dir "${DME_DIR}" \
+            --gpu-agent-repo "${GPU_AGENT_REPO}" \
+            --gpu-agent-branch "${GPU_AGENT_BRANCH}"
 
       - name: Prepare GPU Agent Build Environment
+        working-directory: ${{ env.AMDSMI_TESTS_DIR }}
         run: |
-          GPUAGENT_SRC="${{ env.DME_DIR }}/gpuagent"
-
-          # GPU Agent Makefile hardcodes ABS_DIR — symlink to match
-          mkdir -p "$(dirname "${{ env.GPU_AGENT_WORKDIR }}")"
-          ln -sfn "${GPUAGENT_SRC}" "${{ env.GPU_AGENT_WORKDIR }}"
-
-          # Copy locally-built AMDSMI to gpu-agent's expected paths
-          AMDSMI_TP="${GPUAGENT_SRC}/sw/nic/third-party/rocm/amd_smi_lib"
-          mkdir -p "${AMDSMI_TP}/include" "${AMDSMI_TP}/x86_64/lib"
-          cp -v /opt/rocm/lib/libamd_smi.so*      "${AMDSMI_TP}/x86_64/lib/"
-          cp -rv /opt/rocm/include/amd_smi/*      "${AMDSMI_TP}/include/"
-
-          # Place libs in the runtime lib dir as well
-          BLD_LIB="${GPUAGENT_SRC}/sw/nic/build/x86_64/sim/lib"
-          mkdir -p "${BLD_LIB}"
-          cp -v /opt/rocm/lib/libamd_smi.so*      "${BLD_LIB}/"
-
-          echo "=== GPU Agent build environment ready ==="
+          python3 -m dme_integration prepare-build-env \
+            --gpuagent-src "${DME_DIR}/gpuagent" \
+            --gpu-agent-workdir "${GPU_AGENT_WORKDIR}" \
+            --rocm-dir /opt/rocm
 
       # ────────────────────────────────────────────────────────
       # Phase 3 — Build GPU Agent (C++ binary)
       # ────────────────────────────────────────────────────────
       - name: Build GPU Agent Third-party Libraries
         timeout-minutes: 60
-        shell: bash
+        working-directory: ${{ env.GPU_AGENT_WORKDIR }}/sw/nic/gpuagent
         run: |
-          export PATH="/usr/local/go/bin:${HOME}/go/bin:${PATH}"
-          cd "${{ env.GPU_AGENT_WORKDIR }}/sw/nic/gpuagent"
-
+          set -euo pipefail
+          set -o pipefail
           echo "Building third-party C++ libraries (protobuf, gRPC, abseil, …)"
           echo "::group::build-libs"
-          set -o pipefail
-          make build-libs 2>&1 | tee /tmp/build-libs.log | tail -100
+          make build-libs 2>&1 | tee /tmp/build-libs.log | tail -200
           echo "::endgroup::"
 
       - name: Build GPU Agent Binary
         timeout-minutes: 30
+        working-directory: ${{ env.GPU_AGENT_WORKDIR }}/sw/nic/gpuagent
         run: |
-          export PATH="/usr/local/go/bin:${HOME}/go/bin:${PATH}"
-          cd "${{ env.GPU_AGENT_WORKDIR }}/sw/nic/gpuagent"
-
+          set -euo pipefail
           # The Makefile's built-in rule for compiling generated .pb.cc files
-          # uses bare g++ without -I flags, causing it to pick up older system
-          # protobuf headers instead of the ones built by make build-libs.
-          # Export CPLUS_INCLUDE_PATH so g++ finds the correct headers.
-          BLD_ROOT="${{ env.GPU_AGENT_WORKDIR }}/sw/nic/build"
+          # uses bare g++ without -I flags, so it picks up older system
+          # protobuf headers instead of those built by `make build-libs`.
+          BLD_ROOT="${GPU_AGENT_WORKDIR}/sw/nic/build"
           export CPLUS_INCLUDE_PATH="${BLD_ROOT}/include:${BLD_ROOT}/x86_64/sim/gen/proto${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}}"
 
-          # Create a compiler/linker wrapper that appends -lunwind.
           # libzmq.a references libunwind symbols (_Ux86_64_getcontext etc.)
-          # but the Makefile's hardcoded LDFLAGS don't include -lunwind.
-          # The wrapper ensures -lunwind appears at the end of the link line.
-          printf '#!/bin/sh\nexec g++ "$@" -lunwind\n' > /tmp/g++-wrap
-          chmod +x /tmp/g++-wrap
-
+          # but the Makefile's hardcoded LDFLAGS omit -lunwind. The wrapper
+          # appends -lunwind to every g++ link line. See
+          # projects/amdsmi/tests/dme_integration/gpp_wrapper.py — delete
+          # both this CC override and that module when upstream gpu-agent
+          # fixes its LDFLAGS.
+          GPP_WRAP=$(cd "${AMDSMI_TESTS_DIR}" && python3 -m dme_integration write-gpp-wrapper --output /tmp/g++-wrap)
           echo "::group::make gpuagent"
-          make gpuagent CC=/tmp/g++-wrap
+          make gpuagent CC="${GPP_WRAP}"
           echo "::endgroup::"
 
-          BLD_BIN="${{ env.GPU_AGENT_WORKDIR }}/sw/nic/build/x86_64/sim/bin"
-          echo "=== GPU Agent build artifacts ==="
+          BLD_BIN="${GPU_AGENT_WORKDIR}/sw/nic/build/x86_64/sim/bin"
           ls -la "${BLD_BIN}/"
 
       # ────────────────────────────────────────────────────────
@@ -282,96 +229,53 @@ jobs:
       # ────────────────────────────────────────────────────────
       - name: Build Device Metrics Exporter
         timeout-minutes: 15
+        working-directory: ${{ env.DME_DIR }}
         run: |
-          export PATH="/usr/local/go/bin:${HOME}/go/bin:${PATH}"
-          cd "${{ env.DME_DIR }}"
-
+          set -euo pipefail
           mkdir -p bin
           CGO_ENABLED=0 go build -C cmd/exporter \
             -o "$(pwd)/bin/amd-metrics-exporter"
-
           ls -la bin/amd-metrics-exporter
-          echo "=== DME build complete ==="
 
       # ────────────────────────────────────────────────────────
       # Phase 5 — Integration Test
       # ────────────────────────────────────────────────────────
       - name: Start GPU Agent
+        working-directory: ${{ env.AMDSMI_TESTS_DIR }}
         run: |
-          BLD_DIR="${{ env.GPU_AGENT_WORKDIR }}/sw/nic/build/x86_64/sim"
-          export LD_LIBRARY_PATH="${BLD_DIR}/lib:/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
-
-          echo "=== Starting GPU Agent ==="
-          nohup "${BLD_DIR}/bin/gpuagent" > /tmp/gpuagent.log 2>&1 &
-          GPUAGENT_PID=$!
-          echo "GPUAGENT_PID=${GPUAGENT_PID}" >> "$GITHUB_ENV"
-
-          sleep 5
-
-          if kill -0 "${GPUAGENT_PID}" 2>/dev/null; then
-            echo "GPU Agent running (PID ${GPUAGENT_PID})"
-          else
-            echo "::error::GPU Agent failed to start"
-            cat /tmp/gpuagent.log
-            exit 1
-          fi
+          set -euo pipefail
+          BLD_DIR="${GPU_AGENT_WORKDIR}/sw/nic/build/x86_64/sim"
+          python3 -m dme_integration start-service \
+            --name gpuagent \
+            --binary "${BLD_DIR}/bin/gpuagent" \
+            --log-file /tmp/gpuagent.log \
+            --pid-file /tmp/gpuagent.pid \
+            --ready-port "${GPU_AGENT_GRPC_PORT}" \
+            --ready-timeout 30 \
+            --ld-library-path "${BLD_DIR}/lib:/opt/rocm/lib"
 
       - name: Start Device Metrics Exporter
+        working-directory: ${{ env.AMDSMI_TESTS_DIR }}
         run: |
-          export LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
-
-          echo "=== Starting DME ==="
-          nohup "${{ env.DME_DIR }}/bin/amd-metrics-exporter" \
-            > /tmp/dme.log 2>&1 &
-          DME_PID=$!
-          echo "DME_PID=${DME_PID}" >> "$GITHUB_ENV"
-
-          sleep 5
-
-          if kill -0 "${DME_PID}" 2>/dev/null; then
-            echo "DME running (PID ${DME_PID})"
-          else
-            echo "::error::DME failed to start"
-            cat /tmp/dme.log
-            exit 1
-          fi
+          set -euo pipefail
+          python3 -m dme_integration start-service \
+            --name dme \
+            --binary "${DME_DIR}/bin/amd-metrics-exporter" \
+            --log-file /tmp/dme.log \
+            --pid-file /tmp/dme.pid \
+            --ready-port "${DME_METRICS_PORT}" \
+            --ready-timeout 30 \
+            --ld-library-path "/opt/rocm/lib"
 
       - name: Verify Prometheus Metrics Endpoint
+        working-directory: ${{ env.AMDSMI_TESTS_DIR }}
         run: |
-          MAX_RETRIES=5
-          RETRY_DELAY=3
-
-          for i in $(seq 1 ${MAX_RETRIES}); do
-            echo "Attempt ${i}/${MAX_RETRIES}: querying metrics …"
-            HTTP_CODE=$(curl -s -o /tmp/metrics_output.txt \
-              -w "%{http_code}" \
-              "http://localhost:${{ env.DME_METRICS_PORT }}/metrics" \
-              || echo "000")
-
-            if [ "${HTTP_CODE}" = "200" ]; then
-              echo "=== Metrics endpoint returned HTTP 200 ==="
-              head -50 /tmp/metrics_output.txt
-              echo "---"
-
-              if grep -q "^# HELP" /tmp/metrics_output.txt &&
-                 grep -q "^# TYPE" /tmp/metrics_output.txt; then
-                echo "=== Prometheus format verified ==="
-              else
-                echo "::warning::Response may not be standard Prometheus format"
-              fi
-              exit 0
-            fi
-
-            echo "HTTP ${HTTP_CODE} — retrying in ${RETRY_DELAY}s …"
-            sleep "${RETRY_DELAY}"
-          done
-
-          echo "::error::Metrics endpoint unreachable after ${MAX_RETRIES} attempts"
-          echo "--- gpu-agent log ---"
-          tail -100 /tmp/gpuagent.log 2>/dev/null || true
-          echo "--- dme log ---"
-          tail -100 /tmp/dme.log 2>/dev/null || true
-          exit 1
+          set -euo pipefail
+          python3 -m dme_integration verify-metrics \
+            --url "http://localhost:${DME_METRICS_PORT}/metrics" \
+            --output /tmp/metrics_output.txt \
+            --max-retries 10 \
+            --retry-delay 3
 
       # ────────────────────────────────────────────────────────
       # Cleanup & artifacts
@@ -379,11 +283,11 @@ jobs:
       - name: Collect Logs
         if: always()
         run: |
+          set -u
           mkdir -p /tmp/integration-logs
-          cp /tmp/gpuagent.log       /tmp/integration-logs/ 2>/dev/null || true
-          cp /tmp/dme.log            /tmp/integration-logs/ 2>/dev/null || true
-          cp /tmp/metrics_output.txt /tmp/integration-logs/ 2>/dev/null || true
-
+          for src in /tmp/gpuagent.log /tmp/dme.log /tmp/build-libs.log /tmp/metrics_output.txt; do
+            [ -f "${src}" ] && cp "${src}" /tmp/integration-logs/ || true
+          done
           {
             echo "=== System ==="
             uname -a
@@ -401,15 +305,9 @@ jobs:
           path: /tmp/integration-logs/
           retention-days: 7
 
-      - name: Cleanup
+      - name: Stop Services
         if: always()
+        working-directory: ${{ env.AMDSMI_TESTS_DIR }}
         run: |
-          for pid in "${{ env.DME_PID }}" "${{ env.GPUAGENT_PID }}"; do
-            [ -n "${pid}" ] || continue
-            kill "${pid}"   2>/dev/null || true
-          done
-          sleep 2
-          for pid in "${{ env.DME_PID }}" "${{ env.GPUAGENT_PID }}"; do
-            [ -n "${pid}" ] || continue
-            kill -9 "${pid}" 2>/dev/null || true
-          done
+          python3 -m dme_integration stop-service --name dme      --pid-file /tmp/dme.pid      || true
+          python3 -m dme_integration stop-service --name gpuagent --pid-file /tmp/gpuagent.pid || true
