@@ -146,8 +146,7 @@ loadYAML(const std::string& filename, std::optional<ArchMetric> add_metric)
         header = yaml["rocprofiler-sdk"]["counters"];
     } catch(const YAML::Exception& e)
     {
-        ROCP_ERROR << "Failed to parse counter file " << filename << ": " << e.what();
-        std::exit(EXIT_FAILURE);
+        ROCP_FATAL << "Failed to parse counter file " << filename << ": " << e.what();
     }
 
     if(!override.data.empty() && override.append)
@@ -159,10 +158,9 @@ loadYAML(const std::string& filename, std::optional<ArchMetric> add_metric)
             auto error = validateExtraCounterYAML(append_yaml);
             if(error)
             {
-                ROCP_ERROR << "Invalid extra counters YAML: " << *error << "\n"
+                ROCP_FATAL << "Invalid extra counters YAML: " << *error << "\n"
                            << "Content:\n"
                            << override.data;
-                std::exit(EXIT_FAILURE);
             }
 
             if(append_yaml["rocprofiler-sdk"] && append_yaml["rocprofiler-sdk"]["counters"])
@@ -172,10 +170,9 @@ loadYAML(const std::string& filename, std::optional<ArchMetric> add_metric)
             }
         } catch(const YAML::Exception& e)
         {
-            ROCP_ERROR << "Failed to parse extra counters YAML: " << e.what() << "\n"
+            ROCP_FATAL << "Failed to parse extra counters YAML: " << e.what() << "\n"
                        << "Content:\n"
                        << override.data;
-            std::exit(EXIT_FAILURE);
         }
     }
 
@@ -235,8 +232,7 @@ loadYAML(const std::string& filename, std::optional<ArchMetric> add_metric)
 
     if(current_id > 65536)
     {
-        ROCP_ERROR << "Counter count exceeds 16 bits, which may break counter id output";
-        std::exit(EXIT_FAILURE);
+        ROCP_FATAL << "Counter count exceeds 16 bits, which may break counter id output";
     }
 
     return {.arch_to_metric = ret,
@@ -328,10 +324,9 @@ locateMetricsFile(std::string_view name)
         return install_candidate;
     }
 
-    ROCP_ERROR << "Metric file '" << name << "' not found.\n"
+    ROCP_FATAL << "Metric file '" << name << "' not found.\n"
                << "  Tried: ROCPROFILER_METRICS_PATH (" << metric_env_path << "), and "
                << install_candidate;
-    std::exit(EXIT_FAILURE);
 }
 
 }  // namespace
