@@ -208,12 +208,13 @@ struct buffer_ids
     rocprofiler_buffer_id_t pc_sampling_host_trap   = {};
     rocprofiler_buffer_id_t rocdecode_api_trace     = {};
     rocprofiler_buffer_id_t rocjpeg_api_trace       = {};
+    rocprofiler_buffer_id_t rocshmem_api_trace      = {};
     rocprofiler_buffer_id_t pc_sampling_stochastic  = {};
     rocprofiler_buffer_id_t ompt_trace              = {};
 
     auto as_array() const
     {
-        return std::array<rocprofiler_buffer_id_t, 14>{hsa_api_trace,
+        return std::array<rocprofiler_buffer_id_t, 15>{hsa_api_trace,
                                                        hip_api_trace,
                                                        kernel_trace,
                                                        memory_copy_trace,
@@ -225,6 +226,7 @@ struct buffer_ids
                                                        pc_sampling_host_trap,
                                                        rocdecode_api_trace,
                                                        rocjpeg_api_trace,
+                                                       rocshmem_api_trace,
                                                        pc_sampling_stochastic,
                                                        ompt_trace};
     }
@@ -1318,6 +1320,13 @@ buffered_tracing_callback(rocprofiler_context_id_t /*context*/,
                     static_cast<rocprofiler_buffer_tracing_rocjpeg_api_record_t*>(header->payload);
 
                 tool::write_ring_buffer(*record, domain_type::ROCJPEG);
+            }
+            else if(header->kind == ROCPROFILER_BUFFER_TRACING_ROCSHMEM_API)
+            {
+                auto* record =
+                    static_cast<rocprofiler_buffer_tracing_rocshmem_api_record_t*>(header->payload);
+
+                tool::write_ring_buffer(*record, domain_type::ROCSHMEM);
             }
             else
             {
@@ -2682,6 +2691,9 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
                       buffer_service_config{tool::get_config().rocjpeg_api_trace,
                                             ROCPROFILER_BUFFER_TRACING_ROCJPEG_API,
                                             get_buffers().rocjpeg_api_trace},
+                      buffer_service_config{tool::get_config().rocshmem_api_trace,
+                                            ROCPROFILER_BUFFER_TRACING_ROCSHMEM_API,
+                                            get_buffers().rocshmem_api_trace},
                       // Enable only the ROCPROFILER_KFD_EVENT_QUEUE_RESTORE_RESCHEDULED operation
                       // for KFD QUEUE events; all other QUEUE related events are published as range
                       // records
@@ -2801,6 +2813,9 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
                                               dummy_callback_tracing_callback},
                       callback_service_config{tool::get_config().ompt_trace,
                                               ROCPROFILER_CALLBACK_TRACING_OMPT,
+                                              dummy_callback_tracing_callback},
+                      callback_service_config{tool::get_config().rocshmem_api_trace,
+                                              ROCPROFILER_CALLBACK_TRACING_ROCSHMEM_API,
                                               dummy_callback_tracing_callback}})
     {
         if(itr.option)
@@ -3389,6 +3404,8 @@ generate_output(cleanup_mode _cleanup_mode)
     auto rocdecode_output =
         tool::rocdecode_buffered_output_t{tool::get_config().rocdecode_api_trace};
     auto rocjpeg_output = tool::rocjpeg_buffered_output_t{tool::get_config().rocjpeg_api_trace};
+    auto rocshmem_output =
+        tool::rocshmem_buffered_output_t{tool::get_config().rocshmem_api_trace};
     auto pc_sampling_stochastic_output =
         tool::pc_sampling_stochastic_buffered_output_t{tool::get_config().pc_sampling_stochastic};
 
@@ -3430,6 +3447,7 @@ generate_output(cleanup_mode _cleanup_mode)
     generate_output(rocdecode_output, outdata, contributions, cleanups);
     generate_output(pc_sampling_host_trap_output, outdata, contributions, cleanups);
     generate_output(rocjpeg_output, outdata, contributions, cleanups);
+    generate_output(rocshmem_output, outdata, contributions, cleanups);
     generate_output(pc_sampling_stochastic_output, outdata, contributions, cleanups);
     generate_output(spm_counters_output, outdata, contributions, cleanups);
 
@@ -4097,6 +4115,7 @@ rocprofiler_configure(uint32_t                 version,
     if(tool::get_config().marker_api_trace) libs |= ROCPROFILER_MARKER_CORE_TABLE;
     if(tool::get_config().rocdecode_api_trace) libs |= ROCPROFILER_ROCDECODE_TABLE;
     if(tool::get_config().rocjpeg_api_trace) libs |= ROCPROFILER_ROCJPEG_TABLE;
+    if(tool::get_config().rocshmem_api_trace) libs |= ROCPROFILER_ROCSHMEM_TABLE;
 
     ROCPROFILER_CALL(
         rocprofiler_at_intercept_table_registration(api_timestamps_callback, libs, nullptr),
