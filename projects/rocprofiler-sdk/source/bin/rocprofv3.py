@@ -1666,6 +1666,7 @@ def run(app_args, args, **kwargs):
             "ompt_trace",
             "rocdecode_trace",
             "rocjpeg_trace",
+            "rocshmem_trace",
         ):
             setattrifnone(args, itr, True)
 
@@ -1682,6 +1683,7 @@ def run(app_args, args, **kwargs):
             "ompt_trace",
             "rocdecode_trace",
             "rocjpeg_trace",
+            "rocshmem_trace",
         ):
             setattrifnone(args, itr, True)
 
