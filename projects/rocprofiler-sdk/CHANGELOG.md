@@ -85,6 +85,11 @@ Full documentation for ROCprofiler-SDK is available at [rocm.docs.amd.com/projec
   - Enables profiling long-running or production-style jobs at the point of interest.
   - Results integrate with the existing PC sampling analysis flow.
 
+- rocSHMEM API tracing support:
+  - `--rocshmem-trace` flag to enable tracing of rocSHMEM host-stream APIs.
+  - Included in the `--sys-trace` and `--runtime-trace` aggregate tracing options.
+  - Emits a `rocshmem_api_trace.csv` per process and contributes events to the JSON, Perfetto (`.pftrace`), and OTF2 output formats.
+
 **Documentation:**
 
 - Added marker-controlled thread tracing section to the thread trace how-to guide.
