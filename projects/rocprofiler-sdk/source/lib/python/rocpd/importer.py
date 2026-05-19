@@ -34,7 +34,7 @@ import sqlite3
 from .schema import RocpdSchema
 from . import libpyrocpd
 
-__all__ = ["RocpdImportData", "execute_statement"]
+__all__ = ["RocpdImportData", "execute_statement", "setup_blob_views"]
 
 
 def internal_init(_input, _output, skip_auto_merge, automerge_limit):
@@ -131,6 +131,170 @@ def execute_statement(conn, statement, is_script=False):
         raise err
 
 
+
+def _blob_struct_fmt(size: int, data_type: str, is_signed: int) -> str:
+    """Return a struct.unpack_from format character for a single blob field.
+
+    SQLite stores C integers as UINT8/uint8_t/INT32/uint32_t etc.  The C++
+    writer also uses the raw C type name ("uint32_t", "uint8_t") as the
+    data_type string.  We normalise both spellings here.
+    """
+    dt = data_type.lower().replace("_t", "").replace(" ", "")
+    # Explicit float / double
+    if dt in ("float", "f32", "fp32"):
+        return "f"
+    if dt in ("double", "f64", "fp64"):
+        return "d"
+    # Integer: pick format char by (size, signed)
+    signed_map   = {1: "b", 2: "h", 4: "i", 8: "q"}
+    unsigned_map = {1: "B", 2: "H", 4: "I", 8: "Q"}
+    table = signed_map if is_signed else unsigned_map
+    return table.get(size, "B")
+
+
+def setup_blob_views(conn):
+    """Create a TEMP VIEW for every blob schema registered in the database.
+
+    For each row in rocpd_info_blob_schema the function:
+
+    1. Reads the field dictionary from rocpd_info_blob_field.
+    2. Registers the rocpd_blob_field(blob, schema_id, field_name) SQLite scalar
+       function (once per connection) backed by struct.unpack_from.  The field
+       metadata is captured in a closure so no DB query is needed at decode time.
+    3. Creates a TEMP VIEW named ``{source_table}_decoded`` that LEFT-JOINs the
+       domain table with rocpd_blob_event and exposes every packed field as a
+       plain SQL column.
+
+    The view is created with ``IF NOT EXISTS`` so calling this function more than
+    once on the same connection is safe.
+
+    This function is called automatically by ``_create_meta_views`` which is
+    itself called inside ``internal_init``, so every subcommand that constructs a
+    ``RocpdImportData`` instance receives the decoded views for free.
+    """
+    import struct as _struct
+    import sqlite3
+
+    # ------------------------------------------------------------------
+    # Guard: if the three blob-schema tables are absent (e.g. older rpd
+    # that was collected before this feature was added) do nothing.
+    # ------------------------------------------------------------------
+    try:
+        schemas = conn.execute(
+            "SELECT id, source_table, byte_order FROM rocpd_info_blob_schema"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return  # blob schema tables not present in this database
+
+    if not schemas:
+        return  # no blob types registered
+
+    # ------------------------------------------------------------------
+    # Step 1 – Build a field-metadata cache keyed by (schema_id, field_name).
+    # The cache is shared by the scalar function registered in Step 2, so the
+    # function never needs to query the database at call time.
+    # ------------------------------------------------------------------
+    # field_cache[(schema_id, field_name)] = (byte_offset, endian_prefix, fmt_char)
+    field_cache: dict = {}
+
+    for schema_id, source_table, byte_order in schemas:
+        endian = "<" if (byte_order or "little").startswith("l") else ">"
+        try:
+            fields = conn.execute(
+                "SELECT name, offset, size, data_type, is_signed "
+                "FROM rocpd_info_blob_field WHERE schema_id = ? ORDER BY offset, id",
+                (schema_id,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            fields = []
+
+        for name, offset, size, data_type, is_signed in fields:
+            fmt = _blob_struct_fmt(size, data_type or "uint8_t", is_signed or 0)
+            field_cache[(schema_id, name)] = (offset, endian, fmt)
+
+    # ------------------------------------------------------------------
+    # Step 2 – Register rocpd_blob_field(blob, schema_id, field_name).
+    # SQLite calls this function for every projected row that references one of
+    # the generated columns in a decoded view.  The closure over field_cache
+    # means no database round-trip is needed per call.
+    # ------------------------------------------------------------------
+    def _rocpd_blob_field(blob: bytes, schema_id: int, field_name: str):
+        if blob is None:
+            return None
+        entry = field_cache.get((schema_id, field_name))
+        if entry is None:
+            return None
+        offset, endian, fmt = entry
+        try:
+            return _struct.unpack_from(endian + fmt, blob, offset)[0]
+        except _struct.error:
+            return None
+
+    # deterministic=True lets SQLite cache and optimise calls across a query.
+    conn.create_function("rocpd_blob_field", 3, _rocpd_blob_field, deterministic=True)
+
+    # ------------------------------------------------------------------
+    # Step 3 – Create one TEMP VIEW per registered schema.
+    # View name  : {source_table}_decoded
+    # Domain cols: every column of source_table except blob_event_id
+    # Blob cols  : one expression per field, evaluated via rocpd_blob_field()
+    # ------------------------------------------------------------------
+    for schema_id, source_table, _byte_order in schemas:
+        # Discover domain-table column names via PRAGMA table_info.
+        # The TEMP VIEW created by _create_temp_views uses the base name
+        # (e.g. "rocpd_gpu_pc_sample") so PRAGMA works against it.
+        try:
+            domain_cols = [
+                row[1]
+                for row in conn.execute(f"PRAGMA table_info({source_table})").fetchall()
+            ]
+        except sqlite3.OperationalError:
+            domain_cols = []
+
+        # Filter out the FK column itself from the domain projection; the
+        # decoded view consumers never need the raw integer id.
+        domain_select = ",\n    ".join(
+            f"s.{col}" for col in domain_cols if col != "blob_event_id"
+        )
+
+        # Build one expression per field registered for this schema.
+        try:
+            field_names = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM rocpd_info_blob_field "
+                    "WHERE schema_id = ? ORDER BY offset, id",
+                    (schema_id,),
+                ).fetchall()
+            ]
+        except sqlite3.OperationalError:
+            field_names = []
+
+        blob_select = ",\n    ".join(
+            f"rocpd_blob_field(e.blob, {schema_id}, '{name}') AS {name}"
+            for name in field_names
+        )
+
+        separator = ",\n    " if domain_select and blob_select else ""
+        view_name = f"{source_table}_decoded"
+
+        view_sql = (
+            f"CREATE TEMP VIEW IF NOT EXISTS {view_name} AS\n"
+            f"SELECT\n"
+            f"    {domain_select}{separator}\n"
+            f"    {blob_select}\n"
+            f"FROM {source_table} s\n"
+            f"LEFT JOIN rocpd_blob_event e ON e.id = s.blob_event_id"
+        )
+        try:
+            conn.execute(view_sql)
+        except sqlite3.OperationalError as exc:
+            import sys
+            sys.stderr.write(
+                f"setup_blob_views: could not create {view_name}: {exc}\n"
+            )
+
+
 def _create_temp_views(connection, input):
     """Create temporary unified views from multiple database files."""
 
@@ -203,3 +367,4 @@ def _create_meta_views(connection):
     schema = RocpdSchema()
     sql_script = schema.views.replace("CREATE VIEW", "CREATE TEMPORARY VIEW")
     execute_statement(connection, sql_script, is_script=True)
+    setup_blob_views(connection)

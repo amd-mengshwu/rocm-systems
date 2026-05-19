@@ -737,6 +737,7 @@ SELECT
     PS.tid,
     A.name AS agent_name,
     A.type AS agent_type,
+    CAST(json_extract(A.extdata, '$.gfx_target_version') AS INTEGER) AS agent_gfx_target_version,
     PS.dispatch_id,
     PS.stack_id,
     PS.parent_stack_id,
@@ -755,8 +756,7 @@ SELECT
     PS.inst_type,
     PS.stall_reason,
     PS.wave_count,
-    PS.extdata_schema_id,
-    PS.extdata_blob
+    PS.blob_event_id
 FROM
     `rocpd_gpu_pc_sample{{uuid}}` PS
     LEFT JOIN `rocpd_info_agent{{uuid}}` A ON A.id = PS.agent_id

@@ -158,3 +158,10 @@ SELECT
     *
 FROM
     `rocpd_gpu_pc_sample{{uuid}}`;
+
+CREATE VIEW IF NOT EXISTS
+    `rocpd_blob_event` AS
+SELECT
+    *
+FROM
+    `rocpd_blob_event{{uuid}}`;

@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS
         "nid" INTEGER NOT NULL,
         "pid" INTEGER NOT NULL,
         "name" TEXT NOT NULL,
+        "source_table" TEXT NOT NULL,
         "description" TEXT,
         "byte_order" TEXT CHECK ("byte_order" IN ('little', 'big')),
         "alignment" INTEGER NOT NULL,
@@ -167,6 +168,20 @@ CREATE TABLE IF NOT EXISTS
         "description" TEXT,
         "extdata" JSONB DEFAULT "{}" NOT NULL,
         FOREIGN KEY (schema_id) REFERENCES `rocpd_info_blob_schema{{uuid}}` (id) ON UPDATE CASCADE
+    );
+
+-- Standalone blob event storage (one row per blob instance)
+CREATE TABLE IF NOT EXISTS
+    `rocpd_blob_event{{uuid}}` (
+        "id"        INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+        "guid"      TEXT    DEFAULT "{{guid}}" NOT NULL,
+        "nid"       INTEGER NOT NULL,
+        "pid"       INTEGER NOT NULL,
+        "schema_id" INTEGER NOT NULL,
+        "blob"      BLOB    NOT NULL,
+        FOREIGN KEY (schema_id) REFERENCES `rocpd_info_blob_schema{{uuid}}` (id) ON UPDATE CASCADE,
+        FOREIGN KEY (nid) REFERENCES `rocpd_info_node{{uuid}}` (id) ON UPDATE CASCADE,
+        FOREIGN KEY (pid) REFERENCES `rocpd_info_process{{uuid}}` (id) ON UPDATE CASCADE
     );
 
 CREATE TABLE IF NOT EXISTS
@@ -298,16 +313,14 @@ CREATE TABLE IF NOT EXISTS
         "inst_type" INTEGER,
         "stall_reason" INTEGER,
         "wave_count" INTEGER,
-        "extdata_schema_id" INTEGER,
-        "extdata_blob" BLOB,
+        "blob_event_id"    INTEGER,
         FOREIGN KEY (nid) REFERENCES `rocpd_info_node{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (pid) REFERENCES `rocpd_info_process{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (tid) REFERENCES `rocpd_info_thread{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (agent_id) REFERENCES `rocpd_info_agent{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (event_id) REFERENCES `rocpd_event{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (code_object_id) REFERENCES `rocpd_info_code_object{{uuid}}` (id) ON UPDATE CASCADE,
-        FOREIGN KEY (extdata_schema_id) REFERENCES `rocpd_info_blob_schema{{uuid}}` (id)
-            ON UPDATE CASCADE
+        FOREIGN KEY (blob_event_id) REFERENCES `rocpd_blob_event{{uuid}}` (id) ON UPDATE CASCADE
     );
 
 -- Region with a start/stop on the same thread (CPU)

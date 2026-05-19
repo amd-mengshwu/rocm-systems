@@ -2128,6 +2128,7 @@ write_rocpd(
                                  insert_value("nid", node_id),
                                  insert_value("pid", this_pid),
                                  insert_value("name", std::string{"pc_sample_extdata_v1"}),
+                                 insert_value("source_table", std::string{"rocpd_gpu_pc_sample"}),
                                  insert_value("description",
                                               std::string{"PC sampling arch-specific fields (packed)"},
                                               allow_empty_string{}),
@@ -2238,6 +2239,29 @@ write_rocpd(
         auto _sqlgenperf_rocpd = get_simple_timer("rocpd_gpu_pc_sample");
         auto _deferred         = sql::deferred_transaction{db.conn};
 
+        // Flush any pending rocpd_blob_event rows committed by a prior call
+        // (e.g. host-trap followed by stochastic) so that MAX(id) is accurate.
+        const auto blob_event_table = replace_uuid(db, "rocpd_blob_event{{uuid}}");
+        if(auto it = db.pending_batches.find(blob_event_table); it != db.pending_batches.end())
+            flush_pending_insert_batch(db, it->second);
+
+        // Pre-compute the starting blob_event id for this batch.  Within a
+        // deferred transaction, SQLite AUTOINCREMENT always assigns MAX(id)+1,
+        // so we can compute IDs ahead of time without flushing after every row.
+        uint64_t next_blob_event_id = 1;
+        {
+            sqlite3_stmt* max_stmt = nullptr;
+            const auto    max_sql  = fmt::format(
+                "SELECT COALESCE(MAX(id), 0) FROM {}", blob_event_table);
+            if(sqlite3_prepare_v2(db.conn, max_sql.c_str(), -1, &max_stmt, nullptr) == SQLITE_OK)
+            {
+                if(sqlite3_step(max_stmt) == SQLITE_ROW)
+                    next_blob_event_id =
+                        static_cast<uint64_t>(sqlite3_column_int64(max_stmt, 0)) + 1;
+                sqlite3_finalize(max_stmt);
+            }
+        }
+
         for(auto pitr : pc_sampling_gen)
         {
             for(const auto& itr : pc_sampling_gen.get(pitr))
@@ -2320,10 +2344,23 @@ write_rocpd(
 #undef SET_ARB_FIELD
                 }
 
-                // Build a raw-bytes blob for the extdata column (stored as SQLite BLOB,
-                // not TEXT, so the Python decoder can unpack it with struct.unpack_from).
+                // Serialise the packed struct to raw bytes for rocpd_blob_event.
                 auto blob_bytes = std::string(reinterpret_cast<const char*>(&extdata),
                                               sizeof(pc_sample_extdata_v1));
+
+                // Insert one row into rocpd_blob_event; use the pre-computed
+                // sequential ID so we can reference it in the pc_sample row
+                // without an extra flush-and-rowid round-trip per sample.
+                const auto current_blob_event_id = next_blob_event_id++;
+                get_insert_statement(
+                    db,
+                    "rocpd_blob_event{{uuid}}",
+                    {
+                        insert_value("nid", node_id),
+                        insert_value("pid", this_pid),
+                        insert_value("schema_id", static_cast<int64_t>(ext_schema_id)),
+                        insert_blob_value("blob", std::move(blob_bytes)),
+                    });
 
                 get_insert_statement(
                     db,
@@ -2350,8 +2387,8 @@ write_rocpd(
                         insert_nullable_value("inst_type", inst_type),
                         insert_nullable_value("stall_reason", stall_reason),
                         insert_nullable_value("wave_count", wave_count),
-                        insert_value("extdata_schema_id", ext_schema_id),
-                        insert_blob_value("extdata_blob", std::move(blob_bytes)),
+                        insert_value("blob_event_id",
+                                     static_cast<int64_t>(current_blob_event_id)),
                     });
             }
         }
