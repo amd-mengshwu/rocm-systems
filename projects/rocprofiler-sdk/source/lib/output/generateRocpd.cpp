@@ -2377,7 +2377,11 @@ write_rocpd(
                         insert_value("sampling_method", sampling_method),
                         insert_value("exec_mask", static_cast<int64_t>(record.exec_mask)),
                         insert_value("inst_index", itr.inst_index),
-                        insert_value("code_object_id", record.pc.code_object_id),
+                        insert_nullable_value(
+                            "code_object_id",
+                            record.pc.code_object_id != 0
+                                ? std::optional<uint64_t>{record.pc.code_object_id}
+                                : std::optional<uint64_t>{}),
                         insert_value("code_object_offset", record.pc.code_object_offset),
                         insert_value("wave_in_group", record.wave_in_group),
                         insert_value("workgroup_id_x", record.workgroup_id.x),

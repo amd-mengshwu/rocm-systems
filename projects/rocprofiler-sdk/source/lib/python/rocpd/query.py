@@ -255,22 +255,46 @@ def _setup_pc_sampling_view(
         "rocpd_pc_blob_field", 3, _make_pc_blob_field_function(schema_map)
     )
 
-    computed_columns = ",\n        ".join(
-        [
-            f"rocpd_pc_blob_field(extdata_blob, extdata_schema_id, '{itr}') AS \"{itr}\""
-            for itr in selected_blob_fields
-        ]
-    )
+    # Detect whether the table uses the new blob_event_id FK (new schema) or the
+    # legacy extdata_blob/extdata_schema_id inline columns (old schema).
+    use_blob_event = "blob_event_id" in base_columns
 
-    conn.execute(f"DROP VIEW IF EXISTS {view_name}")
-    # Use execute (not executescript) to avoid implicitly committing any open transaction.
-    conn.execute(f"""
+    if use_blob_event:
+        blob_event_table = _resolve_table_name(conn, "rocpd_blob_event")
+        if blob_event_table is None:
+            return query
+        computed_columns = ",\n        ".join(
+            [
+                f"rocpd_pc_blob_field(BE.blob, BE.schema_id, '{itr}') AS \"{itr}\""
+                for itr in selected_blob_fields
+            ]
+        )
+        view_body = f"""
         CREATE TEMP VIEW {view_name} AS
         SELECT
             {sample_table}.*,
             {computed_columns}
         FROM {sample_table}
-        """)
+        LEFT JOIN {blob_event_table} BE ON BE.id = {sample_table}.blob_event_id
+        """
+    else:
+        computed_columns = ",\n        ".join(
+            [
+                f"rocpd_pc_blob_field(extdata_blob, extdata_schema_id, '{itr}') AS \"{itr}\""
+                for itr in selected_blob_fields
+            ]
+        )
+        view_body = f"""
+        CREATE TEMP VIEW {view_name} AS
+        SELECT
+            {sample_table}.*,
+            {computed_columns}
+        FROM {sample_table}
+        """
+
+    conn.execute(f"DROP VIEW IF EXISTS {view_name}")
+    # Use execute (not executescript) to avoid implicitly committing any open transaction.
+    conn.execute(view_body)
 
     if re.search(rf"(?i)\b{_PC_SAMPLE_TABLE}\b", query) and not re.search(
         rf"(?i)\b{re.escape(view_name)}\b", query
