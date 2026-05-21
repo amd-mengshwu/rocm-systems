@@ -804,9 +804,38 @@ typedef struct rocprofiler_kernel_dispatch_info_t
     rocprofiler_dispatch_id_t dispatch_id;  ///< unique id for each dispatch
     uint32_t                  private_segment_size;
     uint32_t                  group_segment_size;
-    rocprofiler_dim3_t        workgroup_size;        ///< runtime workgroup size (grid * threads)
-    rocprofiler_dim3_t        grid_size;             ///< runtime grid size
-    uint8_t                   reserved_padding[56];  // reserved for extensions w/o ABI break
+    rocprofiler_dim3_t        workgroup_size;  ///< runtime workgroup size (grid * threads)
+    rocprofiler_dim3_t        grid_size;       ///< runtime grid size
+
+    /// @brief Process-monotonic ID of the executable HIP graph that produced this dispatch.
+    ///
+    /// Zero when this dispatch did not originate from a `hipGraphLaunch`. When non-zero,
+    /// this ID is assigned at `hipGraphInstantiate*` time and is stable for the life of
+    /// that `hipGraphExec_t`. IDs are never reused within a process.
+    uint64_t                  graph_exec_id;
+
+    /// @brief Zero-based ordinal of this dispatch within its `hipGraphLaunch` call.
+    ///
+    /// Zero when this dispatch did not originate from a graph launch. Use `graph_exec_id`
+    /// (not this field) to detect "not from a graph" — `graph_node_id == 0` is legitimate
+    /// for the first dispatch of a real launch.
+    ///
+    /// The same logical graph node produces the same `graph_node_id` across launches of
+    /// one `hipGraphExec_t` IF AND ONLY IF:
+    ///   1. Segmented scheduling is in use (default; suppressed by
+    ///      `DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING=0`).
+    ///   2. `AMD_DIRECT_DISPATCH=1` (default on Linux).
+    ///   3. The same host thread is the sole launcher of that `hipGraphExec_t`.
+    ///   4. The graph has not been updated via `hipGraphExecUpdate` between launches.
+    ///
+    /// Outside these conditions, `graph_node_id` remains a valid per-dispatch ordinal
+    /// within a single launch but is not guaranteed to identify the same source node
+    /// across launches. In non-direct-dispatch / classic-scheduling modes, dispatches
+    /// from a graph may have `graph_exec_id == 0` (attribution lost). See the
+    /// rocprofiler-sdk HIP graph attribution documentation for the full contract.
+    uint64_t                  graph_node_id;
+
+    uint8_t                   reserved_padding[40];  // reserved for extensions w/o ABI break
 
     /// @var group_segment_size
     /// @brief Runtime group memory segment size. Size of  group segment memory (static + runtime)
