@@ -24,6 +24,7 @@
 
 #include "lib/common/utility.hpp"
 #include "lib/rocprofiler-sdk/agent.hpp"
+#include "lib/rocprofiler-sdk/context/correlation_id.hpp"
 #include "lib/rocprofiler-sdk/hip/hip.hpp"
 #include "lib/rocprofiler-sdk/tracing/tracing.hpp"
 
@@ -236,12 +237,24 @@ wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
             s.graph_exec_id = assign_graph_exec_id(exec);
         }
         s.thread_id      = common::get_tid();
-        // NOTE: correlation_id is left 0 for now. The spec's correlation_id-join
-        // contract requires reading the HIP API tracing TLS that is built up by
-        // the outer HIP wrapper, but no such TLS accessor exists yet in hip.cpp.
-        // A follow-up will add the accessor; the GRAPH_LAUNCH record is still
-        // emitted, it just won't join cleanly to HIP API records until then.
-        s.correlation_id = 0;
+        // Spec §7 item 9: GRAPH_LAUNCH.correlation_id must equal the internal
+        // correlation_id of the originating HIP_RUNTIME_API record so consumers
+        // can join graph_launch_trace.csv to hip_api_trace.csv on Correlation_Id.
+        //
+        // The outer HIP API tracing wrapper (hip::hip_api_impl::functor in
+        // hip.cpp) constructs the correlation_id via
+        // correlation_tracing_service::construct(), which pushes it onto the
+        // per-thread stack maintained in context/correlation_id.cpp BEFORE
+        // calling the wrapped function (= this lambda). The matching pop runs
+        // AFTER the wrapped function returns. So while we are executing here
+        // inside the HIP API call, get_latest_correlation_id() returns exactly
+        // that internal_corr_id. (Returns nullptr only if no HIP API wrapper is
+        // active on this thread — e.g., a direct call into hipGraphLaunch from
+        // a non-traced context — in which case 0 is the right sentinel.)
+        if(auto* cid = ::rocprofiler::context::get_latest_correlation_id())
+            s.correlation_id = cid->internal;
+        else
+            s.correlation_id = 0;
         s.start_ts       = rocprofiler_timestamp_t{common::timestamp_ns()};
 
         // Resolve agent_id from the *launch stream* (spec §4.2). The GRAPH_LAUNCH

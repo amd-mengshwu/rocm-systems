@@ -213,14 +213,10 @@ def test_graph_launch_correlation_joins_to_hip_api(
     accepted_names = {"hipGraphLaunch", "hipGraphLaunch_spt"}
     for gr in graph_launch_input_data:
         corr = gr["Correlation_Id"]
-        # KNOWN follow-up: until the HIP API correlation_id TLS accessor is wired
-        # (deferred from Task 9), GRAPH_LAUNCH records carry correlation_id=0 instead
-        # of the HIP API call's id. Skip the join assertion if correlation_id is 0.
-        if corr == "0" or corr == "":
-            pytest.skip(
-                "GRAPH_LAUNCH correlation_id is 0 (HIP API correlation TLS "
-                "accessor not yet wired; see Task 9 follow-up)"
-            )
+        assert corr not in (
+            "0",
+            "",
+        ), f"GRAPH_LAUNCH row has empty/zero Correlation_Id: {gr}"
         assert (
             corr in api_by_corr
         ), f"GRAPH_LAUNCH Correlation_Id {corr} does not appear in HIP API CSV"
