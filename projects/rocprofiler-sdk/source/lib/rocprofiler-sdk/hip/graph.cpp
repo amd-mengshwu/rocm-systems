@@ -23,8 +23,13 @@
 #include "lib/rocprofiler-sdk/hip/graph.hpp"
 
 #include "lib/common/utility.hpp"
+#include "lib/rocprofiler-sdk/agent.hpp"
+#include "lib/rocprofiler-sdk/hip/hip.hpp"
 
+#include <rocprofiler-sdk/agent.h>
 #include <rocprofiler-sdk/hip/runtime_api_id.h>  // pulls in <hip/amd_detail/hip_api_trace.hpp>
+
+#include <hip/hip_runtime_api.h>
 
 #include <atomic>
 #include <deque>
@@ -106,6 +111,58 @@ wrap_destroy(RetT (*next)(::hipGraphExec_t))
 // out by current_launch_state() remain valid as nested launches push.
 thread_local std::deque<launch_state> g_launch_stack;
 
+// Resolve the launch stream's HIP device ordinal to a rocprofiler_agent_id_t.
+//
+// Implementation notes:
+//   * We must use the *saved* (un-wrapped) HIP dispatch table to avoid re-
+//     entering rocprofiler's own tracing wrappers from inside hipGraphLaunch
+//     -- doing so would emit a spurious HIP_RUNTIME_API record for the helper
+//     query and could deadlock or misattribute callbacks.
+//   * For a non-null stream we call `hipStreamGetDevice`; for the default
+//     stream (nullptr / hipStreamLegacy / hipStreamPerThread) we fall back to
+//     the thread's current device via `hipGetDevice`.
+//   * GPU agent ordinal = `logical_node_type_id` (this is the type-relative
+//     GPU index post-cgroups/ROCR_VISIBLE_DEVICES filtering, which matches
+//     HIP's device numbering -- see source/docs/how-to/advanced-rocprofv3-options.rst).
+//   * Returns {0} on any failure; callers must tolerate that (the GRAPH_LAUNCH
+//     record will then carry agent_id.handle == 0, but this is strictly better
+//     than crashing in generateCSV's get_agent_index).
+rocprofiler_agent_id_t
+resolve_launch_stream_agent(::hipStream_t stream)
+{
+    auto& saved_table = ::rocprofiler::hip::get_table();
+    auto* runtime     = saved_table.runtime;
+    if(runtime == nullptr) return rocprofiler_agent_id_t{.handle = 0};
+
+    int device_id = -1;
+    // Default-stream sentinels (nullptr, hipStreamLegacy=1, hipStreamPerThread=2)
+    // do not have a per-stream device binding in HIP; use the current device.
+    auto is_default_stream = (stream == nullptr || stream == hipStreamLegacy ||
+                              stream == hipStreamPerThread);
+
+    if(!is_default_stream && runtime->hipStreamGetDevice_fn != nullptr)
+    {
+        if(runtime->hipStreamGetDevice_fn(stream, &device_id) != hipSuccess) device_id = -1;
+    }
+
+    if(device_id < 0 && runtime->hipGetDevice_fn != nullptr)
+    {
+        if(runtime->hipGetDevice_fn(&device_id) != hipSuccess) device_id = -1;
+    }
+
+    if(device_id < 0) return rocprofiler_agent_id_t{.handle = 0};
+
+    for(const auto* a : ::rocprofiler::agent::get_agents())
+    {
+        if(a != nullptr && a->type == ROCPROFILER_AGENT_TYPE_GPU &&
+           a->logical_node_type_id == device_id)
+        {
+            return a->id;
+        }
+    }
+    return rocprofiler_agent_id_t{.handle = 0};
+}
+
 // Forward decl: real body lands in Task 11. Defined as empty stub here so this
 // task builds standalone. Task 11 will replace the stub body, keeping it in
 // the same anonymous namespace so unqualified name lookup from wrap_launch
@@ -151,6 +208,21 @@ wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
         // emitted, it just won't join cleanly to HIP API records until then.
         s.correlation_id = 0;
         s.start_ts       = rocprofiler_timestamp_t{common::timestamp_ns()};
+
+        // Resolve agent_id from the *launch stream* (spec §4.2). The GRAPH_LAUNCH
+        // record summarizes the entire launch, so its agent_id must reflect the
+        // user-visible launch stream, not whatever internal HSA queue an arbitrary
+        // graph segment happens to dispatch on (in multi-device graphs they can
+        // differ). Stamping at launch enter also guarantees the value is correct
+        // regardless of whether the kernel-dispatch WriteInterceptor path runs
+        // (e.g., subscriber requests GRAPH_LAUNCH only, not KERNEL_DISPATCH).
+        //
+        // queue_id is left as the zero-initialized value: a graph launch is not
+        // bound to a single HW queue (multiple internal streams may be used for
+        // parallel branches), so there is no single defensible queue_id at the
+        // launch granularity. Consumers must not assume queue_id is meaningful
+        // for GRAPH_LAUNCH records.
+        s.agent_id = resolve_launch_stream_agent(stream);
 
         auto ret = next_func(exec, stream);
 

@@ -28,6 +28,7 @@
 #include "lib/common/utility.hpp"
 #include "lib/rocprofiler-sdk/code_object/code_object.hpp"
 #include "lib/rocprofiler-sdk/context/context.hpp"
+#include "lib/rocprofiler-sdk/hip/graph.hpp"
 #include "lib/rocprofiler-sdk/hsa/details/fmt.hpp"
 #include "lib/rocprofiler-sdk/hsa/hsa.hpp"
 #include "lib/rocprofiler-sdk/hsa/queue_controller.hpp"
@@ -107,7 +108,8 @@ bool
 context_filter(const context::context* ctx)
 {
     return (context_filter(ctx, ROCPROFILER_BUFFER_TRACING_KERNEL_DISPATCH) ||
-            context_filter(ctx, ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH));
+            context_filter(ctx, ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH) ||
+            context_filter(ctx, ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH));
 }
 
 bool
@@ -302,9 +304,15 @@ WriteInterceptor(const void* packets,
 
     auto& queue = *static_cast<Queue*>(data);
 
-    // We have no packets or no one who needs to be notified, do nothing.
+    // We have no packets or no one who needs to be notified, do nothing. The graph-launch
+    // check keeps the interceptor active when a hipGraphLaunch is in flight on this thread
+    // even if no consumer is subscribed to KERNEL_DISPATCH, so that the per-launch
+    // kernel_dispatch_count is still incremented (spec §4.2 subscription independence).
+    const bool graph_launch_active =
+        (::rocprofiler::hip::graph::current_launch_state() != nullptr);
     if(pkt_count == 0 ||
-       (queue.get_notifiers() == 0 && context::get_active_contexts(context_filter).empty()))
+       (queue.get_notifiers() == 0 && context::get_active_contexts(context_filter).empty() &&
+        !graph_launch_active))
     {
         writer(packets, pkt_count);
         return;
@@ -533,6 +541,34 @@ WriteInterceptor(const void* packets,
                           "failed to compute size field based on offset of reserved_padding field");
 
             auto dispatch_id = ++sequence_counter;
+
+            // Read the per-thread graph launch state (nullptr if not inside hipGraphLaunch).
+            // The counter increment and dispatch_count bump are NOT gated on any subscription
+            // state — required for spec §4.2 subscription independence.
+            auto graph_exec_id = uint64_t{0};
+            auto graph_node_id = uint64_t{0};
+            if(auto* gls = ::rocprofiler::hip::graph::current_launch_state(); gls != nullptr)
+            {
+                graph_exec_id = gls->graph_exec_id;
+                // Atomic increment so the counter is correct even if a nested host-callback
+                // node triggers concurrent dispatches (rare but possible).
+                graph_node_id = gls->node_counter.fetch_add(1, std::memory_order_relaxed);
+
+                // First-dispatch timestamp capture (Task 9's wrapper enter may not have set
+                // this; populate on first dispatch for completeness).
+                if(gls->dispatch_count == 0)
+                {
+                    gls->start_ts = rocprofiler_timestamp_t{common::timestamp_ns()};
+                }
+                ++gls->dispatch_count;
+
+                // NOTE: agent_id and queue_id are stamped at hipGraphLaunch enter
+                // (see hip/graph.cpp::wrap_launch). The GRAPH_LAUNCH record's
+                // agent_id reflects the *launch stream's* agent, not the per-
+                // dispatch queue's agent -- in multi-device graphs these can
+                // differ, and the launch-stream view is what spec §4.2 calls for.
+            }
+
             _packet_data.callback_record =
                 callback_record_t{sizeof(callback_record_t),
                                   rocprofiler_timestamp_t{0},
@@ -547,6 +583,8 @@ WriteInterceptor(const void* packets,
                                       .group_segment_size   = pkt_info.group_segment_size,
                                       .workgroup_size       = pkt_info.workgroup_size,
                                       .grid_size            = pkt_info.grid_size,
+                                      .graph_exec_id        = graph_exec_id,
+                                      .graph_node_id        = graph_node_id,
                                       .reserved_padding     = {0}}};
 
             {
