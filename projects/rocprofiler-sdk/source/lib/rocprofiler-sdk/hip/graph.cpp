@@ -22,10 +22,13 @@
 
 #include "lib/rocprofiler-sdk/hip/graph.hpp"
 
+#include <rocprofiler-sdk/hip/runtime_api_id.h>  // pulls in <hip/amd_detail/hip_api_trace.hpp>
+
 #include <atomic>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <utility>
 
 namespace rocprofiler
 {
@@ -60,6 +63,39 @@ forget_graph_exec(::hipGraphExec_t exec)
     std::unique_lock lock{g_map_mutex};
     g_exec_to_id.erase(exec);
 }
+
+// Each instantiation of wrap_instantiate has its own static next_func slot
+// because the 3 hipGraphInstantiate* APIs have different signatures (different
+// trailing Args...). The lambdas have no captures, so they convert to plain
+// function pointers via the unary +.
+template <typename RetT, typename... Args>
+auto
+wrap_instantiate(RetT (*next)(::hipGraphExec_t*, Args...))
+{
+    static auto next_func = next;
+    return +[](::hipGraphExec_t* out, Args... args) -> RetT {
+        auto ret = next_func(out, std::forward<Args>(args)...);
+        if(ret == hipSuccess && out != nullptr && *out != nullptr)
+        {
+            assign_graph_exec_id(*out);
+        }
+        return ret;
+    };
+}
+
+template <typename RetT>
+auto
+wrap_destroy(RetT (*next)(::hipGraphExec_t))
+{
+    static auto next_func = next;
+    return +[](::hipGraphExec_t exec) -> RetT {
+        // Remove the map entry BEFORE invoking the destroy: HIP destroys the
+        // handle even on most error paths, so dropping the mapping first is
+        // safer than risking a dangling key.
+        forget_graph_exec(exec);
+        return next_func(exec);
+    };
+}
 }  // namespace
 
 void
@@ -86,7 +122,29 @@ lookup_graph_exec_id(::hipGraphExec_t exec)
     return it == g_exec_to_id.end() ? 0 : it->second;
 }
 
-// Explicit template instantiations for update_table will be added in Task 8.
+// Explicit specialization for the HIP runtime dispatch table. Wraps the four
+// graph-lifecycle entry points so that:
+//   - successful hipGraphInstantiate* assigns a fresh monotonic graph_exec_id
+//   - hipGraphExecDestroy removes the map entry
+//
+// Each install site is guarded with a null check so older HIP runtimes that
+// lack one of these fn slots don't NPE.
+template <>
+void
+update_table(::HipDispatchTable* table)
+{
+    if(table == nullptr) return;
+    if(table->hipGraphInstantiate_fn)
+        table->hipGraphInstantiate_fn = wrap_instantiate(table->hipGraphInstantiate_fn);
+    if(table->hipGraphInstantiateWithFlags_fn)
+        table->hipGraphInstantiateWithFlags_fn =
+            wrap_instantiate(table->hipGraphInstantiateWithFlags_fn);
+    if(table->hipGraphInstantiateWithParams_fn)
+        table->hipGraphInstantiateWithParams_fn =
+            wrap_instantiate(table->hipGraphInstantiateWithParams_fn);
+    if(table->hipGraphExecDestroy_fn)
+        table->hipGraphExecDestroy_fn = wrap_destroy(table->hipGraphExecDestroy_fn);
+}
 
 }  // namespace graph
 }  // namespace hip
