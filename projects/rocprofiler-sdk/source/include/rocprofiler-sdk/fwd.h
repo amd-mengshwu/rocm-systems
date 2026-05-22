@@ -234,6 +234,7 @@ typedef enum rocprofiler_buffer_tracing_kind_t  // NOLINT(performance-enum-size)
     ROCPROFILER_BUFFER_TRACING_KFD_QUEUE,         ///< @see rocprofiler_kfd_queue_operation_t
     ROCPROFILER_BUFFER_TRACING_MARKER_CORE_RANGE_API,  ///< @see
                                                        ///< ::rocprofiler_marker_core_range_api_id_t
+    ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH,         ///< One record per hipGraphLaunch invocation
     ROCPROFILER_BUFFER_TRACING_LAST,
 
     /// @var ROCPROFILER_BUFFER_TRACING_HIP_RUNTIME_API_EXT

@@ -339,6 +339,44 @@ typedef struct rocprofiler_buffer_tracing_kernel_dispatch_record_t
 } rocprofiler_buffer_tracing_kernel_dispatch_record_t;
 
 /**
+ * @brief Summary record emitted once per successful hipGraphLaunch invocation.
+ *
+ * graph_exec_id matches the value stamped on the kernel dispatch records produced
+ * by this launch (see rocprofiler_kernel_dispatch_info_t::graph_exec_id).
+ *
+ * @note Per spec, attribution of dispatches to a graph launch (and therefore
+ *       the accuracy of kernel_dispatch_count) requires:
+ *       1. Segmented scheduling enabled (default; suppressed by
+ *          DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING=0),
+ *       2. AMD_DIRECT_DISPATCH=1 (Linux default), and
+ *       3. The same host thread that called hipGraphLaunch is the thread that
+ *          submits the AQL packets.
+ *       In other configurations, kernel_dispatch_count may understate the actual
+ *       number of GPU kernel dispatches produced by this launch, and dispatch
+ *       records may have graph_exec_id == 0 (no attribution). See the doc
+ *       comments on rocprofiler_kernel_dispatch_info_t::graph_node_id for full
+ *       determinism semantics.
+ *
+ * @note kernel_dispatch_count counts only kernel-dispatch records attributed to
+ *       this graph_exec_id. Memcpy / memset / event / host-callback graph nodes
+ *       are NOT counted in v1.
+ */
+typedef struct rocprofiler_buffer_tracing_graph_launch_record_t
+{
+    uint64_t                           size;   ///< size of this struct
+    rocprofiler_buffer_tracing_kind_t  kind;   ///< ::ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH
+    uint32_t                           operation;       ///< reserved; always 0
+    rocprofiler_async_correlation_id_t correlation_id;  ///< correlation ID of the hipGraphLaunch call
+    rocprofiler_thread_id_t            thread_id;       ///< thread that invoked hipGraphLaunch
+    rocprofiler_timestamp_t            start_timestamp; ///< timestamp of hipGraphLaunch enter
+    rocprofiler_timestamp_t            end_timestamp;   ///< timestamp of hipGraphLaunch return
+    rocprofiler_agent_id_t             agent_id;        ///< agent of the launch stream
+    rocprofiler_queue_id_t             queue_id;        ///< HW queue of the launch stream
+    uint64_t                           graph_exec_id;   ///< matches kernel dispatch info field
+    uint64_t                           kernel_dispatch_count; ///< kernel dispatches attributed to this launch; see note
+} rocprofiler_buffer_tracing_graph_launch_record_t;
+
+/**
  * @brief ROCProfiler Buffer Page Migration event record from KFD.
  */
 typedef struct rocprofiler_buffer_tracing_kfd_event_page_migrate_record_t
