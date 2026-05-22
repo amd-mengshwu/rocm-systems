@@ -25,8 +25,10 @@
 #include "lib/common/utility.hpp"
 #include "lib/rocprofiler-sdk/agent.hpp"
 #include "lib/rocprofiler-sdk/hip/hip.hpp"
+#include "lib/rocprofiler-sdk/tracing/tracing.hpp"
 
 #include <rocprofiler-sdk/agent.h>
+#include <rocprofiler-sdk/buffer_tracing.h>
 #include <rocprofiler-sdk/hip/runtime_api_id.h>  // pulls in <hip/amd_detail/hip_api_trace.hpp>
 
 #include <hip/hip_runtime_api.h>
@@ -163,15 +165,51 @@ resolve_launch_stream_agent(::hipStream_t stream)
     return rocprofiler_agent_id_t{.handle = 0};
 }
 
-// Forward decl: real body lands in Task 11. Defined as empty stub here so this
-// task builds standalone. Task 11 will replace the stub body, keeping it in
-// the same anonymous namespace so unqualified name lookup from wrap_launch
-// resolves to the same entity.
+// Forward decl kept so wrap_launch (defined below) resolves the name via
+// unqualified lookup within the same anonymous namespace. The real body is
+// installed below; this declaration only exists to allow wrap_launch to be
+// written above the definition.
 void
 emit_graph_launch_record(const launch_state& s, rocprofiler_timestamp_t end_ts);
 void
-emit_graph_launch_record(const launch_state&, rocprofiler_timestamp_t)
-{}
+emit_graph_launch_record(const launch_state& s, rocprofiler_timestamp_t end_ts)
+{
+    // GRAPH_LAUNCH is a buffer-only domain (no callback tracing kind defined
+    // for it), so use the single-DomainIdx populate_contexts overload that
+    // fills only buffered_contexts + external_correlation_ids.
+    auto tracing_data_v = tracing::tracing_data{};
+    tracing::populate_contexts(ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH,
+                               /*operation*/ 0u,
+                               tracing_data_v.buffered_contexts,
+                               tracing_data_v.external_correlation_ids);
+
+    if(tracing_data_v.buffered_contexts.empty()) return;
+
+    // rocprofiler_async_correlation_id_t has 2 fields (internal, external);
+    // execute_buffer_record_emplace overwrites correlation_id from its
+    // internal_corr_id + external_corr_ids args, so default-construct it here.
+    auto record = rocprofiler_buffer_tracing_graph_launch_record_t{
+        sizeof(rocprofiler_buffer_tracing_graph_launch_record_t),
+        ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH,
+        /*operation*/ 0u,
+        rocprofiler_async_correlation_id_t{},
+        s.thread_id,
+        s.start_ts,
+        end_ts,
+        s.agent_id,
+        s.queue_id,
+        s.graph_exec_id,
+        s.dispatch_count};  // launch_state's counter -> record's kernel_dispatch_count
+
+    tracing::execute_buffer_record_emplace(tracing_data_v.buffered_contexts,
+                                           s.thread_id,
+                                           s.correlation_id,
+                                           tracing_data_v.external_correlation_ids,
+                                           /*ancestor_corr_id*/ uint64_t{0},
+                                           ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH,
+                                           /*operation*/ 0u,
+                                           record);
+}
 
 // hipGraphLaunch and hipGraphLaunch_spt share the SAME signature. A naive
 // wrap_launch<RetT> template would collapse them into a single instantiation
