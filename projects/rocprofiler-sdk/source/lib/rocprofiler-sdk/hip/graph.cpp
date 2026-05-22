@@ -22,28 +22,71 @@
 
 #include "lib/rocprofiler-sdk/hip/graph.hpp"
 
+#include <atomic>
+#include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
+
 namespace rocprofiler
 {
 namespace hip
 {
 namespace graph
 {
+namespace
+{
+// Process-global map from hipGraphExec_t handle to a stable monotonic id.
+// Reads (one per launch) take the shared lock; writes (one per
+// hipGraphInstantiate*/hipGraphExecDestroy) take the exclusive lock.
+// Map sizes are small (graphs currently in flight; typically <100).
+std::shared_mutex                              g_map_mutex;
+std::unordered_map<::hipGraphExec_t, uint64_t> g_exec_to_id;
+std::atomic<uint64_t>                          g_next_graph_exec_id{1};  // 0 reserved = "not from a graph"
+
+uint64_t
+assign_graph_exec_id(::hipGraphExec_t exec)
+{
+    if(exec == nullptr) return 0;
+    auto id = g_next_graph_exec_id.fetch_add(1, std::memory_order_relaxed);
+    std::unique_lock lock{g_map_mutex};
+    g_exec_to_id[exec] = id;
+    return id;
+}
+
+void
+forget_graph_exec(::hipGraphExec_t exec)
+{
+    if(exec == nullptr) return;
+    std::unique_lock lock{g_map_mutex};
+    g_exec_to_id.erase(exec);
+}
+}  // namespace
+
 void
 init()
-{}
+{
+    // The map is default-constructed at static-init; nothing to do here yet.
+    // Future tasks may add lifecycle wiring (Task 8 hooks instantiate/destroy
+    // wrappers via update_table; this init() exists as a stable entry point).
+}
 
 launch_state*
 current_launch_state()
 {
+    // TLS not implemented yet — Task 9 adds it.
     return nullptr;
 }
 
-uint64_t lookup_graph_exec_id(::hipGraphExec_t) { return 0; }
+uint64_t
+lookup_graph_exec_id(::hipGraphExec_t exec)
+{
+    if(exec == nullptr) return 0;
+    std::shared_lock lock{g_map_mutex};
+    auto             it = g_exec_to_id.find(exec);
+    return it == g_exec_to_id.end() ? 0 : it->second;
+}
 
-// Explicit template instantiations for the HIP dispatch tables this module wraps
-// will be added in Task 8 once we've identified the exact TableT used by the
-// registration site. For now `update_table` has no definitions — call sites do
-// not yet exist.
+// Explicit template instantiations for update_table will be added in Task 8.
 
 }  // namespace graph
 }  // namespace hip
