@@ -108,9 +108,12 @@ wrap_destroy(RetT (*next)(::hipGraphExec_t))
 }
 
 // Per-thread stack of active hipGraphLaunch calls. std::deque (not std::vector)
-// because launch_state contains std::atomic<uint64_t> which is non-movable;
-// std::deque doesn't move existing elements on growth, so references handed
-// out by current_launch_state() remain valid as nested launches push.
+// for reference stability across nested launches: wrap_launch's lambda holds a
+// reference to g_launch_stack.back(), and if a graph host-callback node calls
+// back into wrap_launch on this thread it will push another launch_state.
+// std::deque does not move existing elements on growth, so the parent's
+// reference (and any pointer returned by current_launch_state()) remains
+// valid; std::vector would invalidate them on reallocation.
 thread_local std::deque<launch_state> g_launch_stack;
 
 // Resolve the launch stream's HIP device ordinal to a rocprofiler_agent_id_t.
@@ -165,12 +168,6 @@ resolve_launch_stream_agent(::hipStream_t stream)
     return rocprofiler_agent_id_t{.handle = 0};
 }
 
-// Forward decl kept so wrap_launch (defined below) resolves the name via
-// unqualified lookup within the same anonymous namespace. The real body is
-// installed below; this declaration only exists to allow wrap_launch to be
-// written above the definition.
-void
-emit_graph_launch_record(const launch_state& s, rocprofiler_timestamp_t end_ts);
 void
 emit_graph_launch_record(const launch_state& s, rocprofiler_timestamp_t end_ts)
 {
@@ -278,14 +275,6 @@ wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
     };
 }
 }  // namespace
-
-void
-init()
-{
-    // The map is default-constructed at static-init; nothing to do here yet.
-    // Future tasks may add lifecycle wiring (Task 8 hooks instantiate/destroy
-    // wrappers via update_table; this init() exists as a stable entry point).
-}
 
 launch_state*
 current_launch_state()

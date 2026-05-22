@@ -550,16 +550,10 @@ WriteInterceptor(const void* packets,
             if(auto* gls = ::rocprofiler::hip::graph::current_launch_state(); gls != nullptr)
             {
                 graph_exec_id = gls->graph_exec_id;
-                // Atomic increment so the counter is correct even if a nested host-callback
-                // node triggers concurrent dispatches (rare but possible).
-                graph_node_id = gls->node_counter.fetch_add(1, std::memory_order_relaxed);
+                graph_node_id = gls->node_counter++;
 
-                // First-dispatch timestamp capture (Task 9's wrapper enter may not have set
-                // this; populate on first dispatch for completeness).
-                if(gls->dispatch_count == 0)
-                {
-                    gls->start_ts = rocprofiler_timestamp_t{common::timestamp_ns()};
-                }
+                // start_ts is unconditionally populated by wrap_launch at hipGraphLaunch
+                // enter (hip/graph.cpp); no fallback required here.
                 ++gls->dispatch_count;
 
                 // NOTE: agent_id and queue_id are stamped at hipGraphLaunch enter

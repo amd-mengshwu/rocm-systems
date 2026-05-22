@@ -26,7 +26,6 @@
 
 #include <hip/hip_runtime_api.h>
 
-#include <atomic>
 #include <cstdint>
 
 namespace rocprofiler
@@ -38,16 +37,15 @@ namespace graph
 /**
  * @brief Per-launch state held in TLS while inside hipGraphLaunch.
  *
- * `node_counter` is std::atomic to remain correct if a graph host-callback
- * node from the launch thread triggers concurrent code that also reads/writes
- * the counter (rare but possible). The atomic makes launch_state
- * non-copyable and non-movable; storage MUST be a container that does not
- * require moving existing elements on growth — see g_launch_stack (std::deque).
+ * Lives on a per-thread stack (see g_launch_stack in graph.cpp) and is only
+ * ever read/written from the owning thread, so plain (non-atomic) members are
+ * sufficient: a graph host-callback node that re-enters hipGraphLaunch on a
+ * different thread would get its own TLS launch_state, not share this one.
  */
 struct launch_state
 {
     uint64_t                graph_exec_id = 0;
-    std::atomic<uint64_t>   node_counter{0};
+    uint64_t                node_counter  = 0;
     rocprofiler_timestamp_t start_ts       = {0};
     uint64_t                dispatch_count = 0;
     rocprofiler_agent_id_t  agent_id       = {0};
@@ -55,10 +53,6 @@ struct launch_state
     uint64_t                correlation_id = 0;
     rocprofiler_thread_id_t thread_id      = 0;
 };
-
-/// One-time initialization. Idempotent.
-void
-init();
 
 /// Returns the currently-active launch state on this thread, or nullptr.
 launch_state*
