@@ -80,7 +80,8 @@ write_perfetto(
     const generator<rocprofiler_buffer_tracing_rccl_api_record_t>&          rccl_api_gen,
     const generator<tool_buffer_tracing_memory_allocation_ext_record_t>&    memory_allocation_gen,
     const generator<rocprofiler_buffer_tracing_rocdecode_api_ext_record_t>& rocdecode_api_gen,
-    const generator<rocprofiler_buffer_tracing_rocjpeg_api_record_t>&       rocjpeg_api_gen)
+    const generator<rocprofiler_buffer_tracing_rocjpeg_api_record_t>&       rocjpeg_api_gen,
+    const generator<rocprofiler_buffer_tracing_graph_launch_record_t>&      graph_launch_gen)
 {
     namespace sdk = ::rocprofiler::sdk;
 
@@ -215,6 +216,12 @@ write_perfetto(
                     agent_queue_ids[itr.dispatch_info.agent_id].emplace(itr.dispatch_info.queue_id);
                 }
             }
+
+        // HIP graph attribution: GRAPH_LAUNCH records live on the host
+        // thread that called hipGraphLaunch; ensure those tids have a track.
+        for(auto ditr : graph_launch_gen)
+            for(auto itr : graph_launch_gen.get(ditr))
+                tids.emplace(itr.thread_id);
     }
 
     uint64_t nthrn = 0;
@@ -761,6 +768,21 @@ write_perfetto(
                                         }
                                     }
                                 }
+
+                                // HIP graph attribution: emit graph_exec_id
+                                // and graph_node_id as debug annotations on
+                                // dispatches that originated from a
+                                // hipGraphLaunch. The empty-on-zero gate uses
+                                // graph_exec_id (not graph_node_id) because
+                                // graph_node_id == 0 is legitimate for the
+                                // first node of a launch.
+                                if(info.graph_exec_id != 0)
+                                {
+                                    sdk::add_perfetto_annotation(
+                                        ctx, "graph_exec_id", info.graph_exec_id);
+                                    sdk::add_perfetto_annotation(
+                                        ctx, "graph_node_id", info.graph_node_id);
+                                }
                             });
                         TRACE_EVENT_END(
                             sdk::perfetto_category<sdk::category::kernel_dispatch>::name,
@@ -771,6 +793,47 @@ write_perfetto(
                 }
             }
         }
+
+        // HIP graph attribution: one Perfetto slice per hipGraphLaunch on
+        // the issuing thread's track. Spans the launch enter -> return
+        // (host-side timestamps from the GRAPH_LAUNCH buffer record), with
+        // graph_exec_id + kernel_dispatch_count as debug annotations. The
+        // slice nests visually with the per-launch kernel dispatch slices
+        // that fall within its time range.
+        for(auto ditr : graph_launch_gen)
+            for(auto itr : graph_launch_gen.get(ditr))
+            {
+                auto track_it = thread_tracks.find(itr.thread_id);
+                if(track_it == thread_tracks.end()) continue;
+                auto& track = track_it->second;
+
+                auto _name = fmt::format("hipGraphLaunch[exec={}]", itr.graph_exec_id);
+
+                TRACE_EVENT_BEGIN(sdk::perfetto_category<sdk::category::hip_api>::name,
+                                  ::perfetto::DynamicString{_name},
+                                  track,
+                                  itr.start_timestamp,
+                                  ::perfetto::Flow::ProcessScoped(itr.correlation_id.internal),
+                                  "begin_ns",
+                                  itr.start_timestamp,
+                                  "end_ns",
+                                  itr.end_timestamp,
+                                  "delta_ns",
+                                  (itr.end_timestamp - itr.start_timestamp),
+                                  "tid",
+                                  itr.thread_id,
+                                  "kind",
+                                  itr.kind,
+                                  "corr_id",
+                                  itr.correlation_id.internal,
+                                  "graph_exec_id",
+                                  itr.graph_exec_id,
+                                  "kernel_dispatch_count",
+                                  itr.kernel_dispatch_count);
+                TRACE_EVENT_END(
+                    sdk::perfetto_category<sdk::category::hip_api>::name, track, itr.end_timestamp);
+                tracing_session->FlushBlocking();
+            }
     }
 
     // counter tracks
