@@ -60,6 +60,11 @@ Full documentation for ROCprofiler-SDK is available at [rocm.docs.amd.com/projec
   - Fixed handling for special SVM location in KFD prefetch location reporting
   - Fixed parsing for queue restore events to handle both correct format (character '0') and broken driver format (NULL character '\0')
 
+- Per-graph-node attribution for HIP graph kernels (AIPROFSDK-855):
+  - `rocprofiler_kernel_dispatch_info_t` now carries `graph_exec_id` (process-monotonic ID assigned per `hipGraphExec_t`) and `graph_node_id` (0-based dispatch ordinal within one `hipGraphLaunch`). Both fields are zero for non-graph dispatches.
+  - New buffer tracing kind `ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH` emits a summary record per successful `hipGraphLaunch` invocation, with `kernel_dispatch_count` that counts kernel dispatches attributed to that launch.
+  - `graph_node_id` stability across launches requires segmented scheduling (default), `AMD_DIRECT_DISPATCH=1`, and single-threaded launching of one `hipGraphExec_t`. See `rocprofiler_kernel_dispatch_info_t` doc comments and the HIP graph attribution docs section for the full determinism contract.
+
 **rocprofv3 (CLI):**
 
 - Multi-pass counter collection support: Support for multiple `--pmc` flags to define separate counter groups for different profiling passes.
@@ -82,10 +87,15 @@ Full documentation for ROCprofiler-SDK is available at [rocm.docs.amd.com/projec
   - Enables profiling long-running or production-style jobs at the point of interest.
   - Results integrate with the existing PC sampling analysis flow.
 
+- HIP graph attribution columns and trace (AIPROFSDK-855):
+  - Kernel CSV gains `Graph_Exec_Id` and `Graph_Node_Id` columns (rendered empty for non-graph dispatches).
+  - New `--graph-launch-trace` CLI flag enables a new `graph_launch_trace.csv` containing per-launch summary records (one row per successful `hipGraphLaunch`).
+
 **Documentation:**
 
 - Added marker-controlled thread tracing section to the thread trace how-to guide.
 - Added cross-reference from ROCTx documentation to ATT with `selected-regions`.
+- Added HIP graph attribution section to the rocprofv3 how-to guide covering the new dispatch-info fields, the `--graph-launch-trace` flag, the determinism contract, and v1 limitations (AIPROFSDK-855).
 
 ### Changed
 

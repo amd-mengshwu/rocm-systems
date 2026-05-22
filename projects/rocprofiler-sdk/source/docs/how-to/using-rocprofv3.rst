@@ -317,6 +317,61 @@ Here are the contents of ``kernel_trace.csv`` file:
 
 For the description of the fields in the output file, see :ref:`output-file-fields`.
 
+HIP graph attribution
++++++++++++++++++++++
+
+When profiling HIP graphs, ``rocprofv3`` can attribute individual GPU kernel
+dispatches back to the specific graph node that produced them. This enables
+consumers to group dispatches across many graph launches by source node and
+to track per-node statistics over a workload's lifetime.
+
+Two new columns are added to the kernel dispatch CSV when ``--kernel-trace``
+is enabled:
+
+* ``Graph_Exec_Id``: process-monotonic ID assigned per ``hipGraphExec_t``.
+  Empty for dispatches that did not originate from a graph launch.
+* ``Graph_Node_Id``: 0-based ordinal within a single ``hipGraphLaunch`` call.
+  Empty for non-graph dispatches.
+
+A new ``--graph-launch-trace`` flag enables a separate
+``graph_launch_trace.csv`` containing one row per successful ``hipGraphLaunch``
+call, including ``Graph_Exec_Id``, ``Kernel_Dispatch_Count``, agent, queue,
+and launch timestamps. This flag is independent of ``--kernel-trace`` -- the
+launch summary records are emitted even when no kernel-dispatch tracing is
+subscribed.
+
+Determinism contract
+^^^^^^^^^^^^^^^^^^^^
+
+The ``Graph_Node_Id`` value identifies the same source node across launches of
+the same ``hipGraphExec_t`` **if and only if** all of the following hold:
+
+1. Segmented scheduling is in use (default; suppressed by
+   ``DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING=0``).
+2. ``AMD_DIRECT_DISPATCH=1`` (default on Linux).
+3. The same host thread is the sole launcher of that ``hipGraphExec_t``.
+4. The graph has not been updated via ``hipGraphExecUpdate`` between launches.
+
+Outside these conditions ``Graph_Node_Id`` remains a valid per-dispatch
+ordinal within one launch but is not guaranteed to identify the same node
+across launches. In ``DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING=0`` or
+``AMD_DIRECT_DISPATCH=0`` modes, kernel dispatches from a graph may have
+``Graph_Exec_Id`` of zero (no attribution); ``Kernel_Dispatch_Count`` on the
+``GRAPH_LAUNCH`` summary record may then under-report the actual kernel
+count.
+
+Limitations in v1
+^^^^^^^^^^^^^^^^^
+
+* Only kernel graph nodes are attributed. Memcpy, memset, event-record/wait,
+  host-callback, and external-semaphore graph nodes are not stamped or counted.
+* ``Graph_Exec_Id`` is per-``hipGraphExec_t``. Two ``hipGraphInstantiate``
+  calls on the same source ``hipGraph_t`` produce different IDs; consumers
+  wanting cross-instantiation grouping must track that separately.
+* Child graphs nested via ``hipGraphAddChildGraphNode`` are attributed to the
+  outer launch's ``Graph_Exec_Id``; the inner graph's instantiation ID is not
+  surfaced.
+
 Memory copy trace
 +++++++++++++++++++
 
