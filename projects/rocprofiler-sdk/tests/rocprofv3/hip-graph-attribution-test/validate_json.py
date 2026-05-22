@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+
+# MIT License
+#
+# Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+"""JSON-output smoke tests for HIP graph attribution (Task 12b).
+
+Validates that rocprofv3's --output-format json carries through the new
+fields added in Tasks 2 and 4:
+
+  - dispatch_info.graph_exec_id / graph_node_id on KERNEL_DISPATCH records
+    that originated from a graph launch
+  - GRAPH_LAUNCH summary records with their full field set
+
+These tests are intentionally minimal — the CSV validator (validate.py)
+already exhaustively covers semantic correctness. This file's job is just
+to prove the JSON writer wired the new fields through correctly.
+"""
+
+import sys
+import pytest
+
+
+def _buffer_records(json_input_data):
+    return json_input_data["rocprofiler-sdk-tool"]["buffer_records"]
+
+
+def test_kernel_dispatch_records_have_graph_fields(json_input_data):
+    """Every KERNEL_DISPATCH JSON record must expose graph_exec_id and
+    graph_node_id under dispatch_info — these flow through cereal's save()
+    for rocprofiler_kernel_dispatch_info_t (Task 2)."""
+    kernel_dispatch = _buffer_records(json_input_data)["kernel_dispatch"]
+    assert len(kernel_dispatch) > 0, "no kernel_dispatch records in JSON"
+    for rec in kernel_dispatch:
+        di = rec["dispatch_info"]
+        assert "graph_exec_id" in di, f"dispatch_info missing graph_exec_id: {di}"
+        assert "graph_node_id" in di, f"dispatch_info missing graph_node_id: {di}"
+
+
+def test_some_kernel_dispatches_have_nonzero_graph_exec_id(
+    json_input_data,
+    expected_iterations,
+    expected_execs,
+    expected_nodes_per_launch,
+):
+    """The graph dispatches in the workload must carry nonzero graph_exec_id.
+    Count should match (iterations*execs + 1) * nodes_per_launch — the +1 is
+    the one extra successful exec_b launch after the failed launch."""
+    kernel_dispatch = _buffer_records(json_input_data)["kernel_dispatch"]
+    graph_rows = [
+        r for r in kernel_dispatch if int(r["dispatch_info"]["graph_exec_id"]) != 0
+    ]
+    expected_launches = expected_iterations * expected_execs + 1
+    expected = expected_launches * expected_nodes_per_launch
+    assert (
+        len(graph_rows) == expected
+    ), f"expected {expected} graph-attributed dispatches in JSON, got {len(graph_rows)}"
+
+
+def test_graph_launch_records_present(
+    json_input_data,
+    expected_iterations,
+    expected_execs,
+):
+    """GRAPH_LAUNCH summary records must appear in the JSON output's
+    buffer_records.graph_launch array. One per *successful* hipGraphLaunch."""
+    buffer_records = _buffer_records(json_input_data)
+    assert (
+        "graph_launch" in buffer_records
+    ), f"buffer_records missing 'graph_launch' key; got {list(buffer_records.keys())}"
+    graph_launch = buffer_records["graph_launch"]
+    expected_launches = expected_iterations * expected_execs + 1
+    assert (
+        len(graph_launch) == expected_launches
+    ), f"expected {expected_launches} GRAPH_LAUNCH records, got {len(graph_launch)}"
+
+
+def test_graph_launch_record_shape(json_input_data, expected_nodes_per_launch):
+    """Each GRAPH_LAUNCH record must carry the expected field set with
+    sensible values (Task 4 cereal save())."""
+    graph_launch = _buffer_records(json_input_data)["graph_launch"]
+    required_fields = (
+        "size",
+        "kind",
+        "operation",
+        "thread_id",
+        "correlation_id",
+        "start_timestamp",
+        "end_timestamp",
+        "agent_id",
+        "queue_id",
+        "graph_exec_id",
+        "kernel_dispatch_count",
+    )
+    for rec in graph_launch:
+        for f in required_fields:
+            assert f in rec, f"GRAPH_LAUNCH record missing '{f}': {rec}"
+        assert int(rec["graph_exec_id"]) > 0, f"graph_exec_id must be nonzero: {rec}"
+        assert (
+            int(rec["kernel_dispatch_count"]) == expected_nodes_per_launch
+        ), f"kernel_dispatch_count {rec['kernel_dispatch_count']} != {expected_nodes_per_launch}: {rec}"
+        assert int(rec["end_timestamp"]) >= int(rec["start_timestamp"])
+        assert (
+            int(rec["correlation_id"]["internal"]) > 0
+        ), f"GRAPH_LAUNCH must have nonzero internal correlation_id: {rec}"
+
+
+def test_graph_launch_exec_ids_match_kernel_dispatch_records(json_input_data):
+    """The set of graph_exec_ids on GRAPH_LAUNCH records must equal the set
+    of nonzero graph_exec_ids on the KERNEL_DISPATCH records — the two views
+    must agree."""
+    buffer_records = _buffer_records(json_input_data)
+    launch_ids = {int(r["graph_exec_id"]) for r in buffer_records["graph_launch"]}
+    kernel_ids = {
+        int(r["dispatch_info"]["graph_exec_id"])
+        for r in buffer_records["kernel_dispatch"]
+        if int(r["dispatch_info"]["graph_exec_id"]) != 0
+    }
+    assert (
+        launch_ids == kernel_ids
+    ), f"GRAPH_LAUNCH ids {launch_ids} != graph-KERNEL_DISPATCH ids {kernel_ids}"
+
+
+if __name__ == "__main__":
+    exit_code = pytest.main(["-x", __file__] + sys.argv[1:])
+    sys.exit(exit_code)

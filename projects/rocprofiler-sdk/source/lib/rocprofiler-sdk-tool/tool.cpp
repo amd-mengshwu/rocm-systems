@@ -3395,7 +3395,8 @@ generate_output(cleanup_mode _cleanup_mode)
                          rocjpeg_output.get_generator(),
                          pc_sampling_host_trap_output.get_generator(),
                          pc_sampling_stochastic_output.get_generator(),
-                         spm_counters_output.get_generator());
+                         spm_counters_output.get_generator(),
+                         graph_launch_output.get_generator());
         json_ar.finish_process();
 
         tool::close_json(json_ar);

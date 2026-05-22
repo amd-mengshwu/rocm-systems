@@ -23,13 +23,18 @@
 # THE SOFTWARE.
 
 import csv
+import json
 import pytest
+
+from rocprofiler_sdk.pytest_utils import collapse_dict_list
+from rocprofiler_sdk.pytest_utils.dotdict import dotdict
 
 
 def pytest_addoption(parser):
     parser.addoption("--kernel-input", action="store", default=None)
     parser.addoption("--graph-launch-input", action="store", default=None)
     parser.addoption("--hip-api-input", action="store", default=None)
+    parser.addoption("--json-input", action="store", default=None)
     parser.addoption("--expected-iterations", action="store", type=int, default=None)
     parser.addoption("--expected-execs", action="store", type=int, default=None)
     parser.addoption(
@@ -75,6 +80,15 @@ def hip_api_input_data(request):
     if filename is None:
         pytest.fail("--hip-api-input argument is required")
     return _read_csv(filename)
+
+
+@pytest.fixture
+def json_input_data(request):
+    filename = request.config.getoption("--json-input")
+    if filename is None:
+        pytest.fail("--json-input argument is required")
+    with open(filename, "r") as inp:
+        return dotdict(collapse_dict_list(json.load(inp)))
 
 
 @pytest.fixture

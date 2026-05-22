@@ -86,3 +86,36 @@ rocprofiler_add_integration_validate_test(
     TIMEOUT 60
     LABELS "integration-tests"
     FIXTURES_REQUIRED ${TEST_NAME_GLO})
+
+# ---------------------------------------------------------------
+# JSON variant: same trace, but emit JSON output to verify that
+# graph_exec_id/graph_node_id flow through the JSON writer and that
+# GRAPH_LAUNCH summary records appear in the JSON output (Task 12b).
+# ---------------------------------------------------------------
+set(TEST_NAME_JSON "rocprofv3-test-hip-graph-attribution-json")
+set(OUTPUT_DIR_JSON "${CMAKE_CURRENT_BINARY_DIR}/hip-graph-attribution-json")
+
+rocprofiler_add_integration_execute_test(
+    ${TEST_NAME_JSON}
+    COMMAND
+        $<TARGET_FILE:rocprofiler-sdk::rocprofv3> --hip-trace --kernel-trace
+        --graph-launch-trace -d ${OUTPUT_DIR_JSON} -o out --output-format json --
+        $<TARGET_FILE:hip-graph-attribution> ${ITERATIONS}
+    DEPENDS hip-graph-attribution
+    TIMEOUT 120
+    LABELS "integration-tests"
+    ENVIRONMENT ${HIP_GRAPH_ATTRIBUTION_ENVIRONMENT}
+    FIXTURES_SETUP ${TEST_NAME_JSON})
+
+rocprofiler_add_integration_validate_test(
+    ${TEST_NAME_JSON}
+    TEST_PATHS validate_json.py
+    COPY conftest.py
+    CONFIG pytest.ini
+    ARGS --json-input ${OUTPUT_DIR_JSON}/out_results.json
+         --expected-iterations ${ITERATIONS}
+         --expected-execs 2
+         --expected-nodes-per-launch 5
+    TIMEOUT 60
+    LABELS "integration-tests"
+    FIXTURES_REQUIRED ${TEST_NAME_JSON})
