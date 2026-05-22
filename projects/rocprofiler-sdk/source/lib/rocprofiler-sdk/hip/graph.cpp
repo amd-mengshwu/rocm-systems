@@ -22,9 +22,12 @@
 
 #include "lib/rocprofiler-sdk/hip/graph.hpp"
 
+#include "lib/common/utility.hpp"
+
 #include <rocprofiler-sdk/hip/runtime_api_id.h>  // pulls in <hip/amd_detail/hip_api_trace.hpp>
 
 #include <atomic>
+#include <deque>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -96,6 +99,74 @@ wrap_destroy(RetT (*next)(::hipGraphExec_t))
         return next_func(exec);
     };
 }
+
+// Per-thread stack of active hipGraphLaunch calls. std::deque (not std::vector)
+// because launch_state contains std::atomic<uint64_t> which is non-movable;
+// std::deque doesn't move existing elements on growth, so references handed
+// out by current_launch_state() remain valid as nested launches push.
+thread_local std::deque<launch_state> g_launch_stack;
+
+// Forward decl: real body lands in Task 11. Defined as empty stub here so this
+// task builds standalone. Task 11 will replace the stub body, keeping it in
+// the same anonymous namespace so unqualified name lookup from wrap_launch
+// resolves to the same entity.
+void
+emit_graph_launch_record(const launch_state& s, rocprofiler_timestamp_t end_ts);
+void
+emit_graph_launch_record(const launch_state&, rocprofiler_timestamp_t)
+{}
+
+// hipGraphLaunch and hipGraphLaunch_spt share the SAME signature. A naive
+// wrap_launch<RetT> template would collapse them into a single instantiation
+// and the two static next_func slots would alias. The LaunchApiTag template
+// parameter forces distinct instantiations (and thus distinct next_func
+// storage) for each API.
+enum class LaunchApiTag
+{
+    hipGraphLaunch,
+    hipGraphLaunch_spt
+};
+
+template <LaunchApiTag Tag, typename RetT>
+auto
+wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
+{
+    static auto next_func = next;
+    return +[](::hipGraphExec_t exec, ::hipStream_t stream) -> RetT {
+        g_launch_stack.emplace_back();
+        auto& s         = g_launch_stack.back();
+        s.graph_exec_id = lookup_graph_exec_id(exec);
+        if(s.graph_exec_id == 0)
+        {
+            // Attach-mid-process fallback: rocprofiler may have attached after
+            // hipGraphInstantiate ran, so the map has no entry. Assign now so
+            // subsequent dispatches in this launch still get a non-zero ID.
+            s.graph_exec_id = assign_graph_exec_id(exec);
+        }
+        s.thread_id      = common::get_tid();
+        // NOTE: correlation_id is left 0 for now. The spec's correlation_id-join
+        // contract requires reading the HIP API tracing TLS that is built up by
+        // the outer HIP wrapper, but no such TLS accessor exists yet in hip.cpp.
+        // A follow-up will add the accessor; the GRAPH_LAUNCH record is still
+        // emitted, it just won't join cleanly to HIP API records until then.
+        s.correlation_id = 0;
+        s.start_ts       = rocprofiler_timestamp_t{common::timestamp_ns()};
+
+        auto ret = next_func(exec, stream);
+
+        // Per spec §4.4: emit summary record only on hipSuccess. Always emit
+        // on success (including dispatch_count == 0) per §4.2.
+        auto end_ts = rocprofiler_timestamp_t{common::timestamp_ns()};
+        if(ret == hipSuccess)
+        {
+            emit_graph_launch_record(s, end_ts);
+        }
+        // Pop unconditionally — TLS state must always be cleaned up, even on
+        // error paths.
+        g_launch_stack.pop_back();
+        return ret;
+    };
+}
 }  // namespace
 
 void
@@ -109,8 +180,7 @@ init()
 launch_state*
 current_launch_state()
 {
-    // TLS not implemented yet — Task 9 adds it.
-    return nullptr;
+    return g_launch_stack.empty() ? nullptr : &g_launch_stack.back();
 }
 
 uint64_t
@@ -144,6 +214,12 @@ update_table(::HipDispatchTable* table)
             wrap_instantiate(table->hipGraphInstantiateWithParams_fn);
     if(table->hipGraphExecDestroy_fn)
         table->hipGraphExecDestroy_fn = wrap_destroy(table->hipGraphExecDestroy_fn);
+    if(table->hipGraphLaunch_fn)
+        table->hipGraphLaunch_fn =
+            wrap_launch<LaunchApiTag::hipGraphLaunch>(table->hipGraphLaunch_fn);
+    if(table->hipGraphLaunch_spt_fn)
+        table->hipGraphLaunch_spt_fn =
+            wrap_launch<LaunchApiTag::hipGraphLaunch_spt>(table->hipGraphLaunch_spt_fn);
 }
 
 }  // namespace graph
