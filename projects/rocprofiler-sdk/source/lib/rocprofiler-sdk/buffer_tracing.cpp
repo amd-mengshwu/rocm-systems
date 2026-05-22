@@ -341,6 +341,11 @@ rocprofiler_query_buffer_tracing_kind_operation_name(rocprofiler_buffer_tracing_
                 operation);
             break;
         }
+        case ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH:
+        {
+            // GRAPH_LAUNCH has no sub-operations
+            break;
+        }
         case ROCPROFILER_BUFFER_TRACING_KFD_EVENT_PAGE_MIGRATE:
         case ROCPROFILER_BUFFER_TRACING_KFD_EVENT_PAGE_FAULT:
         case ROCPROFILER_BUFFER_TRACING_KFD_EVENT_QUEUE:
@@ -500,6 +505,11 @@ rocprofiler_iterate_buffer_tracing_kind_operations(
         case ROCPROFILER_BUFFER_TRACING_MARKER_CORE_RANGE_API:
         {
             ops = rocprofiler::marker::get_ids<ROCPROFILER_MARKER_TABLE_ID_RoctxCoreRange>();
+            break;
+        }
+        case ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH:
+        {
+            // GRAPH_LAUNCH has no sub-operations
             break;
         }
         case ROCPROFILER_BUFFER_TRACING_KFD_EVENT_PAGE_MIGRATE:
