@@ -43,6 +43,7 @@ enum class domain_type
     KFD,
     SPM_COUNTER_COLLECTION,
     SPM_COUNTER_VALUES,
+    GRAPH_LAUNCH,
     LAST,
 };
 

@@ -473,6 +473,11 @@ For attachment profiling of running processes:
     )
     add_parser_bool_argument(
         basic_tracing_options,
+        "--graph-launch-trace",
+        help="For collecting one record per hipGraphLaunch invocation. Emits graph_launch_trace.csv with the graph_exec_id and kernel_dispatch_count for each launch. Independent of --kernel-trace; kernel-dispatch records are emitted by --kernel-trace.",
+    )
+    add_parser_bool_argument(
+        basic_tracing_options,
         "--memory-copy-trace",
         help="For collecting Memory Copy Traces. This was part of HIP and HSA traces in previous rocprof versions but is now a separate option",
     )
@@ -1619,6 +1624,7 @@ def run(app_args, args, **kwargs):
             ["rocdecode_trace", "ROCDECODE_API_TRACE"],
             ["rocjpeg_trace", "ROCJPEG_API_TRACE"],
             ["kernel_trace", "KERNEL_TRACE"],
+            ["graph_launch_trace", "GRAPH_LAUNCH_TRACE"],
             ["memory_copy_trace", "MEMORY_COPY_TRACE"],
             ["memory_allocation_trace", "MEMORY_ALLOCATION_TRACE"],
             ["kfd_page_migration_trace", "KFD_PAGE_MIGRATION_TRACE"],

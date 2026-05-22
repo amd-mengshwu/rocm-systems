@@ -76,6 +76,7 @@ DEFINE_BUFFER_TYPE_NAME(SPM_COUNTER_VALUES,
                         "SPM_COUNTER_VALUES",
                         "SPM_counter_values",
                         "SPM_counter_values")
+DEFINE_BUFFER_TYPE_NAME(GRAPH_LAUNCH, "GRAPH_LAUNCH", "graph_launch_trace", "graph_launch_stats")
 
 #undef DEFINE_BUFFER_TYPE_NAME
 
