@@ -304,10 +304,9 @@ WriteInterceptor(const void* packets,
 
     auto& queue = *static_cast<Queue*>(data);
 
-    // We have no packets or no one who needs to be notified, do nothing. The graph-launch
-    // check keeps the interceptor active when a hipGraphLaunch is in flight on this thread
-    // even if no consumer is subscribed to KERNEL_DISPATCH, so that the per-launch
-    // kernel_dispatch_count is still incremented (spec §4.2 subscription independence).
+    // The graph-launch check keeps the interceptor active when a hipGraphLaunch is in
+    // flight even if no consumer is subscribed to KERNEL_DISPATCH, so the per-launch
+    // kernel_dispatch_count is still incremented.
     const bool graph_launch_active =
         (::rocprofiler::hip::graph::current_launch_state() != nullptr);
     if(pkt_count == 0 ||
@@ -542,15 +541,11 @@ WriteInterceptor(const void* packets,
 
             auto dispatch_id = ++sequence_counter;
 
+            // Feeds the GRAPH_LAUNCH summary record's kernel_dispatch_count. Not
+            // gated on subscription state so GRAPH_LAUNCH-only consumers get the
+            // correct count even when KERNEL_DISPATCH tracing is off.
             if(auto* gls = ::rocprofiler::hip::graph::current_launch_state(); gls != nullptr)
-            {
-                // Count kernel dispatches observed during this graph launch. Feeds
-                // the GRAPH_LAUNCH summary record's kernel_dispatch_count field.
-                // Counter is not gated on any subscription state — per spec §4.2
-                // "Subscription independence", GRAPH_LAUNCH-only consumers must
-                // see correct counts.
                 ++gls->dispatch_count;
-            }
 
             _packet_data.callback_record =
                 callback_record_t{sizeof(callback_record_t),

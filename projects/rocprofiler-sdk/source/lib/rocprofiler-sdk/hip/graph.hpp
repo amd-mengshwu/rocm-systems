@@ -35,18 +35,11 @@ namespace hip
 {
 namespace graph
 {
-/**
- * @brief Per-launch state held in TLS while inside hipGraphLaunch.
- *
- * Lives on a per-thread stack (see g_launch_stack in graph.cpp) and is only
- * ever read/written from the owning thread, so plain (non-atomic) members are
- * sufficient: a graph host-callback node that re-enters hipGraphLaunch on a
- * different thread would get its own TLS launch_state, not share this one.
- */
+/// Per-launch state held in TLS while inside hipGraphLaunch.
 struct launch_state
 {
-    uint64_t                graph_exec_id = 0;
-    uint64_t                node_counter  = 0;
+    uint64_t                graph_exec_id  = 0;
+    uint64_t                node_counter   = 0;
     rocprofiler_timestamp_t start_ts       = {0};
     uint64_t                dispatch_count = 0;
     rocprofiler_agent_id_t  agent_id       = {0};

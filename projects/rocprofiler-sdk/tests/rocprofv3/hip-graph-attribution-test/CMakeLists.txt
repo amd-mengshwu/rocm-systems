@@ -15,7 +15,8 @@ if(DEFINED ENV{ROCM_PATH} AND EXISTS "$ENV{ROCM_PATH}/lib/rocm_sysdeps/lib")
     list(APPEND HIP_GRAPH_ATTRIBUTION_ENVIRONMENT
          "LD_LIBRARY_PATH=$ENV{ROCM_PATH}/lib/rocm_sysdeps/lib:$ENV{LD_LIBRARY_PATH}")
 endif()
-# Make determinism preconditions explicit (spec §4.3).
+# Pin determinism preconditions: segmented-scheduling + direct-dispatch keep
+# the per-launch node_id sequence stable across iterations.
 list(APPEND HIP_GRAPH_ATTRIBUTION_ENVIRONMENT
      "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING=1"
      "AMD_DIRECT_DISPATCH=1")
@@ -91,9 +92,8 @@ rocprofiler_add_integration_validate_test(
     FIXTURES_REQUIRED ${TEST_NAME_GLO})
 
 # ---------------------------------------------------------------
-# JSON variant: same trace, but emit JSON output to verify that
-# graph_exec_id/graph_node_id flow through the JSON writer and that
-# GRAPH_LAUNCH summary records appear in the JSON output (Task 12b).
+# JSON variant: same workload, JSON output to verify the new fields and
+# GRAPH_LAUNCH records flow through the JSON writer.
 # ---------------------------------------------------------------
 set(TEST_NAME_JSON "rocprofv3-test-hip-graph-attribution-json")
 set(OUTPUT_DIR_JSON "${CMAKE_CURRENT_BINARY_DIR}/hip-graph-attribution-json")

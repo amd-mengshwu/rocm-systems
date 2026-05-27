@@ -39,19 +39,13 @@ def test_graph_launch_record_count(
 def test_graph_launch_kernel_dispatch_count(
     graph_launch_input_data, expected_nodes_per_launch
 ):
-    """SPEC §4.2 subscription independence: when only GRAPH_LAUNCH is subscribed,
-    each summary record must still report the correct Kernel_Dispatch_Count.
-
-    This is the critical test that proves the WriteInterceptor counter increments
-    independently of kernel-dispatch subscription state."""
+    """Subscription independence: when only GRAPH_LAUNCH is subscribed (no
+    --kernel-trace), each summary record still reports the correct
+    Kernel_Dispatch_Count. Proves the WriteInterceptor counter increments
+    independently of KERNEL_DISPATCH subscription state."""
     for r in graph_launch_input_data:
         dc = int(r["Kernel_Dispatch_Count"])
-        assert dc == expected_nodes_per_launch, (
-            f"GRAPH_LAUNCH-only mode: record {r} has Kernel_Dispatch_Count {dc}, "
-            f"expected {expected_nodes_per_launch}. WriteInterceptor likely was "
-            f"not activated for GRAPH_LAUNCH-only subscription (see Task 10's "
-            f"context_filter and early-return extensions)."
-        )
+        assert dc == expected_nodes_per_launch, (r, dc)
 
 
 if __name__ == "__main__":

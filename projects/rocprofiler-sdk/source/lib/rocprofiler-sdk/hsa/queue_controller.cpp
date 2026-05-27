@@ -560,15 +560,9 @@ enable_queue_intercept()
         bool has_scratch_reporting = itr->is_tracing(ROCPROFILER_CALLBACK_TRACING_SCRATCH_MEMORY) ||
                                      itr->is_tracing(ROCPROFILER_BUFFER_TRACING_SCRATCH_MEMORY);
 
-        // GRAPH_LAUNCH summary records carry kernel_dispatch_count, which is
-        // populated by the WriteInterceptor's per-dispatch path observing
-        // packets while a hipGraphLaunch is in flight on this thread. If a
-        // subscriber asks for GRAPH_LAUNCH but not KERNEL_DISPATCH, we still
-        // need queue interception active so that count is non-zero (spec §4.2
-        // subscription independence). The WriteInterceptor itself short-
-        // circuits cheaply when no kernel-tracing consumer is present (see
-        // hsa/queue.cpp WriteInterceptor gate) so this only adds overhead
-        // while a graph launch is actually in flight.
+        // Keep queue interception active for GRAPH_LAUNCH subscribers so the
+        // per-launch kernel_dispatch_count gets populated even when KERNEL_DISPATCH
+        // tracing is not enabled.
         bool has_graph_launch_tracing =
             itr->is_tracing(ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH);
 

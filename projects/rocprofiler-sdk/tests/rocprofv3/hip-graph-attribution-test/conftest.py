@@ -73,22 +73,16 @@ def kernel_input_data(request):
 
 @pytest.fixture
 def memory_copy_input_data(request):
-    """Memory copy CSV may be absent on AMD HIP because in-graph (and even
-    some out-of-graph pinned-host) memcpys are routinely implemented as blit
-    kernels and surface in the KERNEL_DISPATCH stream rather than producing
-    MEMORY_COPY records. Tests that consume this fixture skip when no file
-    exists, while still asserting Phase F plumbing on whatever rows do
-    appear."""
+    """Memory copy CSV may be absent on AMD HIP when memcpys are implemented
+    as blit kernels and surface in KERNEL_DISPATCH instead of MEMORY_COPY.
+    Tests skip rather than fail in that case."""
     import os
 
     filename = request.config.getoption("--memory-copy-input")
     if filename is None:
         pytest.fail("--memory-copy-input argument is required")
     if not os.path.exists(filename):
-        pytest.skip(
-            f"memory_copy CSV '{filename}' was not produced — no MEMORY_COPY "
-            "records were emitted by this workload (AMD HIP blit-kernel path)."
-        )
+        pytest.skip(f"memory_copy CSV '{filename}' was not produced")
     data = _read_csv(filename)
     if len(data) == 0:
         pytest.skip(f"memory_copy CSV '{filename}' contained no data rows")

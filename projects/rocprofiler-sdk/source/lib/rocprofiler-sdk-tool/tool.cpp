@@ -827,10 +827,7 @@ hip_stream_display_callback(rocprofiler_callback_tracing_record_t record,
 }
 
 // Maintains the per-thread graph attribution stack used to tag KERNEL_DISPATCH
-// and MEMORY_COPY records spawned during a hipGraphLaunch with the launching
-// graph_exec_id and a sequential graph_node_id. The HIP_GRAPH_EXEC_CREATE and
-// HIP_GRAPH_EXEC_DESTROY operations are reserved for a future graph catalog and
-// are intentionally not consumed here.
+// and MEMORY_COPY records spawned during a hipGraphLaunch.
 void
 hip_graph_display_callback(rocprofiler_callback_tracing_record_t record,
                            rocprofiler_user_data_t*              user_data,
@@ -844,21 +841,10 @@ hip_graph_display_callback(rocprofiler_callback_tracing_record_t record,
     if(record.operation == ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_LAUNCH)
     {
         if(record.phase == ROCPROFILER_CALLBACK_PHASE_ENTER)
-        {
-            ROCP_TRACE << "hip_graph_display_callback: HIP_GRAPH_LAUNCH ENTER graph_exec_id="
-                       << payload->graph_exec_id;
             rocprofiler::tool::graph::push(payload->graph_exec_id);
-        }
         else if(record.phase == ROCPROFILER_CALLBACK_PHASE_EXIT)
-        {
-            ROCP_TRACE << "hip_graph_display_callback: HIP_GRAPH_LAUNCH EXIT graph_exec_id="
-                       << payload->graph_exec_id;
             rocprofiler::tool::graph::pop();
-        }
     }
-    // ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_CREATE and
-    // ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_DESTROY are reserved for a
-    // future catalog of graph_exec_id -> source graph mappings and are no-ops here.
 
     common::consume_args(user_data, data);
 }

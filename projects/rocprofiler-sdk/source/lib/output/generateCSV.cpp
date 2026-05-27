@@ -301,9 +301,9 @@ generate_csv(const output_config&                                               
             auto lds_block_size_v =
                 (kernel_info->group_segment_size + (lds_block_size - 1)) & ~(lds_block_size - 1);
 
-            // Per spec §5.5: empty string for non-graph dispatches. Gate on
-            // graph_exec_id (not graph_node_id) because graph_node_id == 0 is
-            // legitimate for the first dispatch of a launch.
+            // Render empty for non-graph dispatches. Gate on graph_exec_id (not
+            // graph_node_id) because graph_node_id == 0 is legitimate for the
+            // first dispatch of a launch.
             auto graph_exec_str = record.graph_exec_id != 0
                                       ? std::to_string(record.graph_exec_id)
                                       : std::string{};

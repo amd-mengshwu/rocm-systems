@@ -60,10 +60,11 @@ Full documentation for ROCprofiler-SDK is available at [rocm.docs.amd.com/projec
   - Fixed handling for special SVM location in KFD prefetch location reporting
   - Fixed parsing for queue restore events to handle both correct format (character '0') and broken driver format (NULL character '\0')
 
-- Per-graph-node attribution for HIP graph kernels (AIPROFSDK-855):
-  - `rocprofiler_kernel_dispatch_info_t` now carries `graph_exec_id` (process-monotonic ID assigned per `hipGraphExec_t`) and `graph_node_id` (0-based dispatch ordinal within one `hipGraphLaunch`). Both fields are zero for non-graph dispatches.
-  - New buffer tracing kind `ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH` emits a summary record per successful `hipGraphLaunch` invocation, with `kernel_dispatch_count` that counts kernel dispatches attributed to that launch.
-  - `graph_node_id` stability across launches requires segmented scheduling (default), `AMD_DIRECT_DISPATCH=1`, and single-threaded launching of one `hipGraphExec_t`. See `rocprofiler_kernel_dispatch_info_t` doc comments and the HIP graph attribution docs section for the full determinism contract.
+- Per-graph-node attribution for HIP graph operations:
+  - New callback tracing kind `ROCPROFILER_CALLBACK_TRACING_HIP_GRAPH` fires for `hipGraphInstantiate*`, `hipGraphExecDestroy`, and `hipGraphLaunch{,_spt}` lifecycle events. Payload carries a process-monotonic `graph_exec_id` and the raw `hipGraphExec_t` handle. Mirrors the `HIP_STREAM` design.
+  - New buffer tracing kind `ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH` emits a summary record per successful `hipGraphLaunch` invocation with `graph_exec_id`, `kernel_dispatch_count`, agent, and launch timestamps.
+  - Tools can associate kernel dispatches and memory copies with their producing graph node by maintaining a per-thread attribution stack (push on HIP_GRAPH_LAUNCH ENTER, pop on EXIT) and capturing the top of stack into the external correlation id at request time. See the doc comment on `rocprofiler_callback_tracing_hip_graph_data_t` for the recipe.
+  - Attribution accuracy across launches requires segmented scheduling (default), `AMD_DIRECT_DISPATCH=1`, and single-threaded launching of one `hipGraphExec_t`.
 
 **rocprofv3 (CLI):**
 
@@ -87,15 +88,15 @@ Full documentation for ROCprofiler-SDK is available at [rocm.docs.amd.com/projec
   - Enables profiling long-running or production-style jobs at the point of interest.
   - Results integrate with the existing PC sampling analysis flow.
 
-- HIP graph attribution columns and trace (AIPROFSDK-855):
-  - Kernel CSV gains `Graph_Exec_Id` and `Graph_Node_Id` columns (rendered empty for non-graph dispatches).
+- HIP graph attribution columns and trace:
+  - Kernel and memory-copy CSVs gain `Graph_Exec_Id` and `Graph_Node_Id` columns (rendered empty for non-graph dispatches). The fields appear as top-level siblings (alongside `Stream_Id`) in JSON output and as event attributes / debug annotations in OTF2 and Perfetto outputs.
   - New `--graph-launch-trace` CLI flag enables a new `graph_launch_trace.csv` containing per-launch summary records (one row per successful `hipGraphLaunch`).
 
 **Documentation:**
 
 - Added marker-controlled thread tracing section to the thread trace how-to guide.
 - Added cross-reference from ROCTx documentation to ATT with `selected-regions`.
-- Added HIP graph attribution section to the rocprofv3 how-to guide covering the new dispatch-info fields, the `--graph-launch-trace` flag, the determinism contract, and v1 limitations (AIPROFSDK-855).
+- Added HIP graph attribution section to the rocprofv3 how-to guide covering the new output columns, the `--graph-launch-trace` flag, the determinism contract, and v1 limitations.
 
 ### Changed
 

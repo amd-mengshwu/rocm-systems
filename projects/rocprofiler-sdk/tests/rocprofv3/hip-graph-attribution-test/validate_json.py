@@ -22,19 +22,14 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-"""JSON-output smoke tests for HIP graph attribution (Task 12b).
+"""JSON-output smoke tests for HIP graph attribution.
 
-Validates that rocprofv3's --output-format json carries through the new
-fields added in Tasks 2 and 4:
+Validates that rocprofv3's --output-format json carries through:
+  - graph_exec_id / graph_node_id at the top level of KERNEL_DISPATCH records
+    (siblings of stream_id, populated by the tool-layer ext record).
+  - GRAPH_LAUNCH summary records with the full field set.
 
-  - graph_exec_id / graph_node_id at the top level of KERNEL_DISPATCH
-    records that originated from a graph launch (siblings of stream_id;
-    populated by the tool-layer ext record, not the SDK dispatch_info)
-  - GRAPH_LAUNCH summary records with their full field set
-
-These tests are intentionally minimal — the CSV validator (validate.py)
-already exhaustively covers semantic correctness. This file's job is just
-to prove the JSON writer wired the new fields through correctly.
+The CSV validator (validate.py) does the heavier semantic checking.
 """
 
 import sys
@@ -47,10 +42,8 @@ def _buffer_records(json_input_data):
 
 def test_kernel_dispatch_records_have_graph_fields(json_input_data):
     """Every KERNEL_DISPATCH JSON record must expose graph_exec_id and
-    graph_node_id at the top level (siblings of stream_id) — these flow
-    through cereal's save() for tool_buffer_tracing_kernel_dispatch_ext_record_t.
-    They are NOT under dispatch_info: graph attribution is a tool-layer
-    concept, not an SDK dispatch property."""
+    graph_node_id at the top level (siblings of stream_id, not under
+    dispatch_info)."""
     kernel_dispatch = _buffer_records(json_input_data)["kernel_dispatch"]
     assert len(kernel_dispatch) > 0, "no kernel_dispatch records in JSON"
     for rec in kernel_dispatch:
@@ -95,8 +88,7 @@ def test_graph_launch_records_present(
 
 
 def test_graph_launch_record_shape(json_input_data, expected_nodes_per_launch):
-    """Each GRAPH_LAUNCH record must carry the expected field set with
-    sensible values (Task 4 cereal save())."""
+    """Each GRAPH_LAUNCH record carries the expected field set with sane values."""
     graph_launch = _buffer_records(json_input_data)["graph_launch"]
     required_fields = (
         "size",
