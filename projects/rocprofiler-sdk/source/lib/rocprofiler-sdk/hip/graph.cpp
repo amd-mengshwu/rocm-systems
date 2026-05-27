@@ -30,6 +30,9 @@
 
 #include <rocprofiler-sdk/agent.h>
 #include <rocprofiler-sdk/buffer_tracing.h>
+#include <rocprofiler-sdk/callback_tracing.h>
+#include <rocprofiler-sdk/external_correlation.h>
+#include <rocprofiler-sdk/fwd.h>
 #include <rocprofiler-sdk/hip/runtime_api_id.h>  // pulls in <hip/amd_detail/hip_api_trace.hpp>
 
 #include <hip/hip_runtime_api.h>
@@ -77,6 +80,62 @@ forget_graph_exec(::hipGraphExec_t exec)
     g_exec_to_id.erase(exec);
 }
 
+// Build the callback payload struct used by all HIP_GRAPH callback fires.
+rocprofiler_callback_tracing_hip_graph_data_t
+make_hip_graph_payload(uint64_t graph_exec_id, ::hipGraphExec_t exec)
+{
+    return common::init_public_api_struct(
+        rocprofiler_callback_tracing_hip_graph_data_t{},
+        graph_exec_id,
+        rocprofiler_address_t{.ptr = static_cast<const void*>(exec)});
+}
+
+// Fire a HIP_GRAPH callback in phase NONE (used for EXEC_CREATE and EXEC_DESTROY).
+//
+// Mirrors hip/stream.cpp's create_write_functor / create_destroy_functor pattern:
+// populate subscribed callback contexts for the (domain, op) pair, build a payload,
+// and dispatch to each via execute_phase_none_callbacks. HIP_GRAPH has no buffered
+// counterpart (the GRAPH_LAUNCH buffer record is a separate, summary-level domain
+// emitted from emit_graph_launch_record), so we use the single-DomainIdx populate
+// overload templated on rocprofiler_callback_tracing_kind_t.
+void
+fire_hip_graph_none_callback(rocprofiler_hip_graph_operation_t op,
+                             uint64_t                          graph_exec_id,
+                             ::hipGraphExec_t                  exec)
+{
+    auto callback_contexts = tracing::callback_context_data_vec_t{};
+    auto external_corr_ids = tracing::external_correlation_id_map_t{};
+
+    tracing::populate_contexts(ROCPROFILER_CALLBACK_TRACING_HIP_GRAPH,
+                               static_cast<rocprofiler_tracing_operation_t>(op),
+                               callback_contexts,
+                               external_corr_ids);
+
+    if(callback_contexts.empty()) return;
+
+    auto thr_id = common::get_tid();
+
+    // External correlation IDs for HIP graph callbacks use the HIP_RUNTIME_API
+    // request kind: these wrappers are installed on the HIP runtime dispatch
+    // table and execute inside HIP runtime API calls.
+    tracing::update_external_correlation_ids(
+        external_corr_ids, thr_id, ROCPROFILER_EXTERNAL_CORRELATION_REQUEST_HIP_RUNTIME_API);
+
+    auto*      corr_id          = context::get_latest_correlation_id();
+    auto       internal_corr_id = (corr_id) ? corr_id->internal : uint64_t{0};
+    auto       ancestor_corr_id = (corr_id) ? corr_id->ancestor : uint64_t{0};
+    auto       tracer_data      = make_hip_graph_payload(graph_exec_id, exec);
+
+    tracing::execute_phase_none_callbacks(callback_contexts,
+                                          thr_id,
+                                          internal_corr_id,
+                                          external_corr_ids,
+                                          ancestor_corr_id,
+                                          ROCPROFILER_CALLBACK_TRACING_HIP_GRAPH,
+                                          static_cast<rocprofiler_tracing_operation_t>(op),
+                                          tracer_data);
+}
+
 // Each instantiation of wrap_instantiate has its own static next_func slot
 // because the 3 hipGraphInstantiate* APIs have different signatures (different
 // trailing Args...). The lambdas have no captures, so they convert to plain
@@ -90,7 +149,13 @@ wrap_instantiate(RetT (*next)(::hipGraphExec_t*, Args...))
         auto ret = next_func(out, std::forward<Args>(args)...);
         if(ret == hipSuccess && out != nullptr && *out != nullptr)
         {
-            assign_graph_exec_id(*out);
+            auto exec_id = assign_graph_exec_id(*out);
+            // Phase C: notify subscribers of the new hipGraphExec_t. Fired
+            // after the underlying instantiate succeeds and after the map
+            // assignment, so subscribers calling lookup_graph_exec_id(*out)
+            // from within their callback would observe the same id.
+            fire_hip_graph_none_callback(
+                ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_CREATE, exec_id, *out);
         }
         return ret;
     };
@@ -102,6 +167,17 @@ wrap_destroy(RetT (*next)(::hipGraphExec_t))
 {
     static auto next_func = next;
     return +[](::hipGraphExec_t exec) -> RetT {
+        // Phase C: fire EXEC_DESTROY BEFORE forgetting the map entry so
+        // subscribers can still resolve the graph_exec_id via
+        // lookup_graph_exec_id(exec) at callback dispatch time, and BEFORE
+        // calling the underlying destroy so subscribers observe the handle
+        // while it is still valid.
+        if(exec != nullptr)
+        {
+            auto exec_id = lookup_graph_exec_id(exec);
+            fire_hip_graph_none_callback(
+                ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_DESTROY, exec_id, exec);
+        }
         // Remove the map entry BEFORE invoking the destroy: HIP destroys the
         // handle even on most error paths, so dropping the mapping first is
         // safer than risking a dangling key.
@@ -228,6 +304,21 @@ wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
 {
     static auto next_func = next;
     return +[](::hipGraphExec_t exec, ::hipStream_t stream) -> RetT {
+        // Phase C: populate subscribed HIP_GRAPH callback contexts up-front.
+        // Mirrors hip/stream.cpp's create_read_functor: the same
+        // callback_context_data_vec_t must flow through both the ENTER and
+        // EXIT phase dispatch (execute_phase_exit_callbacks reads state
+        // -- thread_id, correlation_id -- that execute_phase_enter_callbacks
+        // wrote into itr.record).
+        auto callback_contexts = tracing::callback_context_data_vec_t{};
+        auto external_corr_ids = tracing::external_correlation_id_map_t{};
+        tracing::populate_contexts(
+            ROCPROFILER_CALLBACK_TRACING_HIP_GRAPH,
+            static_cast<rocprofiler_tracing_operation_t>(
+                ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_LAUNCH),
+            callback_contexts,
+            external_corr_ids);
+
         g_launch_stack.emplace_back();
         auto& s         = g_launch_stack.back();
         s.graph_exec_id = lookup_graph_exec_id(exec);
@@ -274,7 +365,57 @@ wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
         // for GRAPH_LAUNCH records.
         s.agent_id = resolve_launch_stream_agent(stream);
 
+        // Phase C: fire ENTER callback before invoking the underlying launch.
+        // The tool layer's subscriber uses this to push attribution state
+        // (graph_exec_id + per-launch node_counter) that the kernel-dispatch
+        // path will consume via external correlation IDs. Matches the EXIT
+        // pop below; pairing is per-thread (g_launch_stack handles nesting).
+        if(!callback_contexts.empty())
+        {
+            auto  tracer_data = make_hip_graph_payload(s.graph_exec_id, exec);
+            auto* enter_cid   = ::rocprofiler::context::get_latest_correlation_id();
+            auto  enter_internal_corr_id =
+                (enter_cid) ? enter_cid->internal : uint64_t{0};
+            auto enter_ancestor_corr_id =
+                (enter_cid) ? enter_cid->ancestor : uint64_t{0};
+
+            tracing::update_external_correlation_ids(
+                external_corr_ids,
+                s.thread_id,
+                ROCPROFILER_EXTERNAL_CORRELATION_REQUEST_HIP_RUNTIME_API);
+
+            tracing::execute_phase_enter_callbacks(
+                callback_contexts,
+                s.thread_id,
+                enter_internal_corr_id,
+                external_corr_ids,
+                enter_ancestor_corr_id,
+                ROCPROFILER_CALLBACK_TRACING_HIP_GRAPH,
+                static_cast<rocprofiler_tracing_operation_t>(
+                    ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_LAUNCH),
+                tracer_data);
+        }
+
         auto ret = next_func(exec, stream);
+
+        // Phase C: fire EXIT callback after the underlying launch returns.
+        // Uses the SAME callback_contexts vector populated above so the
+        // exit-phase record carries thread_id / correlation_id from the
+        // enter-phase record (per tracing::execute_phase_exit_callbacks
+        // contract). Must run BEFORE g_launch_stack.pop_back() so that
+        // current_launch_state() seen by subscribers still references the
+        // active launch on this thread.
+        if(!callback_contexts.empty())
+        {
+            auto tracer_data = make_hip_graph_payload(s.graph_exec_id, exec);
+            tracing::execute_phase_exit_callbacks(
+                callback_contexts,
+                external_corr_ids,
+                ROCPROFILER_CALLBACK_TRACING_HIP_GRAPH,
+                static_cast<rocprofiler_tracing_operation_t>(
+                    ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_LAUNCH),
+                tracer_data);
+        }
 
         // Per spec §4.4: emit summary record only on hipSuccess. Always emit
         // on success (including dispatch_count == 0) per §4.2.
