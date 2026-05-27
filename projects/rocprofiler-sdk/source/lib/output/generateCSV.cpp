@@ -304,11 +304,11 @@ generate_csv(const output_config&                                               
             // Per spec §5.5: empty string for non-graph dispatches. Gate on
             // graph_exec_id (not graph_node_id) because graph_node_id == 0 is
             // legitimate for the first dispatch of a launch.
-            auto graph_exec_str = record.dispatch_info.graph_exec_id != 0
-                                      ? std::to_string(record.dispatch_info.graph_exec_id)
+            auto graph_exec_str = record.graph_exec_id != 0
+                                      ? std::to_string(record.graph_exec_id)
                                       : std::string{};
-            auto graph_node_str = record.dispatch_info.graph_exec_id != 0
-                                      ? std::to_string(record.dispatch_info.graph_node_id)
+            auto graph_node_str = record.graph_exec_id != 0
+                                      ? std::to_string(record.graph_node_id)
                                       : std::string{};
 
             rocprofiler::tool::csv::kernel_trace_with_stream_csv_encoder::write_row(

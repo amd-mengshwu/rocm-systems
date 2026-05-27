@@ -776,12 +776,12 @@ write_perfetto(
                                 // graph_exec_id (not graph_node_id) because
                                 // graph_node_id == 0 is legitimate for the
                                 // first node of a launch.
-                                if(info.graph_exec_id != 0)
+                                if(current.graph_exec_id != 0)
                                 {
                                     sdk::add_perfetto_annotation(
-                                        ctx, "graph_exec_id", info.graph_exec_id);
+                                        ctx, "graph_exec_id", current.graph_exec_id);
                                     sdk::add_perfetto_annotation(
-                                        ctx, "graph_node_id", info.graph_node_id);
+                                        ctx, "graph_node_id", current.graph_node_id);
                                 }
                             });
                         TRACE_EVENT_END(

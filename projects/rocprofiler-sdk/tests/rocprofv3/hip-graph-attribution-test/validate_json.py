@@ -27,8 +27,9 @@
 Validates that rocprofv3's --output-format json carries through the new
 fields added in Tasks 2 and 4:
 
-  - dispatch_info.graph_exec_id / graph_node_id on KERNEL_DISPATCH records
-    that originated from a graph launch
+  - graph_exec_id / graph_node_id at the top level of KERNEL_DISPATCH
+    records that originated from a graph launch (siblings of stream_id;
+    populated by the tool-layer ext record, not the SDK dispatch_info)
   - GRAPH_LAUNCH summary records with their full field set
 
 These tests are intentionally minimal — the CSV validator (validate.py)
@@ -46,14 +47,15 @@ def _buffer_records(json_input_data):
 
 def test_kernel_dispatch_records_have_graph_fields(json_input_data):
     """Every KERNEL_DISPATCH JSON record must expose graph_exec_id and
-    graph_node_id under dispatch_info — these flow through cereal's save()
-    for rocprofiler_kernel_dispatch_info_t (Task 2)."""
+    graph_node_id at the top level (siblings of stream_id) — these flow
+    through cereal's save() for tool_buffer_tracing_kernel_dispatch_ext_record_t.
+    They are NOT under dispatch_info: graph attribution is a tool-layer
+    concept, not an SDK dispatch property."""
     kernel_dispatch = _buffer_records(json_input_data)["kernel_dispatch"]
     assert len(kernel_dispatch) > 0, "no kernel_dispatch records in JSON"
     for rec in kernel_dispatch:
-        di = rec["dispatch_info"]
-        assert "graph_exec_id" in di, f"dispatch_info missing graph_exec_id: {di}"
-        assert "graph_node_id" in di, f"dispatch_info missing graph_node_id: {di}"
+        assert "graph_exec_id" in rec, f"record missing top-level graph_exec_id: {rec}"
+        assert "graph_node_id" in rec, f"record missing top-level graph_node_id: {rec}"
 
 
 def test_some_kernel_dispatches_have_nonzero_graph_exec_id(
@@ -66,9 +68,7 @@ def test_some_kernel_dispatches_have_nonzero_graph_exec_id(
     Count should match (iterations*execs + 1) * nodes_per_launch — the +1 is
     the one extra successful exec_b launch after the failed launch."""
     kernel_dispatch = _buffer_records(json_input_data)["kernel_dispatch"]
-    graph_rows = [
-        r for r in kernel_dispatch if int(r["dispatch_info"]["graph_exec_id"]) != 0
-    ]
+    graph_rows = [r for r in kernel_dispatch if int(r["graph_exec_id"]) != 0]
     expected_launches = expected_iterations * expected_execs + 1
     expected = expected_launches * expected_nodes_per_launch
     assert (
@@ -131,9 +131,9 @@ def test_graph_launch_exec_ids_match_kernel_dispatch_records(json_input_data):
     buffer_records = _buffer_records(json_input_data)
     launch_ids = {int(r["graph_exec_id"]) for r in buffer_records["graph_launch"]}
     kernel_ids = {
-        int(r["dispatch_info"]["graph_exec_id"])
+        int(r["graph_exec_id"])
         for r in buffer_records["kernel_dispatch"]
-        if int(r["dispatch_info"]["graph_exec_id"]) != 0
+        if int(r["graph_exec_id"]) != 0
     }
     assert (
         launch_ids == kernel_ids

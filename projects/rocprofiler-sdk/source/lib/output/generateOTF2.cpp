@@ -742,10 +742,10 @@ write_otf2(const output_config&                                          cfg,
         // graph_node_id as per-event UINT64 attributes. The empty-on-zero
         // gate uses graph_exec_id (not graph_node_id) because
         // graph_node_id == 0 is legitimate for the first node of a launch.
-        if(info.graph_exec_id != 0)
+        if(itr.graph_exec_id != 0)
         {
-            add_uint64_attribute(_kd_attrs, GRAPH_ATTR_GRAPH_EXEC_ID, info.graph_exec_id);
-            add_uint64_attribute(_kd_attrs, GRAPH_ATTR_GRAPH_NODE_ID, info.graph_node_id);
+            add_uint64_attribute(_kd_attrs, GRAPH_ATTR_GRAPH_EXEC_ID, itr.graph_exec_id);
+            add_uint64_attribute(_kd_attrs, GRAPH_ATTR_GRAPH_NODE_ID, itr.graph_node_id);
         }
 
         _data.emplace_back(evt_data{ROCPROFILER_CALLBACK_PHASE_ENTER,
