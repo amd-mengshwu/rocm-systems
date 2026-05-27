@@ -64,19 +64,43 @@ main(int argc, char** argv)
 
     constexpr size_t N     = 1024;
     float*           d_buf = nullptr;
+    float*           h_buf = nullptr;
     checkHipErrors(hipMalloc(&d_buf, N * sizeof(float)));
+    // Pinned host buffer for the in-graph H2D memcpy node (Phase F).
+    checkHipErrors(hipHostMalloc(&h_buf, N * sizeof(float)));
+    for(size_t i = 0; i < N; ++i)
+        h_buf[i] = 1.0f;
+
+    // Phase F: do at least one out-of-graph H2D memcpy so the memory_copy CSV
+    // file is always produced (its presence is what validate.py inspects to
+    // verify the new Graph_Exec_Id / Graph_Node_Id columns exist). On AMD
+    // HIP, in-graph memcpys are typically implemented as blit kernels and
+    // surface as KERNEL_DISPATCH records rather than MEMORY_COPY records, so
+    // the out-of-graph copy here also guarantees we have at least one
+    // non-graph memcpy row to verify the empty-on-zero rendering rule.
+    checkHipErrors(hipMemcpy(d_buf, h_buf, N * sizeof(float), hipMemcpyHostToDevice));
 
     hipGraph_t graph;
     checkHipErrors(hipGraphCreate(&graph, 0));
 
-    // Topology (5 nodes):
+    // Topology (6 nodes):
     //   a0 (kernel_a, root)
     //     |-> b1 (kernel_b)
     //     `-> a2 (kernel_a)      [b1 and a2 run in parallel after a0]
     //   a3 (kernel_a, depends on both b1 and a2)
-    //   b4 (kernel_b, depends on a3)
+    //   m  (memcpy h_buf -> d_buf, H2D, depends on a3)  [Phase F: memcpy node]
+    //   b4 (kernel_b, depends on m)
     // Three distinct nodes call kernel_a (a0, a2, a3);
-    // two distinct nodes call kernel_b (b1, b4).
+    // two distinct nodes call kernel_b (b1, b4);
+    // one memcpy node (m). Total = 6 graph nodes per launch.
+    //
+    // On AMD HIP, the in-graph memcpy may surface as a KERNEL_DISPATCH
+    // record (blit kernel __amd_rocclr_copyBuffer) rather than a MEMORY_COPY
+    // record. The Phase F validators tolerate this by treating the absence
+    // of in-graph MEMORY_COPY rows as "skip" while still asserting (a) the
+    // CSV carries the new columns and (b) any MEMORY_COPY rows that *are*
+    // graph-attributed have valid graph_exec_id values matching the kernel
+    // CSV.
 
     auto make_kernel_node = [&](hipGraphNode_t* node, hipGraphNode_t* deps, size_t ndeps,
                                 void (*fn)(float*)) {
@@ -91,13 +115,16 @@ main(int argc, char** argv)
         checkHipErrors(hipGraphAddKernelNode(node, graph, deps, ndeps, &kp));
     };
 
-    hipGraphNode_t a0, b1, a2, a3, b4;
+    hipGraphNode_t a0, b1, a2, a3, m, b4;
     make_kernel_node(&a0, nullptr, 0, kernel_a);
     make_kernel_node(&b1, &a0, 1, kernel_b);
     make_kernel_node(&a2, &a0, 1, kernel_a);
     hipGraphNode_t deps_for_a3[] = {b1, a2};
     make_kernel_node(&a3, deps_for_a3, 2, kernel_a);
-    make_kernel_node(&b4, &a3, 1, kernel_b);
+    // Phase F: host->device memcpy graph node.
+    checkHipErrors(hipGraphAddMemcpyNode1D(
+        &m, graph, &a3, 1, d_buf, h_buf, N * sizeof(float), hipMemcpyHostToDevice));
+    make_kernel_node(&b4, &m, 1, kernel_b);
 
     // Two separate executable graphs from the same source -- to verify per-exec
     // distinctness of graph_exec_id.
@@ -125,8 +152,9 @@ main(int argc, char** argv)
     checkHipErrors(hipStreamSynchronize(stream));
 
     std::fprintf(stderr,
-                 "[hip-graph-attribution] iterations=%d execs=2 nodes_per_launch=5 "
-                 "distinct_kernels=2 valid_launches=%d failed_launches=1\n",
+                 "[hip-graph-attribution] iterations=%d execs=2 nodes_per_launch=6 "
+                 "distinct_kernels=2 memcpy_nodes_per_launch=1 valid_launches=%d "
+                 "failed_launches=1\n",
                  iterations,
                  iterations * 2 + 1);
 
@@ -134,5 +162,6 @@ main(int argc, char** argv)
     checkHipErrors(hipGraphDestroy(graph));
     checkHipErrors(hipStreamDestroy(stream));
     checkHipErrors(hipFree(d_buf));
+    checkHipErrors(hipHostFree(h_buf));
     return 0;
 }

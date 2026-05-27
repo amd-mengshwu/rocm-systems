@@ -447,7 +447,9 @@ generate_csv(const output_config&                                           cfg,
                                       "Destination_Agent_Id",
                                       "Correlation_Id",
                                       "Start_Timestamp",
-                                      "End_Timestamp"}};
+                                      "End_Timestamp",
+                                      "Graph_Exec_Id",
+                                      "Graph_Node_Id"}};
 
     for(auto ditr : data)
     {
@@ -455,6 +457,17 @@ generate_csv(const output_config&                                           cfg,
         {
             auto row_ss   = std::stringstream{};
             auto api_name = tool_metadata.get_operation_name(record.kind, record.operation);
+
+            // Per kernel-dispatch convention: empty string for non-graph copies.
+            // Gate on graph_exec_id (not graph_node_id) because graph_node_id == 0
+            // is legitimate for the first node of a launch.
+            auto graph_exec_str = record.graph_exec_id != 0
+                                      ? std::to_string(record.graph_exec_id)
+                                      : std::string{};
+            auto graph_node_str = record.graph_exec_id != 0
+                                      ? std::to_string(record.graph_node_id)
+                                      : std::string{};
+
             rocprofiler::tool::csv::memory_copy_with_stream_csv_encoder::write_row(
                 row_ss,
                 tool_metadata.get_kind_name(record.kind),
@@ -466,7 +479,9 @@ generate_csv(const output_config&                                           cfg,
                     .as_string(),
                 record.correlation_id.internal,
                 record.start_timestamp,
-                record.end_timestamp);
+                record.end_timestamp,
+                graph_exec_str,
+                graph_node_str);
             ofs << row_ss.str();
         }
     }

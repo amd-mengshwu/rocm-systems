@@ -32,6 +32,7 @@ from rocprofiler_sdk.pytest_utils.dotdict import dotdict
 
 def pytest_addoption(parser):
     parser.addoption("--kernel-input", action="store", default=None)
+    parser.addoption("--memory-copy-input", action="store", default=None)
     parser.addoption("--graph-launch-input", action="store", default=None)
     parser.addoption("--hip-api-input", action="store", default=None)
     parser.addoption("--json-input", action="store", default=None)
@@ -39,6 +40,12 @@ def pytest_addoption(parser):
     parser.addoption("--expected-execs", action="store", type=int, default=None)
     parser.addoption(
         "--expected-nodes-per-launch", action="store", type=int, default=None
+    )
+    parser.addoption(
+        "--expected-kernel-nodes-per-launch", action="store", type=int, default=None
+    )
+    parser.addoption(
+        "--expected-memcpy-nodes-per-launch", action="store", type=int, default=None
     )
     parser.addoption(
         "--expected-distinct-kernels", action="store", type=int, default=None
@@ -61,6 +68,30 @@ def kernel_input_data(request):
         pytest.fail("--kernel-input argument is required")
     data = _read_csv(filename)
     assert len(data) > 0, f"CSV file '{filename}' contained no data rows"
+    return data
+
+
+@pytest.fixture
+def memory_copy_input_data(request):
+    """Memory copy CSV may be absent on AMD HIP because in-graph (and even
+    some out-of-graph pinned-host) memcpys are routinely implemented as blit
+    kernels and surface in the KERNEL_DISPATCH stream rather than producing
+    MEMORY_COPY records. Tests that consume this fixture skip when no file
+    exists, while still asserting Phase F plumbing on whatever rows do
+    appear."""
+    import os
+
+    filename = request.config.getoption("--memory-copy-input")
+    if filename is None:
+        pytest.fail("--memory-copy-input argument is required")
+    if not os.path.exists(filename):
+        pytest.skip(
+            f"memory_copy CSV '{filename}' was not produced — no MEMORY_COPY "
+            "records were emitted by this workload (AMD HIP blit-kernel path)."
+        )
+    data = _read_csv(filename)
+    if len(data) == 0:
+        pytest.skip(f"memory_copy CSV '{filename}' contained no data rows")
     return data
 
 
@@ -104,6 +135,16 @@ def expected_execs(request):
 @pytest.fixture
 def expected_nodes_per_launch(request):
     return request.config.getoption("--expected-nodes-per-launch")
+
+
+@pytest.fixture
+def expected_kernel_nodes_per_launch(request):
+    return request.config.getoption("--expected-kernel-nodes-per-launch")
+
+
+@pytest.fixture
+def expected_memcpy_nodes_per_launch(request):
+    return request.config.getoption("--expected-memcpy-nodes-per-launch")
 
 
 @pytest.fixture

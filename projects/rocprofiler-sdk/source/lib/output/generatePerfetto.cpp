@@ -589,7 +589,22 @@ write_perfetto(
                     "tid",
                     itr.thread_id,
                     "stream_ID",
-                    itr.stream_id.handle);
+                    itr.stream_id.handle,
+                    [&](::perfetto::EventContext ctx) {
+                        // HIP graph attribution: emit graph_exec_id and
+                        // graph_node_id as debug annotations on copies that
+                        // originated from a hipGraphLaunch. Mirrors the
+                        // kernel_dispatch annotation gate (empty-on-zero on
+                        // graph_exec_id since graph_node_id == 0 is
+                        // legitimate for the first node of a launch).
+                        if(itr.graph_exec_id != 0)
+                        {
+                            sdk::add_perfetto_annotation(
+                                ctx, "graph_exec_id", itr.graph_exec_id);
+                            sdk::add_perfetto_annotation(
+                                ctx, "graph_node_id", itr.graph_node_id);
+                        }
+                    });
                 TRACE_EVENT_END(sdk::perfetto_category<sdk::category::memory_copy>::name,
                                 *_track,
                                 itr.end_timestamp);

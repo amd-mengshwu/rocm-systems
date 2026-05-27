@@ -1233,11 +1233,10 @@ buffered_tracing_callback(rocprofiler_context_id_t /*context*/,
                 auto* record =
                     static_cast<rocprofiler_buffer_tracing_memory_copy_record_t*>(header->payload);
 
-                // Phase F will extend the memory copy ext record with graph_*
-                // fields; for now only stream_id is plumbed through here.
                 auto attr = get_ext_attribution(record);
                 tool::write_ring_buffer(
-                    tool::tool_buffer_tracing_memory_copy_ext_record_t{*record, attr.stream_id},
+                    tool::tool_buffer_tracing_memory_copy_ext_record_t{
+                        *record, attr.stream_id, attr.graph_exec_id, attr.graph_node_id},
                     domain_type::MEMORY_COPY);
             }
             else if(header->kind == ROCPROFILER_BUFFER_TRACING_MEMORY_ALLOCATION)

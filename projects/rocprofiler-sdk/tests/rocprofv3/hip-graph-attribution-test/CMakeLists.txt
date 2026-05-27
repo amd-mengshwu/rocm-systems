@@ -32,8 +32,8 @@ rocprofiler_add_integration_execute_test(
     ${TEST_NAME}
     COMMAND
         $<TARGET_FILE:rocprofiler-sdk::rocprofv3> --hip-trace --kernel-trace
-        --graph-launch-trace -d ${OUTPUT_DIR} -o out --output-format csv --
-        $<TARGET_FILE:hip-graph-attribution> ${ITERATIONS}
+        --memory-copy-trace --graph-launch-trace -d ${OUTPUT_DIR} -o out
+        --output-format csv -- $<TARGET_FILE:hip-graph-attribution> ${ITERATIONS}
     DEPENDS hip-graph-attribution
     TIMEOUT 120
     LABELS "integration-tests"
@@ -46,12 +46,15 @@ rocprofiler_add_integration_validate_test(
     COPY conftest.py
     CONFIG pytest.ini
     ARGS --kernel-input ${OUTPUT_DIR}/out_kernel_trace.csv
+         --memory-copy-input ${OUTPUT_DIR}/out_memory_copy_trace.csv
          --graph-launch-input ${OUTPUT_DIR}/out_graph_launch_trace.csv
          --hip-api-input ${OUTPUT_DIR}/out_hip_api_trace.csv
          --expected-iterations ${ITERATIONS}
          --expected-execs 2
-         --expected-nodes-per-launch 5
-         --expected-distinct-kernels 2
+         --expected-nodes-per-launch 6
+         --expected-kernel-nodes-per-launch 6
+         --expected-memcpy-nodes-per-launch 0
+         --expected-distinct-kernels 3
     TIMEOUT 60
     LABELS "integration-tests"
     FIXTURES_REQUIRED ${TEST_NAME})
@@ -82,7 +85,7 @@ rocprofiler_add_integration_validate_test(
     ARGS --graph-launch-input ${OUTPUT_DIR_GLO}/out_graph_launch_trace.csv
          --expected-iterations ${ITERATIONS}
          --expected-execs 2
-         --expected-nodes-per-launch 5
+         --expected-nodes-per-launch 6
     TIMEOUT 60
     LABELS "integration-tests"
     FIXTURES_REQUIRED ${TEST_NAME_GLO})
@@ -115,7 +118,7 @@ rocprofiler_add_integration_validate_test(
     ARGS --json-input ${OUTPUT_DIR_JSON}/out_results.json
          --expected-iterations ${ITERATIONS}
          --expected-execs 2
-         --expected-nodes-per-launch 5
+         --expected-nodes-per-launch 6
     TIMEOUT 60
     LABELS "integration-tests"
     FIXTURES_REQUIRED ${TEST_NAME_JSON})

@@ -682,11 +682,23 @@ write_otf2(const output_config&                                          cfg,
         auto& _evt_info = agent_memcpy_info.at(itr.thread_id).at(itr.dst_agent_id);
         _evt_info.event_count += 1;
 
+        auto* _mc_attrs = get_attr(sdk::category::memory_copy{});
+
+        // HIP graph attribution: when this memory copy originated from a graph
+        // launch (graph_exec_id != 0), attach the graph_exec_id and
+        // graph_node_id as per-event UINT64 attributes. Mirrors the
+        // kernel_dispatch attribution above.
+        if(itr.graph_exec_id != 0)
+        {
+            add_uint64_attribute(_mc_attrs, GRAPH_ATTR_GRAPH_EXEC_ID, itr.graph_exec_id);
+            add_uint64_attribute(_mc_attrs, GRAPH_ATTR_GRAPH_NODE_ID, itr.graph_node_id);
+        }
+
         _data.emplace_back(evt_data{ROCPROFILER_CALLBACK_PHASE_ENTER,
                                     name,
                                     _evt_info.get_location(),
                                     itr.start_timestamp,
-                                    get_attr(sdk::category::memory_copy{})});
+                                    _mc_attrs});
         _data.emplace_back(evt_data{ROCPROFILER_CALLBACK_PHASE_EXIT,
                                     name,
                                     _evt_info.get_location(),
