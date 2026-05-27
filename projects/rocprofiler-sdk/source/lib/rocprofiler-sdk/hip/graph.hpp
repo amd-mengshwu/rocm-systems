@@ -27,6 +27,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include <cstdint>
+#include <vector>
 
 namespace rocprofiler
 {
@@ -67,6 +68,15 @@ update_table(TableT* table);
 /// Assigned at hipGraphInstantiate*; returns 0 if not tracked.
 uint64_t
 lookup_graph_exec_id(::hipGraphExec_t exec);
+
+/// Returns the printable name of a ::rocprofiler_hip_graph_operation_t id, or
+/// nullptr if the id is out of range.
+const char*
+name_by_id(uint32_t id);
+
+/// Returns the full set of valid ::rocprofiler_hip_graph_operation_t ids.
+std::vector<uint32_t>
+get_ids();
 
 }  // namespace graph
 }  // namespace hip

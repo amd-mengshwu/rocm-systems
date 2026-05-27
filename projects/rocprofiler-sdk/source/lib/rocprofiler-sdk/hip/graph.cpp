@@ -35,11 +35,13 @@
 #include <hip/hip_runtime_api.h>
 
 #include <atomic>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace rocprofiler
 {
@@ -287,6 +289,46 @@ wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
         return ret;
     };
 }
+
+// Map rocprofiler_hip_graph_operation_t to respective name
+template <size_t OpIdx>
+struct hip_graph_operation_name;
+
+#define HIP_GRAPH_OPERATION_NAME(ENUM)                                                             \
+    template <>                                                                                    \
+    struct hip_graph_operation_name<ROCPROFILER_HIP_GRAPH_OPERATION_##ENUM>                        \
+    {                                                                                              \
+        static constexpr auto name          = "HIP_GRAPH_OPERATION_" #ENUM;                        \
+        static constexpr auto operation_idx = ROCPROFILER_HIP_GRAPH_OPERATION_##ENUM;              \
+    };
+
+HIP_GRAPH_OPERATION_NAME(NONE)
+HIP_GRAPH_OPERATION_NAME(HIP_GRAPH_EXEC_CREATE)
+HIP_GRAPH_OPERATION_NAME(HIP_GRAPH_EXEC_DESTROY)
+HIP_GRAPH_OPERATION_NAME(HIP_GRAPH_LAUNCH)
+#undef HIP_GRAPH_OPERATION_NAME
+
+template <size_t OpIdx, size_t... OpIdxTail>
+const char*
+name_by_id(const uint32_t id, std::index_sequence<OpIdx, OpIdxTail...>)
+{
+    if(OpIdx == id) return hip_graph_operation_name<OpIdx>::name;
+
+    if constexpr(sizeof...(OpIdxTail) > 0)
+        return name_by_id(id, std::index_sequence<OpIdxTail...>{});
+    else
+        return nullptr;
+}
+
+template <size_t OpIdx, size_t... OpIdxTail>
+void
+get_ids(std::vector<uint32_t>& _id_list, std::index_sequence<OpIdx, OpIdxTail...>)
+{
+    auto _idx = hip_graph_operation_name<OpIdx>::operation_idx;
+    if(_idx < ROCPROFILER_HIP_GRAPH_OPERATION_LAST) _id_list.emplace_back(_idx);
+
+    if constexpr(sizeof...(OpIdxTail) > 0) get_ids(_id_list, std::index_sequence<OpIdxTail...>{});
+}
 }  // namespace
 
 launch_state*
@@ -302,6 +344,22 @@ lookup_graph_exec_id(::hipGraphExec_t exec)
     std::shared_lock lock{g_map_mutex};
     auto             it = g_exec_to_id.find(exec);
     return it == g_exec_to_id.end() ? 0 : it->second;
+}
+
+const char*
+name_by_id(uint32_t id)
+{
+    return name_by_id(id, std::make_index_sequence<ROCPROFILER_HIP_GRAPH_OPERATION_LAST>{});
+}
+
+std::vector<uint32_t>
+get_ids()
+{
+    constexpr auto last_id = ROCPROFILER_HIP_GRAPH_OPERATION_LAST;
+    auto           _data   = std::vector<uint32_t>{};
+    _data.reserve(last_id);
+    get_ids(_data, std::make_index_sequence<ROCPROFILER_HIP_GRAPH_OPERATION_LAST>{});
+    return _data;
 }
 
 // Explicit specialization for the HIP runtime dispatch table. Wraps the four
