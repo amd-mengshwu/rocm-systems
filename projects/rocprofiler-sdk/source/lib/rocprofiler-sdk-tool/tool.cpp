@@ -25,6 +25,7 @@
 
 #include "config.hpp"
 #include "execution_profile.hpp"
+#include "graph_stack.hpp"
 #include "helper.hpp"
 #include "stream_stack.hpp"
 
@@ -290,11 +291,14 @@ thread_local auto thread_dispatch_rename_dtor = common::scope_destructor{[]() {
 // any context that needs to support pause/resume functionality should add itself to this list
 auto pause_resume_contexts = context_id_set_t{};
 
-// Stores stream ids and kernel region ids for kernel-rename service and hip stream display service
+// Stores stream ids, graph attribution, and kernel region ids for the
+// kernel-rename, hip-stream-display, and hip-graph-display services.
 struct kernel_rename_and_stream_data
 {
-    uint64_t                region_id = 0;  // roctx region correlation id
-    rocprofiler_stream_id_t stream_id = {.handle = 0};
+    uint64_t                region_id     = 0;  // roctx region correlation id
+    rocprofiler_stream_id_t stream_id     = {.handle = 0};
+    uint64_t                graph_exec_id = 0;
+    uint64_t                graph_node_id = 0;
 };
 
 bool
@@ -500,22 +504,34 @@ record_execution_profile(rocprofiler_thread_id_t                            thr_
     return 0;
 }
 
-template <typename Tp>
-rocprofiler_stream_id_t
-get_stream_id(Tp* _record)
+// Tool-layer external-correlation-id attribution extracted from the per-dispatch
+// payload allocated by set_kernel_rename_and_stream_correlation_id().
+struct ext_attribution_t
 {
-    auto _stream_id = rocprofiler_stream_id_t{.handle = 0};
+    rocprofiler_stream_id_t stream_id     = {.handle = 0};
+    uint64_t                graph_exec_id = 0;
+    uint64_t                graph_node_id = 0;
+};
+
+template <typename Tp>
+ext_attribution_t
+get_ext_attribution(Tp* _record)
+{
+    auto _attr = ext_attribution_t{};
     if(_record->correlation_id.external.ptr != nullptr)
     {
-        // Extract the stream id
+        // Extract the captured attribution and replace the external pointer with
+        // the roctx region id so downstream consumers see the original user value.
         auto* _ecid_data =
             static_cast<kernel_rename_and_stream_data*>(_record->correlation_id.external.ptr);
-        _stream_id                             = _ecid_data->stream_id;
+        _attr.stream_id                        = _ecid_data->stream_id;
+        _attr.graph_exec_id                    = _ecid_data->graph_exec_id;
+        _attr.graph_node_id                    = _ecid_data->graph_node_id;
         auto _region_id                        = _ecid_data->region_id;
         _record->correlation_id.external.value = _region_id;
         delete _ecid_data;
     }
-    return _stream_id;
+    return _attr;
 }
 
 int
@@ -533,8 +549,9 @@ set_kernel_rename_and_stream_correlation_id(rocprofiler_thread_id_t  thr_id,
         thread_dispatch_rename != nullptr && !thread_dispatch_rename->empty();
 
     const bool hip_stream_enabled = rocprofiler::tool::stream::stream_stack_not_null();
+    const bool hip_graph_enabled  = rocprofiler::tool::graph::graph_stack_not_null();
 
-    if(!kernel_rename_service_enabled && !hip_stream_enabled) return 1;
+    if(!kernel_rename_service_enabled && !hip_stream_enabled && !hip_graph_enabled) return 1;
 
     auto* _info = new kernel_rename_and_stream_data{};
 
@@ -549,6 +566,18 @@ set_kernel_rename_and_stream_correlation_id(rocprofiler_thread_id_t  thr_id,
     if(hip_stream_enabled)
     {
         _info->stream_id = rocprofiler::tool::stream::get_stream_id();
+    }
+
+    // Get graph attribution for the in-flight HIP_GRAPH_LAUNCH (if any) and
+    // post-increment the launch's node counter so successive dispatches in the
+    // same launch receive monotonically increasing graph_node_id values.
+    if(hip_graph_enabled)
+    {
+        if(auto* _g = rocprofiler::tool::graph::current(); _g != nullptr)
+        {
+            _info->graph_exec_id = _g->graph_exec_id;
+            _info->graph_node_id = _g->node_counter++;
+        }
     }
 
     // Set the external correlation id service to point to struct
@@ -794,6 +823,43 @@ hip_stream_display_callback(rocprofiler_callback_tracing_record_t record,
     {
         ROCP_FATAL << "Unsupported operation for ROCPROFILER_HIP_STREAM";
     }
+    common::consume_args(user_data, data);
+}
+
+// Maintains the per-thread graph attribution stack used to tag KERNEL_DISPATCH
+// and MEMORY_COPY records spawned during a hipGraphLaunch with the launching
+// graph_exec_id and a sequential graph_node_id. The HIP_GRAPH_EXEC_CREATE and
+// HIP_GRAPH_EXEC_DESTROY operations are reserved for a future graph catalog and
+// are intentionally not consumed here.
+void
+hip_graph_display_callback(rocprofiler_callback_tracing_record_t record,
+                           rocprofiler_user_data_t*              user_data,
+                           void*                                 data)
+{
+    if(record.kind != ROCPROFILER_CALLBACK_TRACING_HIP_GRAPH) return;
+
+    auto* payload = static_cast<rocprofiler_callback_tracing_hip_graph_data_t*>(record.payload);
+    if(payload == nullptr) return;
+
+    if(record.operation == ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_LAUNCH)
+    {
+        if(record.phase == ROCPROFILER_CALLBACK_PHASE_ENTER)
+        {
+            ROCP_TRACE << "hip_graph_display_callback: HIP_GRAPH_LAUNCH ENTER graph_exec_id="
+                       << payload->graph_exec_id;
+            rocprofiler::tool::graph::push(payload->graph_exec_id);
+        }
+        else if(record.phase == ROCPROFILER_CALLBACK_PHASE_EXIT)
+        {
+            ROCP_TRACE << "hip_graph_display_callback: HIP_GRAPH_LAUNCH EXIT graph_exec_id="
+                       << payload->graph_exec_id;
+            rocprofiler::tool::graph::pop();
+        }
+    }
+    // ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_CREATE and
+    // ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_DESTROY are reserved for a
+    // future catalog of graph_exec_id -> source graph mappings and are no-ops here.
+
     common::consume_args(user_data, data);
 }
 
@@ -1146,9 +1212,10 @@ buffered_tracing_callback(rocprofiler_context_id_t /*context*/,
                 auto* record = static_cast<rocprofiler_buffer_tracing_kernel_dispatch_record_t*>(
                     header->payload);
 
-                auto stream_id = get_stream_id(record);
+                auto attr = get_ext_attribution(record);
                 tool::write_ring_buffer(
-                    tool::tool_buffer_tracing_kernel_dispatch_ext_record_t{*record, stream_id},
+                    tool::tool_buffer_tracing_kernel_dispatch_ext_record_t{
+                        *record, attr.stream_id, attr.graph_exec_id, attr.graph_node_id},
                     domain_type::KERNEL_DISPATCH);
             }
             else if(header->kind == ROCPROFILER_BUFFER_TRACING_HSA_CORE_API ||
@@ -1166,9 +1233,11 @@ buffered_tracing_callback(rocprofiler_context_id_t /*context*/,
                 auto* record =
                     static_cast<rocprofiler_buffer_tracing_memory_copy_record_t*>(header->payload);
 
-                auto stream_id = get_stream_id(record);
+                // Phase F will extend the memory copy ext record with graph_*
+                // fields; for now only stream_id is plumbed through here.
+                auto attr = get_ext_attribution(record);
                 tool::write_ring_buffer(
-                    tool::tool_buffer_tracing_memory_copy_ext_record_t{*record, stream_id},
+                    tool::tool_buffer_tracing_memory_copy_ext_record_t{*record, attr.stream_id},
                     domain_type::MEMORY_COPY);
             }
             else if(header->kind == ROCPROFILER_BUFFER_TRACING_MEMORY_ALLOCATION)
@@ -1176,9 +1245,10 @@ buffered_tracing_callback(rocprofiler_context_id_t /*context*/,
                 auto* record = static_cast<rocprofiler_buffer_tracing_memory_allocation_record_t*>(
                     header->payload);
 
-                auto stream_id = get_stream_id(record);
+                auto attr = get_ext_attribution(record);
                 tool::write_ring_buffer(
-                    tool::tool_buffer_tracing_memory_allocation_ext_record_t{*record, stream_id},
+                    tool::tool_buffer_tracing_memory_allocation_ext_record_t{*record,
+                                                                             attr.stream_id},
                     domain_type::MEMORY_ALLOCATION);
             }
             else if(header->kind == ROCPROFILER_BUFFER_TRACING_KFD_EVENT_PAGE_MIGRATE ||
@@ -1285,9 +1355,9 @@ buffered_tracing_callback(rocprofiler_context_id_t /*context*/,
                 auto* record =
                     static_cast<rocprofiler_buffer_tracing_hip_api_ext_record_t*>(header->payload);
 
-                auto stream_id = get_stream_id(record);
+                auto attr = get_ext_attribution(record);
                 tool::write_ring_buffer(
-                    tool::tool_buffer_tracing_hip_api_ext_record_t{*record, stream_id},
+                    tool::tool_buffer_tracing_hip_api_ext_record_t{*record, attr.stream_id},
                     domain_type::HIP);
             }
             else if(header->kind == ROCPROFILER_BUFFER_TRACING_RCCL_API)
@@ -1797,9 +1867,10 @@ counter_record_callback(rocprofiler_dispatch_counting_service_data_t dispatch_da
 
     auto counter_record = tool::tool_counter_record_t{};
 
-    // must call get_stream_id on dispatch_data before copying to counter_record.dispatch_data
-    // so that external correlation id is updated before copy is made
-    counter_record.stream_id     = get_stream_id(&dispatch_data);
+    // must call get_ext_attribution on dispatch_data before copying to
+    // counter_record.dispatch_data so that the external correlation id is
+    // updated (back to the original roctx region id) before the copy is made.
+    counter_record.stream_id     = get_ext_attribution(&dispatch_data).stream_id;
     counter_record.dispatch_data = dispatch_data;
     counter_record.thread_id     = user_data.value;
     auto serialized_records      = std::vector<tool::tool_counter_value_t>{};
@@ -2220,6 +2291,7 @@ struct tracing_callbacks_t
     , cntrl_tracing{cntrl_tracing_callback}
     , kernel_rename{kernel_rename_callback}
     , hip_stream{hip_stream_display_callback}
+    , hip_graph{hip_graph_display_callback}
     , callback_tracing{callback_tracing_callback}
     , buffered_tracing{buffered_tracing_callback}
     , pc_sampling{pc_sampling_callback}
@@ -2235,6 +2307,7 @@ struct tracing_callbacks_t
     , cntrl_tracing{dummy_callback_tracing_callback}
     , kernel_rename{dummy_callback_tracing_callback}
     , hip_stream{dummy_callback_tracing_callback}
+    , hip_graph{dummy_callback_tracing_callback}
     , callback_tracing{dummy_callback_tracing_callback}
     , buffered_tracing{dummy_buffered_tracing_callback}
     , pc_sampling{dummy_buffered_tracing_callback}
@@ -2246,6 +2319,7 @@ struct tracing_callbacks_t
     const rocprofiler_callback_tracing_cb_t               cntrl_tracing                   = nullptr;
     const rocprofiler_callback_tracing_cb_t               kernel_rename                   = nullptr;
     const rocprofiler_callback_tracing_cb_t               hip_stream                      = nullptr;
+    const rocprofiler_callback_tracing_cb_t               hip_graph                       = nullptr;
     const rocprofiler_callback_tracing_cb_t               callback_tracing                = nullptr;
     const rocprofiler_buffer_tracing_cb_t                 buffered_tracing                = nullptr;
     const rocprofiler_buffer_tracing_cb_t                 pc_sampling                     = nullptr;
@@ -2931,6 +3005,30 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
         "hip stream tracing configure failed");
 
     start_context(hip_stream_display_ctx, "hip stream");
+
+    // Track HIP graph launch lifecycle so kernel dispatches and memory copies
+    // spawned during a hipGraphLaunch can be attributed to (graph_exec_id,
+    // graph_node_id) via the external correlation id payload. Only enabled when
+    // graph launch tracing is requested, since the per-thread stack push/pop on
+    // every launch otherwise adds overhead with no consumer.
+    if(tool::get_config().graph_launch_trace)
+    {
+        auto hip_graph_display_ctx = rocprofiler_context_id_t{0};
+
+        ROCPROFILER_CALL(rocprofiler_create_context(&hip_graph_display_ctx),
+                         "failed to create hip graph context");
+
+        ROCPROFILER_CALL(
+            rocprofiler_configure_callback_tracing_service(hip_graph_display_ctx,
+                                                           ROCPROFILER_CALLBACK_TRACING_HIP_GRAPH,
+                                                           nullptr,
+                                                           0,
+                                                           callbacks.hip_graph,
+                                                           nullptr),
+            "hip graph tracing configure failed");
+
+        start_context(hip_graph_display_ctx, "hip graph");
+    }
 
     // Track if HIP runtime has been initialized via runtime_intialization service
     auto runtime_initialization_ctx = rocprofiler_context_id_t{0};

@@ -41,9 +41,13 @@ struct tool_buffer_tracing_kernel_dispatch_ext_record_t
     using base_type = rocprofiler_buffer_tracing_kernel_dispatch_record_t;
 
     tool_buffer_tracing_kernel_dispatch_ext_record_t(const base_type&              _base,
-                                                     const rocprofiler_stream_id_t _stream_id)
+                                                     const rocprofiler_stream_id_t _stream_id,
+                                                     uint64_t                      _graph_exec_id,
+                                                     uint64_t                      _graph_node_id)
     : base_type{_base}
     , stream_id{_stream_id}
+    , graph_exec_id{_graph_exec_id}
+    , graph_node_id{_graph_node_id}
     {}
 
     tool_buffer_tracing_kernel_dispatch_ext_record_t()  = delete;
@@ -57,7 +61,9 @@ struct tool_buffer_tracing_kernel_dispatch_ext_record_t
     tool_buffer_tracing_kernel_dispatch_ext_record_t& operator       =(
         tool_buffer_tracing_kernel_dispatch_ext_record_t&&) noexcept = default;
 
-    rocprofiler_stream_id_t stream_id = {.handle = 0};
+    rocprofiler_stream_id_t stream_id     = {.handle = 0};
+    uint64_t                graph_exec_id = 0;
+    uint64_t                graph_node_id = 0;
 };
 
 struct tool_buffer_tracing_memory_copy_ext_record_t
@@ -148,6 +154,8 @@ save(ArchiveT&                                                                  
 {
     cereal::save(ar, static_cast<const rocprofiler_buffer_tracing_kernel_dispatch_record_t&>(data));
     SAVE_DATA_FIELD(stream_id);
+    SAVE_DATA_FIELD(graph_exec_id);
+    SAVE_DATA_FIELD(graph_node_id);
 }
 
 template <typename ArchiveT>
