@@ -542,25 +542,14 @@ WriteInterceptor(const void* packets,
 
             auto dispatch_id = ++sequence_counter;
 
-            // Read the per-thread graph launch state (nullptr if not inside hipGraphLaunch).
-            // The counter increment and dispatch_count bump are NOT gated on any subscription
-            // state — required for spec §4.2 subscription independence.
-            auto graph_exec_id = uint64_t{0};
-            auto graph_node_id = uint64_t{0};
             if(auto* gls = ::rocprofiler::hip::graph::current_launch_state(); gls != nullptr)
             {
-                graph_exec_id = gls->graph_exec_id;
-                graph_node_id = gls->node_counter++;
-
-                // start_ts is unconditionally populated by wrap_launch at hipGraphLaunch
-                // enter (hip/graph.cpp); no fallback required here.
+                // Count kernel dispatches observed during this graph launch. Feeds
+                // the GRAPH_LAUNCH summary record's kernel_dispatch_count field.
+                // Counter is not gated on any subscription state — per spec §4.2
+                // "Subscription independence", GRAPH_LAUNCH-only consumers must
+                // see correct counts.
                 ++gls->dispatch_count;
-
-                // NOTE: agent_id and queue_id are stamped at hipGraphLaunch enter
-                // (see hip/graph.cpp::wrap_launch). The GRAPH_LAUNCH record's
-                // agent_id reflects the *launch stream's* agent, not the per-
-                // dispatch queue's agent -- in multi-device graphs these can
-                // differ, and the launch-stream view is what spec §4.2 calls for.
             }
 
             _packet_data.callback_record =
@@ -577,8 +566,6 @@ WriteInterceptor(const void* packets,
                                       .group_segment_size   = pkt_info.group_segment_size,
                                       .workgroup_size       = pkt_info.workgroup_size,
                                       .grid_size            = pkt_info.grid_size,
-                                      .graph_exec_id        = graph_exec_id,
-                                      .graph_node_id        = graph_node_id,
                                       .reserved_padding     = {0}}};
 
             {
