@@ -568,10 +568,12 @@ set_kernel_rename_and_stream_correlation_id(rocprofiler_thread_id_t  thr_id,
         _info->stream_id = rocprofiler::tool::stream::get_stream_id();
     }
 
-    // Get graph attribution for the in-flight HIP_GRAPH_LAUNCH (if any) and
-    // post-increment the launch's node counter so successive dispatches in the
-    // same launch receive monotonically increasing graph_node_id values.
-    if(hip_graph_enabled)
+    // Consume a node-counter ordinal only for record kinds that surface graph
+    // nodes; otherwise the ordinals would shift across the actual node records.
+    const bool kind_consumes_graph_ordinal =
+        (kind == ROCPROFILER_EXTERNAL_CORRELATION_REQUEST_KERNEL_DISPATCH ||
+         kind == ROCPROFILER_EXTERNAL_CORRELATION_REQUEST_MEMORY_COPY);
+    if(hip_graph_enabled && kind_consumes_graph_ordinal)
     {
         if(auto* _g = rocprofiler::tool::graph::current(); _g != nullptr)
         {

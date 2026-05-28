@@ -356,10 +356,17 @@ the same ``hipGraphExec_t`` **if and only if** all of the following hold:
 3. The same host thread is the sole launcher of that ``hipGraphExec_t``.
 4. The graph has not been updated via ``hipGraphExecUpdate`` between launches.
 
-Outside these conditions ``Graph_Node_Id`` remains a valid per-operation
-ordinal within one launch but is not guaranteed to identify the same node
-across launches. ``Kernel_Dispatch_Count`` on the ``GRAPH_LAUNCH`` summary
-record may then under-report the actual count.
+Outside these conditions, attribution may be missing entirely for some or
+all dispatches produced by the launch. The tool maintains the per-thread
+attribution state on the thread that calls ``hipGraphLaunch``; if HIP's
+underlying scheduling writes AQL packets from a different host thread
+(e.g., the classic-path command-processor thread when
+``AMD_DIRECT_DISPATCH=0``, or any worker thread under non-segmented
+scheduling), those packets do not see the attribution state and their
+records are produced with empty ``Graph_Exec_Id`` / ``Graph_Node_Id``
+fields. ``Kernel_Dispatch_Count`` on the ``GRAPH_LAUNCH`` summary record
+may then under-report the actual count. Consumers cannot distinguish
+missing-attribution rows from genuinely non-graph rows.
 
 Limitations
 ^^^^^^^^^^^

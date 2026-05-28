@@ -62,13 +62,20 @@ std::shared_mutex                              g_map_mutex;
 std::unordered_map<::hipGraphExec_t, uint64_t> g_exec_to_id;
 std::atomic<uint64_t>                          g_next_graph_exec_id{1};  // 0 reserved = "not from a graph"
 
+// Get-or-create: returns the existing id on race, otherwise assigns a fresh one.
 uint64_t
-assign_graph_exec_id(::hipGraphExec_t exec)
+assign_graph_exec_id(::hipGraphExec_t exec, bool* out_was_new = nullptr)
 {
+    if(out_was_new) *out_was_new = false;
     if(exec == nullptr) return 0;
-    auto id = g_next_graph_exec_id.fetch_add(1, std::memory_order_relaxed);
     std::unique_lock lock{g_map_mutex};
+    if(auto it = g_exec_to_id.find(exec); it != g_exec_to_id.end())
+    {
+        return it->second;
+    }
+    auto id            = g_next_graph_exec_id.fetch_add(1, std::memory_order_relaxed);
     g_exec_to_id[exec] = id;
+    if(out_was_new) *out_was_new = true;
     return id;
 }
 
@@ -159,16 +166,18 @@ wrap_destroy(RetT (*next)(::hipGraphExec_t))
 {
     static auto next_func = next;
     return +[](::hipGraphExec_t exec) -> RetT {
-        // Fire the callback before forgetting the map entry so lookup still
-        // returns the real id, and before destroy so the handle is still valid.
-        if(exec != nullptr)
+        // Capture id before next_func; only forget + fire on successful destroy.
+        auto exec_id = (exec != nullptr) ? lookup_graph_exec_id(exec) : uint64_t{0};
+
+        auto ret = next_func(exec);
+
+        if(ret == hipSuccess && exec != nullptr)
         {
-            auto exec_id = lookup_graph_exec_id(exec);
             fire_hip_graph_none_callback(
                 ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_DESTROY, exec_id, exec);
+            forget_graph_exec(exec);
         }
-        forget_graph_exec(exec);
-        return next_func(exec);
+        return ret;
     };
 }
 
@@ -273,13 +282,22 @@ wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
             external_corr_ids);
 
         g_launch_stack.emplace_back();
-        auto& s         = g_launch_stack.back();
-        s.graph_exec_id = lookup_graph_exec_id(exec);
+        auto& s = g_launch_stack.back();
+
+        // Attach-mid-process fallback: synthesize a CREATE callback if we
+        // assigned a fresh id so subscribers see lifecycle events in order.
+        bool fallback_assigned = false;
+        s.graph_exec_id        = lookup_graph_exec_id(exec);
         if(s.graph_exec_id == 0)
         {
-            // Attach-mid-process fallback: rocprofiler may have attached after
-            // hipGraphInstantiate ran, so the map has no entry.
-            s.graph_exec_id = assign_graph_exec_id(exec);
+            s.graph_exec_id = assign_graph_exec_id(exec, &fallback_assigned);
+            if(fallback_assigned)
+            {
+                fire_hip_graph_none_callback(
+                    ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_CREATE,
+                    s.graph_exec_id,
+                    exec);
+            }
         }
         s.thread_id = common::get_tid();
         if(auto* cid = ::rocprofiler::context::get_latest_correlation_id())
@@ -335,6 +353,16 @@ wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
         if(ret == hipSuccess)
         {
             emit_graph_launch_record(s, end_ts);
+        }
+        else if(fallback_assigned)
+        {
+            // Failed launch on a fallback-assigned id: undo the synthesized
+            // CREATE so we don't leak a mapping pointing at a dead handle.
+            fire_hip_graph_none_callback(
+                ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_DESTROY,
+                s.graph_exec_id,
+                exec);
+            forget_graph_exec(exec);
         }
         g_launch_stack.pop_back();
         return ret;
