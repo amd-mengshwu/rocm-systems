@@ -369,8 +369,8 @@ enum graph_attribute_id_t : uint32_t
 void
 add_uint64_attribute(attribute_list_t* _list, uint32_t _id, uint64_t _val)
 {
-    auto _v       = OTF2_AttributeValue{};
-    _v.uint64     = _val;
+    auto _v   = OTF2_AttributeValue{};
+    _v.uint64 = _val;
     OTF2_AttributeList_AddAttribute(_list, _id, OTF2_TYPE_UINT64, _v);
 }
 }  // namespace
@@ -914,9 +914,8 @@ write_otf2(const output_config&                                          cfg,
             OTF2_CHECK(OTF2_GlobalDefWriter_WriteAttribute(
                 global_def_writer, _id, _nh, _dh, OTF2_TYPE_UINT64));
         };
-        _register_uint64_attr(GRAPH_ATTR_GRAPH_EXEC_ID,
-                              "graph_exec_id",
-                              "HIP graph executable instance id");
+        _register_uint64_attr(
+            GRAPH_ATTR_GRAPH_EXEC_ID, "graph_exec_id", "HIP graph executable instance id");
         _register_uint64_attr(GRAPH_ATTR_GRAPH_NODE_ID,
                               "graph_node_id",
                               "HIP graph node ordinal within graph_exec_id");

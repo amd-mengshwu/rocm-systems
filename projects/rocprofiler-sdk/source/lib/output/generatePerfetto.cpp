@@ -599,10 +599,8 @@ write_perfetto(
                         // legitimate for the first node of a launch).
                         if(itr.graph_exec_id != 0)
                         {
-                            sdk::add_perfetto_annotation(
-                                ctx, "graph_exec_id", itr.graph_exec_id);
-                            sdk::add_perfetto_annotation(
-                                ctx, "graph_node_id", itr.graph_node_id);
+                            sdk::add_perfetto_annotation(ctx, "graph_exec_id", itr.graph_exec_id);
+                            sdk::add_perfetto_annotation(ctx, "graph_node_id", itr.graph_node_id);
                         }
                     });
                 TRACE_EVENT_END(sdk::perfetto_category<sdk::category::memory_copy>::name,

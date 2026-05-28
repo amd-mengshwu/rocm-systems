@@ -15,10 +15,9 @@ if(DEFINED ENV{ROCM_PATH} AND EXISTS "$ENV{ROCM_PATH}/lib/rocm_sysdeps/lib")
     list(APPEND HIP_GRAPH_ATTRIBUTION_ENVIRONMENT
          "LD_LIBRARY_PATH=$ENV{ROCM_PATH}/lib/rocm_sysdeps/lib:$ENV{LD_LIBRARY_PATH}")
 endif()
-# Pin determinism preconditions: segmented-scheduling + direct-dispatch keep
-# the per-launch node_id sequence stable across iterations.
-list(APPEND HIP_GRAPH_ATTRIBUTION_ENVIRONMENT
-     "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING=1"
+# Pin determinism preconditions: segmented-scheduling + direct-dispatch keep the
+# per-launch node_id sequence stable across iterations.
+list(APPEND HIP_GRAPH_ATTRIBUTION_ENVIRONMENT "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING=1"
      "AMD_DIRECT_DISPATCH=1")
 
 set(ITERATIONS 50)
@@ -33,8 +32,8 @@ rocprofiler_add_integration_execute_test(
     ${TEST_NAME}
     COMMAND
         $<TARGET_FILE:rocprofiler-sdk::rocprofv3> --hip-trace --kernel-trace
-        --memory-copy-trace --graph-launch-trace -d ${OUTPUT_DIR} -o out
-        --output-format csv -- $<TARGET_FILE:hip-graph-attribution> ${ITERATIONS}
+        --memory-copy-trace --graph-launch-trace -d ${OUTPUT_DIR} -o out --output-format
+        csv -- $<TARGET_FILE:hip-graph-attribution> ${ITERATIONS}
     DEPENDS hip-graph-attribution
     TIMEOUT 120
     LABELS "integration-tests"
@@ -46,16 +45,26 @@ rocprofiler_add_integration_validate_test(
     TEST_PATHS validate.py
     COPY conftest.py
     CONFIG pytest.ini
-    ARGS --kernel-input ${OUTPUT_DIR}/out_kernel_trace.csv
-         --memory-copy-input ${OUTPUT_DIR}/out_memory_copy_trace.csv
-         --graph-launch-input ${OUTPUT_DIR}/out_graph_launch_trace.csv
-         --hip-api-input ${OUTPUT_DIR}/out_hip_api_trace.csv
-         --expected-iterations ${ITERATIONS}
-         --expected-execs 2
-         --expected-nodes-per-launch 6
-         --expected-kernel-nodes-per-launch 6
-         --expected-memcpy-nodes-per-launch 0
-         --expected-distinct-kernels 3
+    ARGS --kernel-input
+         ${OUTPUT_DIR}/out_kernel_trace.csv
+         --memory-copy-input
+         ${OUTPUT_DIR}/out_memory_copy_trace.csv
+         --graph-launch-input
+         ${OUTPUT_DIR}/out_graph_launch_trace.csv
+         --hip-api-input
+         ${OUTPUT_DIR}/out_hip_api_trace.csv
+         --expected-iterations
+         ${ITERATIONS}
+         --expected-execs
+         2
+         --expected-nodes-per-launch
+         6
+         --expected-kernel-nodes-per-launch
+         6
+         --expected-memcpy-nodes-per-launch
+         0
+         --expected-distinct-kernels
+         3
     TIMEOUT 60
     LABELS "integration-tests"
     FIXTURES_REQUIRED ${TEST_NAME})
@@ -69,8 +78,8 @@ set(OUTPUT_DIR_GLO "${CMAKE_CURRENT_BINARY_DIR}/hip-graph-attribution-glo")
 rocprofiler_add_integration_execute_test(
     ${TEST_NAME_GLO}
     COMMAND
-        $<TARGET_FILE:rocprofiler-sdk::rocprofv3> --graph-launch-trace
-        -d ${OUTPUT_DIR_GLO} -o out --output-format csv --
+        $<TARGET_FILE:rocprofiler-sdk::rocprofv3> --graph-launch-trace -d
+        ${OUTPUT_DIR_GLO} -o out --output-format csv --
         $<TARGET_FILE:hip-graph-attribution> ${ITERATIONS}
     DEPENDS hip-graph-attribution
     TIMEOUT 120
@@ -84,16 +93,15 @@ rocprofiler_add_integration_validate_test(
     COPY conftest.py
     CONFIG pytest.ini
     ARGS --graph-launch-input ${OUTPUT_DIR_GLO}/out_graph_launch_trace.csv
-         --expected-iterations ${ITERATIONS}
-         --expected-execs 2
+         --expected-iterations ${ITERATIONS} --expected-execs 2
          --expected-nodes-per-launch 6
     TIMEOUT 60
     LABELS "integration-tests"
     FIXTURES_REQUIRED ${TEST_NAME_GLO})
 
 # ---------------------------------------------------------------
-# JSON variant: same workload, JSON output to verify the new fields and
-# GRAPH_LAUNCH records flow through the JSON writer.
+# JSON variant: same workload, JSON output to verify the new fields and GRAPH_LAUNCH
+# records flow through the JSON writer.
 # ---------------------------------------------------------------
 set(TEST_NAME_JSON "rocprofv3-test-hip-graph-attribution-json")
 set(OUTPUT_DIR_JSON "${CMAKE_CURRENT_BINARY_DIR}/hip-graph-attribution-json")
@@ -115,10 +123,8 @@ rocprofiler_add_integration_validate_test(
     TEST_PATHS validate_json.py
     COPY conftest.py
     CONFIG pytest.ini
-    ARGS --json-input ${OUTPUT_DIR_JSON}/out_results.json
-         --expected-iterations ${ITERATIONS}
-         --expected-execs 2
-         --expected-nodes-per-launch 6
+    ARGS --json-input ${OUTPUT_DIR_JSON}/out_results.json --expected-iterations
+         ${ITERATIONS} --expected-execs 2 --expected-nodes-per-launch 6
     TIMEOUT 60
     LABELS "integration-tests"
     FIXTURES_REQUIRED ${TEST_NAME_JSON})

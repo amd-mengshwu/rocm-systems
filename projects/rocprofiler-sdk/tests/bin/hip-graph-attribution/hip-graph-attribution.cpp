@@ -88,18 +88,18 @@ main(int argc, char** argv)
     hipGraph_t graph;
     checkHipErrors(hipGraphCreate(&graph, 0));
 
-    auto make_kernel_node = [&](hipGraphNode_t* node, hipGraphNode_t* deps, size_t ndeps,
-                                void (*fn)(float*)) {
-        hipKernelNodeParams kp{};
-        void*               args[] = {&d_buf};
-        kp.func                    = reinterpret_cast<void*>(fn);
-        kp.gridDim                 = dim3(8, 1, 1);
-        kp.blockDim                = dim3(128, 1, 1);
-        kp.kernelParams            = args;
-        kp.extra                   = nullptr;
-        kp.sharedMemBytes          = 0;
-        checkHipErrors(hipGraphAddKernelNode(node, graph, deps, ndeps, &kp));
-    };
+    auto make_kernel_node =
+        [&](hipGraphNode_t* node, hipGraphNode_t* deps, size_t ndeps, void (*fn)(float*)) {
+            hipKernelNodeParams kp{};
+            void*               args[] = {&d_buf};
+            kp.func                    = reinterpret_cast<void*>(fn);
+            kp.gridDim                 = dim3(8, 1, 1);
+            kp.blockDim                = dim3(128, 1, 1);
+            kp.kernelParams            = args;
+            kp.extra                   = nullptr;
+            kp.sharedMemBytes          = 0;
+            checkHipErrors(hipGraphAddKernelNode(node, graph, deps, ndeps, &kp));
+        };
 
     hipGraphNode_t a0, b1, a2, a3, m, b4;
     make_kernel_node(&a0, nullptr, 0, kernel_a);

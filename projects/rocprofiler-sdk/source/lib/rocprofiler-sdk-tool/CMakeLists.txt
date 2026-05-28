@@ -4,7 +4,8 @@
 
 rocprofiler_activate_clang_tidy()
 
-set(TOOL_HEADERS config.hpp execution_profile.hpp graph_stack.hpp helper.hpp stream_stack.hpp)
+set(TOOL_HEADERS config.hpp execution_profile.hpp graph_stack.hpp helper.hpp
+                 stream_stack.hpp)
 
 set(TOOL_SOURCES config.cpp graph_stack.cpp main.c tool.cpp stream_stack.cpp)
 

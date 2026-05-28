@@ -60,7 +60,7 @@ namespace
 // Map sizes are small (graphs currently in flight; typically <100).
 std::shared_mutex                              g_map_mutex;
 std::unordered_map<::hipGraphExec_t, uint64_t> g_exec_to_id;
-std::atomic<uint64_t>                          g_next_graph_exec_id{1};  // 0 reserved = "not from a graph"
+std::atomic<uint64_t> g_next_graph_exec_id{1};  // 0 reserved = "not from a graph"
 
 // Get-or-create: returns the existing id on race, otherwise assigns a fresh one.
 uint64_t
@@ -125,10 +125,10 @@ fire_hip_graph_none_callback(rocprofiler_hip_graph_operation_t op,
     tracing::update_external_correlation_ids(
         external_corr_ids, thr_id, ROCPROFILER_EXTERNAL_CORRELATION_REQUEST_HIP_RUNTIME_API);
 
-    auto*      corr_id          = context::get_latest_correlation_id();
-    auto       internal_corr_id = (corr_id) ? corr_id->internal : uint64_t{0};
-    auto       ancestor_corr_id = (corr_id) ? corr_id->ancestor : uint64_t{0};
-    auto       tracer_data      = make_hip_graph_payload(graph_exec_id, exec);
+    auto* corr_id          = context::get_latest_correlation_id();
+    auto  internal_corr_id = (corr_id) ? corr_id->internal : uint64_t{0};
+    auto  ancestor_corr_id = (corr_id) ? corr_id->ancestor : uint64_t{0};
+    auto  tracer_data      = make_hip_graph_payload(graph_exec_id, exec);
 
     tracing::execute_phase_none_callbacks(callback_contexts,
                                           thr_id,
@@ -144,8 +144,7 @@ fire_hip_graph_none_callback(rocprofiler_hip_graph_operation_t op,
 // APIs have distinct signatures so they instantiate separately. The captureless
 // lambda decays to a plain function pointer via unary +.
 template <typename RetT, typename... Args>
-auto
-wrap_instantiate(RetT (*next)(::hipGraphExec_t*, Args...))
+auto wrap_instantiate(RetT (*next)(::hipGraphExec_t*, Args...))
 {
     static auto next_func = next;
     return +[](::hipGraphExec_t* out, Args... args) -> RetT {
@@ -161,8 +160,7 @@ wrap_instantiate(RetT (*next)(::hipGraphExec_t*, Args...))
 }
 
 template <typename RetT>
-auto
-wrap_destroy(RetT (*next)(::hipGraphExec_t))
+auto wrap_destroy(RetT (*next)(::hipGraphExec_t))
 {
     static auto next_func = next;
     return +[](::hipGraphExec_t exec) -> RetT {
@@ -195,9 +193,9 @@ resolve_launch_stream_agent(::hipStream_t stream)
     auto* runtime     = saved_table.runtime;
     if(runtime == nullptr) return rocprofiler_agent_id_t{.handle = 0};
 
-    int  device_id         = -1;
-    auto is_default_stream = (stream == nullptr || stream == hipStreamLegacy ||
-                              stream == hipStreamPerThread);
+    int  device_id = -1;
+    auto is_default_stream =
+        (stream == nullptr || stream == hipStreamLegacy || stream == hipStreamPerThread);
 
     if(!is_default_stream && runtime->hipStreamGetDevice_fn != nullptr)
     {
@@ -265,8 +263,7 @@ enum class LaunchApiTag
 };
 
 template <LaunchApiTag Tag, typename RetT>
-auto
-wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
+auto wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
 {
     static auto next_func = next;
     return +[](::hipGraphExec_t exec, ::hipStream_t stream) -> RetT {
@@ -274,12 +271,11 @@ wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
         // phases per the tracing::execute_phase_exit_callbacks contract.
         auto callback_contexts = tracing::callback_context_data_vec_t{};
         auto external_corr_ids = tracing::external_correlation_id_map_t{};
-        tracing::populate_contexts(
-            ROCPROFILER_CALLBACK_TRACING_HIP_GRAPH,
-            static_cast<rocprofiler_tracing_operation_t>(
-                ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_LAUNCH),
-            callback_contexts,
-            external_corr_ids);
+        tracing::populate_contexts(ROCPROFILER_CALLBACK_TRACING_HIP_GRAPH,
+                                   static_cast<rocprofiler_tracing_operation_t>(
+                                       ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_LAUNCH),
+                                   callback_contexts,
+                                   external_corr_ids);
 
         g_launch_stack.emplace_back();
         auto& s = g_launch_stack.back();
@@ -294,9 +290,7 @@ wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
             if(fallback_assigned)
             {
                 fire_hip_graph_none_callback(
-                    ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_CREATE,
-                    s.graph_exec_id,
-                    exec);
+                    ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_CREATE, s.graph_exec_id, exec);
             }
         }
         s.thread_id = common::get_tid();
@@ -359,9 +353,7 @@ wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
             // Failed launch on a fallback-assigned id: undo the synthesized
             // CREATE so we don't leak a mapping pointing at a dead handle.
             fire_hip_graph_none_callback(
-                ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_DESTROY,
-                s.graph_exec_id,
-                exec);
+                ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_DESTROY, s.graph_exec_id, exec);
             forget_graph_exec(exec);
         }
         g_launch_stack.pop_back();

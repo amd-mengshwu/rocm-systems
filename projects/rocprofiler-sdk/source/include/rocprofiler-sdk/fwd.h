@@ -235,7 +235,7 @@ typedef enum rocprofiler_buffer_tracing_kind_t  // NOLINT(performance-enum-size)
     ROCPROFILER_BUFFER_TRACING_KFD_QUEUE,         ///< @see rocprofiler_kfd_queue_operation_t
     ROCPROFILER_BUFFER_TRACING_MARKER_CORE_RANGE_API,  ///< @see
                                                        ///< ::rocprofiler_marker_core_range_api_id_t
-    ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH,         ///< One record per hipGraphLaunch invocation
+    ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH,           ///< One record per hipGraphLaunch invocation
     ROCPROFILER_BUFFER_TRACING_LAST,
 
     /// @var ROCPROFILER_BUFFER_TRACING_HIP_RUNTIME_API_EXT
@@ -285,7 +285,7 @@ typedef enum rocprofiler_hip_stream_operation_t  // NOLINT(performance-enum-size
  */
 typedef enum rocprofiler_hip_graph_operation_t  // NOLINT(performance-enum-size)
 {
-    ROCPROFILER_HIP_GRAPH_OPERATION_NONE = 0,  ///< Unknown HIP graph operation
+    ROCPROFILER_HIP_GRAPH_OPERATION_NONE = 0,                ///< Unknown HIP graph operation
     ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_CREATE,   ///< A hipGraphExec_t is created
     ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_DESTROY,  ///< A hipGraphExec_t is destroyed
     ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_LAUNCH,
@@ -826,8 +826,8 @@ typedef struct rocprofiler_kernel_dispatch_info_t
     rocprofiler_dispatch_id_t dispatch_id;  ///< unique id for each dispatch
     uint32_t                  private_segment_size;
     uint32_t                  group_segment_size;
-    rocprofiler_dim3_t        workgroup_size;  ///< runtime workgroup size (grid * threads)
-    rocprofiler_dim3_t        grid_size;       ///< runtime grid size
+    rocprofiler_dim3_t        workgroup_size;        ///< runtime workgroup size (grid * threads)
+    rocprofiler_dim3_t        grid_size;             ///< runtime grid size
     uint8_t                   reserved_padding[56];  // reserved for extensions w/o ABI break
 
     /// @var group_segment_size

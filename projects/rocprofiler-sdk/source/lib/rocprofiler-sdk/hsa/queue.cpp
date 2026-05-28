@@ -307,8 +307,7 @@ WriteInterceptor(const void* packets,
     // The graph-launch check keeps the interceptor active when a hipGraphLaunch is in
     // flight even if no consumer is subscribed to KERNEL_DISPATCH, so the per-launch
     // kernel_dispatch_count is still incremented.
-    const bool graph_launch_active =
-        (::rocprofiler::hip::graph::current_launch_state() != nullptr);
+    const bool graph_launch_active = (::rocprofiler::hip::graph::current_launch_state() != nullptr);
     if(pkt_count == 0 ||
        (queue.get_notifiers() == 0 && context::get_active_contexts(context_filter).empty() &&
         !graph_launch_active))

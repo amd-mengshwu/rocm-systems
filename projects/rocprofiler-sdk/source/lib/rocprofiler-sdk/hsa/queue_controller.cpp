@@ -563,8 +563,7 @@ enable_queue_intercept()
         // Keep queue interception active for GRAPH_LAUNCH subscribers so the
         // per-launch kernel_dispatch_count gets populated even when KERNEL_DISPATCH
         // tracing is not enabled.
-        bool has_graph_launch_tracing =
-            itr->is_tracing(ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH);
+        bool has_graph_launch_tracing = itr->is_tracing(ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH);
 
         if(itr->dispatch_counter_collection || itr->pc_sampler || has_kernel_tracing ||
            itr->dispatch_spm || has_scratch_reporting || itr->device_counter_collection ||
