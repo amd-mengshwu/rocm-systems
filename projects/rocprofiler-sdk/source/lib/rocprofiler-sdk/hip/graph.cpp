@@ -54,10 +54,7 @@ namespace graph
 {
 namespace
 {
-// Process-global map from hipGraphExec_t handle to a stable monotonic id.
-// Reads (one per launch) take the shared lock; writes (one per
-// hipGraphInstantiate*/hipGraphExecDestroy) take the exclusive lock.
-// Map sizes are small (graphs currently in flight; typically <100).
+// Process-global hipGraphExec_t -> stable monotonic id map.
 std::shared_mutex                              g_map_mutex;
 std::unordered_map<::hipGraphExec_t, uint64_t> g_exec_to_id;
 std::atomic<uint64_t> g_next_graph_exec_id{1};  // 0 reserved = "not from a graph"
@@ -97,14 +94,7 @@ make_hip_graph_payload(uint64_t graph_exec_id, ::hipGraphExec_t exec)
         rocprofiler_address_t{.ptr = static_cast<const void*>(exec)});
 }
 
-// Fire a HIP_GRAPH callback in phase NONE (used for EXEC_CREATE and EXEC_DESTROY).
-//
-// Mirrors hip/stream.cpp's create_write_functor / create_destroy_functor pattern:
-// populate subscribed callback contexts for the (domain, op) pair, build a payload,
-// and dispatch to each via execute_phase_none_callbacks. HIP_GRAPH has no buffered
-// counterpart (the GRAPH_LAUNCH buffer record is a separate, summary-level domain
-// emitted from emit_graph_launch_record), so we use the single-DomainIdx populate
-// overload templated on rocprofiler_callback_tracing_kind_t.
+// Fire a HIP_GRAPH phase-NONE callback (used for EXEC_CREATE and EXEC_DESTROY).
 void
 fire_hip_graph_none_callback(rocprofiler_hip_graph_operation_t op,
                              uint64_t                          graph_exec_id,
@@ -140,9 +130,8 @@ fire_hip_graph_none_callback(rocprofiler_hip_graph_operation_t op,
                                           tracer_data);
 }
 
-// One static next_func slot per template instantiation; the 3 hipGraphInstantiate*
-// APIs have distinct signatures so they instantiate separately. The captureless
-// lambda decays to a plain function pointer via unary +.
+// One static next_func slot per template instantiation (the 3 hipGraphInstantiate* signatures
+// differ).
 template <typename RetT, typename... Args>
 auto wrap_instantiate(RetT (*next)(::hipGraphExec_t*, Args...))
 {
@@ -179,13 +168,10 @@ auto wrap_destroy(RetT (*next)(::hipGraphExec_t))
     };
 }
 
-// std::deque (not std::vector) so references to existing entries remain valid
-// when nested host-callback launches push onto the same thread's stack.
+// std::deque preserves references when nested host-callback launches push onto the stack.
 thread_local std::deque<launch_state> g_launch_stack;
 
-// Returns the GPU agent for the launch stream's device, or {0} on failure.
-// Uses the saved (un-wrapped) HIP dispatch table to avoid re-entering rocprofiler's
-// own tracing wrappers from inside hipGraphLaunch.
+// GPU agent for the launch stream's device, or {0} on failure.
 rocprofiler_agent_id_t
 resolve_launch_stream_agent(::hipStream_t stream)
 {
@@ -254,8 +240,7 @@ emit_graph_launch_record(const launch_state& s, rocprofiler_timestamp_t end_ts)
                                            record);
 }
 
-// hipGraphLaunch and hipGraphLaunch_spt share a signature; the LaunchApiTag
-// template parameter gives each its own static next_func slot.
+// Tag gives hipGraphLaunch and hipGraphLaunch_spt distinct next_func slots.
 enum class LaunchApiTag
 {
     hipGraphLaunch,
@@ -267,8 +252,7 @@ auto wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
 {
     static auto next_func = next;
     return +[](::hipGraphExec_t exec, ::hipStream_t stream) -> RetT {
-        // The same callback_contexts vector flows through both ENTER and EXIT
-        // phases per the tracing::execute_phase_exit_callbacks contract.
+        // Shared callback_contexts spans ENTER and EXIT per execute_phase_exit_callbacks contract.
         auto callback_contexts = tracing::callback_context_data_vec_t{};
         auto external_corr_ids = tracing::external_correlation_id_map_t{};
         tracing::populate_contexts(ROCPROFILER_CALLBACK_TRACING_HIP_GRAPH,
@@ -280,8 +264,7 @@ auto wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
         g_launch_stack.emplace_back();
         auto& s = g_launch_stack.back();
 
-        // Attach-mid-process fallback: synthesize a CREATE callback if we
-        // assigned a fresh id so subscribers see lifecycle events in order.
+        // Attach-mid-process fallback: synthesize CREATE so subscribers see lifecycle in order.
         bool fallback_assigned = false;
         s.graph_exec_id        = lookup_graph_exec_id(exec);
         if(s.graph_exec_id == 0)
@@ -299,8 +282,7 @@ auto wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
         else
             s.correlation_id = 0;
         s.start_ts = rocprofiler_timestamp_t{common::timestamp_ns()};
-        // queue_id intentionally left zero: a graph launch may dispatch across
-        // multiple internal HW queues for parallel branches.
+        // queue_id stays zero (launches may span multiple HW queues for parallel branches).
         s.agent_id = resolve_launch_stream_agent(stream);
 
         if(!callback_contexts.empty())
@@ -329,8 +311,7 @@ auto wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
 
         auto ret = next_func(exec, stream);
 
-        // EXIT must fire BEFORE g_launch_stack.pop_back() so subscribers
-        // calling current_launch_state() still see the active launch.
+        // EXIT must fire before pop_back so current_launch_state() still sees the active launch.
         if(!callback_contexts.empty())
         {
             auto tracer_data = make_hip_graph_payload(s.graph_exec_id, exec);
@@ -350,8 +331,7 @@ auto wrap_launch(RetT (*next)(::hipGraphExec_t, ::hipStream_t))
         }
         else if(fallback_assigned)
         {
-            // Failed launch on a fallback-assigned id: undo the synthesized
-            // CREATE so we don't leak a mapping pointing at a dead handle.
+            // Failed launch on fallback-assigned id: undo the synthesized CREATE.
             fire_hip_graph_none_callback(
                 ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_EXEC_DESTROY, s.graph_exec_id, exec);
             forget_graph_exec(exec);
@@ -433,13 +413,7 @@ get_ids()
     return _data;
 }
 
-// Explicit specialization for the HIP runtime dispatch table. Wraps the four
-// graph-lifecycle entry points so that:
-//   - successful hipGraphInstantiate* assigns a fresh monotonic graph_exec_id
-//   - hipGraphExecDestroy removes the map entry
-//
-// Each install site is guarded with a null check so older HIP runtimes that
-// lack one of these fn slots don't NPE.
+// Wrap the four graph lifecycle entry points on the HIP runtime dispatch table.
 template <>
 void
 update_table(::HipDispatchTable* table)

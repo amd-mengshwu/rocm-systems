@@ -520,8 +520,7 @@ get_ext_attribution(Tp* _record)
     auto _attr = ext_attribution_t{};
     if(_record->correlation_id.external.ptr != nullptr)
     {
-        // Extract the captured attribution and replace the external pointer with
-        // the roctx region id so downstream consumers see the original user value.
+        // Replace external pointer with the roctx region id for downstream consumers.
         auto* _ecid_data =
             static_cast<kernel_rename_and_stream_data*>(_record->correlation_id.external.ptr);
         _attr.stream_id                        = _ecid_data->stream_id;
@@ -568,8 +567,7 @@ set_kernel_rename_and_stream_correlation_id(rocprofiler_thread_id_t  thr_id,
         _info->stream_id = rocprofiler::tool::stream::get_stream_id();
     }
 
-    // Consume a node-counter ordinal only for record kinds that surface graph
-    // nodes; otherwise the ordinals would shift across the actual node records.
+    // Only KERNEL_DISPATCH / MEMORY_COPY consume node ordinals.
     const bool kind_consumes_graph_ordinal =
         (kind == ROCPROFILER_EXTERNAL_CORRELATION_REQUEST_KERNEL_DISPATCH ||
          kind == ROCPROFILER_EXTERNAL_CORRELATION_REQUEST_MEMORY_COPY);
@@ -828,8 +826,7 @@ hip_stream_display_callback(rocprofiler_callback_tracing_record_t record,
     common::consume_args(user_data, data);
 }
 
-// Maintains the per-thread graph attribution stack used to tag KERNEL_DISPATCH
-// and MEMORY_COPY records spawned during a hipGraphLaunch.
+// Drives the per-thread graph attribution stack on HIP_GRAPH_LAUNCH callbacks.
 void
 hip_graph_display_callback(rocprofiler_callback_tracing_record_t record,
                            rocprofiler_user_data_t*              user_data,
@@ -1854,9 +1851,7 @@ counter_record_callback(rocprofiler_dispatch_counting_service_data_t dispatch_da
 
     auto counter_record = tool::tool_counter_record_t{};
 
-    // must call get_ext_attribution on dispatch_data before copying to
-    // counter_record.dispatch_data so that the external correlation id is
-    // updated (back to the original roctx region id) before the copy is made.
+    // Must call get_ext_attribution before copying dispatch_data (rewrites external corr id).
     counter_record.stream_id     = get_ext_attribution(&dispatch_data).stream_id;
     counter_record.dispatch_data = dispatch_data;
     counter_record.thread_id     = user_data.value;
@@ -2993,11 +2988,7 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
 
     start_context(hip_stream_display_ctx, "hip stream");
 
-    // Track HIP graph launch lifecycle so kernel dispatches and memory copies
-    // spawned during a hipGraphLaunch can be attributed to (graph_exec_id,
-    // graph_node_id) via the external correlation id payload. Only enabled when
-    // graph launch tracing is requested, since the per-thread stack push/pop on
-    // every launch otherwise adds overhead with no consumer.
+    // Enable HIP graph attribution tracking only when graph launch tracing is requested.
     if(tool::get_config().graph_launch_trace)
     {
         auto hip_graph_display_ctx = rocprofiler_context_id_t{0};

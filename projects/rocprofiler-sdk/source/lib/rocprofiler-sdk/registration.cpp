@@ -1170,12 +1170,6 @@ rocprofiler_set_api_table(const char* name,
         // any internal modifications to the HipDispatchTable need to be done before we make the
         // copy or else those modifications will be lost when HIP API tracing is enabled
         // because the HIP API tracing invokes the function pointers from the copy below
-        //
-        // Graph instantiate/destroy wrapping is an "internal modification": it must be in the
-        // saved snapshot so the HIP API tracing wrapper (which calls through the saved snapshot)
-        // invokes the graph wrapper as its "next". This nests the graph wrapper INSIDE the HIP
-        // API tracing wrapper, so a future launch-side reader (Task 9) sees internal_corr_id
-        // already established. Therefore graph::update_table MUST run before copy_table.
         rocprofiler::hip::graph::update_table(hip_runtime_api_table);
 
         rocprofiler::hip::copy_table(hip_runtime_api_table, lib_instance);

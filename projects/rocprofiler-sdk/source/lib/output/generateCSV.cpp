@@ -301,9 +301,8 @@ generate_csv(const output_config&                                               
             auto lds_block_size_v =
                 (kernel_info->group_segment_size + (lds_block_size - 1)) & ~(lds_block_size - 1);
 
-            // Render empty for non-graph dispatches. Gate on graph_exec_id (not
-            // graph_node_id) because graph_node_id == 0 is legitimate for the
-            // first dispatch of a launch.
+            // Empty string for non-graph dispatches; gate on graph_exec_id since node_id 0 is
+            // legitimate.
             auto graph_exec_str =
                 record.graph_exec_id != 0 ? std::to_string(record.graph_exec_id) : std::string{};
             auto graph_node_str =
@@ -456,9 +455,8 @@ generate_csv(const output_config&                                           cfg,
             auto row_ss   = std::stringstream{};
             auto api_name = tool_metadata.get_operation_name(record.kind, record.operation);
 
-            // Per kernel-dispatch convention: empty string for non-graph copies.
-            // Gate on graph_exec_id (not graph_node_id) because graph_node_id == 0
-            // is legitimate for the first node of a launch.
+            // Empty string for non-graph copies; gate on graph_exec_id since node_id 0 is
+            // legitimate.
             auto graph_exec_str =
                 record.graph_exec_id != 0 ? std::to_string(record.graph_exec_id) : std::string{};
             auto graph_node_str =

@@ -57,17 +57,7 @@ kernel_b(float* x)
     x[idx] *= 2.0f;
 }
 
-// Graph topology used by hip-graph-attribution-test validate.py:
-//   a0 (kernel_a, root)
-//     |-> b1 (kernel_b)
-//     `-> a2 (kernel_a)        [b1 and a2 run in parallel after a0]
-//   a3 (kernel_a, depends on both b1 and a2)
-//   m  (memcpy h_buf -> d_buf, H2D, depends on a3)
-//   b4 (kernel_b, depends on m)
-//
-// 3 nodes call kernel_a (a0, a2, a3); 2 nodes call kernel_b (b1, b4); 1 memcpy.
-// On AMD HIP, the in-graph memcpy may surface as a KERNEL_DISPATCH record
-// (blit kernel) instead of a MEMORY_COPY record.
+// Graph: a0 -> {b1, a2} -> a3 -> memcpy -> b4 (3x kernel_a, 2x kernel_b, 1x memcpy).
 int
 main(int argc, char** argv)
 {
@@ -81,8 +71,7 @@ main(int argc, char** argv)
     for(size_t i = 0; i < N; ++i)
         h_buf[i] = 1.0f;
 
-    // Out-of-graph H2D memcpy so memory_copy CSV is produced even when the
-    // in-graph memcpy goes through the blit-kernel path.
+    // Out-of-graph H2D memcpy ensures memory_copy CSV exists even if in-graph copy goes via blit.
     checkHipErrors(hipMemcpy(d_buf, h_buf, N * sizeof(float), hipMemcpyHostToDevice));
 
     hipGraph_t graph;
@@ -126,9 +115,8 @@ main(int argc, char** argv)
     }
     checkHipErrors(hipStreamSynchronize(stream));
 
-    // Failure-mode test: launch on a destroyed exec must fail and must NOT emit
-    // a GRAPH_LAUNCH record. The subsequent launch on exec_b must still be
-    // correctly attributed (TLS state cleaned up).
+    // Failure-mode: launch on destroyed exec must fail (no record); next launch must still
+    // attribute.
     checkHipErrors(hipGraphExecDestroy(exec_a));
     hipError_t failed = hipGraphLaunch(exec_a, stream);
     (void) failed;

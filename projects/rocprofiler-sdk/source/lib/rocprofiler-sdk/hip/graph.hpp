@@ -52,8 +52,7 @@ struct launch_state
 launch_state*
 current_launch_state();
 
-/// Internal table-wrapping installer; called from registration sites.
-/// (Specializations defined in graph.cpp once the HIP dispatch table type is known.)
+/// Internal table-wrapping installer (specialized in graph.cpp for the HIP dispatch table type).
 template <typename TableT>
 void
 update_table(TableT* table);
@@ -62,8 +61,7 @@ update_table(TableT* table);
 uint64_t
 lookup_graph_exec_id(::hipGraphExec_t exec);
 
-/// Returns the printable name of a ::rocprofiler_hip_graph_operation_t id, or
-/// nullptr if the id is out of range.
+/// Printable name of a ::rocprofiler_hip_graph_operation_t id, or nullptr if out of range.
 const char*
 name_by_id(uint32_t id);
 

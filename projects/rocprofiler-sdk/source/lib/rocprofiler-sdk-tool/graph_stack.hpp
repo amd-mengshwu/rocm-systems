@@ -30,9 +30,7 @@ namespace tool
 {
 namespace graph
 {
-/// Per-launch attribution captured on HIP_GRAPH_LAUNCH ENTER. node_counter is
-/// post-incremented by the external-correlation-id request callback for each
-/// KERNEL_DISPATCH / MEMORY_COPY attributed to the launch.
+/// Per-launch attribution captured on HIP_GRAPH_LAUNCH ENTER.
 struct attribution
 {
     uint64_t graph_exec_id = 0;
@@ -48,9 +46,7 @@ push(uint64_t graph_exec_id);
 void
 pop();
 
-/// Returns a pointer to the top of the per-thread stack so callers can
-/// post-increment node_counter in place. Returns nullptr if no launch is
-/// currently in flight on this thread.
+/// Top of per-thread stack, or nullptr if no launch is in flight on this thread.
 attribution*
 current();
 

@@ -217,8 +217,7 @@ write_perfetto(
                 }
             }
 
-        // HIP graph attribution: GRAPH_LAUNCH records live on the host
-        // thread that called hipGraphLaunch; ensure those tids have a track.
+        // Ensure GRAPH_LAUNCH host-thread tids get a track.
         for(auto ditr : graph_launch_gen)
             for(auto itr : graph_launch_gen.get(ditr))
                 tids.emplace(itr.thread_id);
@@ -591,12 +590,7 @@ write_perfetto(
                     "stream_ID",
                     itr.stream_id.handle,
                     [&](::perfetto::EventContext ctx) {
-                        // HIP graph attribution: emit graph_exec_id and
-                        // graph_node_id as debug annotations on copies that
-                        // originated from a hipGraphLaunch. Mirrors the
-                        // kernel_dispatch annotation gate (empty-on-zero on
-                        // graph_exec_id since graph_node_id == 0 is
-                        // legitimate for the first node of a launch).
+                        // Annotate in-graph copies (gate on exec_id; node_id 0 is valid).
                         if(itr.graph_exec_id != 0)
                         {
                             sdk::add_perfetto_annotation(ctx, "graph_exec_id", itr.graph_exec_id);
@@ -782,13 +776,8 @@ write_perfetto(
                                     }
                                 }
 
-                                // HIP graph attribution: emit graph_exec_id
-                                // and graph_node_id as debug annotations on
-                                // dispatches that originated from a
-                                // hipGraphLaunch. The empty-on-zero gate uses
-                                // graph_exec_id (not graph_node_id) because
-                                // graph_node_id == 0 is legitimate for the
-                                // first node of a launch.
+                                // Annotate in-graph dispatches (gate on exec_id; node_id 0 is
+                                // valid).
                                 if(current.graph_exec_id != 0)
                                 {
                                     sdk::add_perfetto_annotation(
@@ -807,12 +796,7 @@ write_perfetto(
             }
         }
 
-        // HIP graph attribution: one Perfetto slice per hipGraphLaunch on
-        // the issuing thread's track. Spans the launch enter -> return
-        // (host-side timestamps from the GRAPH_LAUNCH buffer record), with
-        // graph_exec_id + kernel_dispatch_count as debug annotations. The
-        // slice nests visually with the per-launch kernel dispatch slices
-        // that fall within its time range.
+        // Emit one "hipGraphLaunch" slice per launch on the issuing thread's track.
         for(auto ditr : graph_launch_gen)
             for(auto itr : graph_launch_gen.get(ditr))
             {

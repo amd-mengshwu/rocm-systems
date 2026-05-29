@@ -354,10 +354,7 @@ create_attribute_list()
     return _val;
 }
 
-// Attribute ids beyond the "category" attribute (id=0) used for HIP graph
-// attribution. Defined as globals so that the values matched in
-// AttributeList_AddAttribute calls are consistent with the
-// GlobalDefWriter_WriteAttribute registrations performed below.
+// OTF2 attribute ids for HIP graph attribution (used at emission + registration).
 enum graph_attribute_id_t : uint32_t
 {
     GRAPH_ATTR_CATEGORY              = 0,
@@ -465,8 +462,7 @@ write_otf2(const output_config&                                          cfg,
                 itr.dispatch_info.queue_id);
         }
 
-        // HIP graph attribution: GRAPH_LAUNCH records live on the host
-        // thread that called hipGraphLaunch; ensure those tids have a track.
+        // Ensure GRAPH_LAUNCH host-thread tids get a track.
         if(graph_launch_data != nullptr)
         {
             for(auto itr : *graph_launch_data)
@@ -684,10 +680,7 @@ write_otf2(const output_config&                                          cfg,
 
         auto* _mc_attrs = get_attr(sdk::category::memory_copy{});
 
-        // HIP graph attribution: when this memory copy originated from a graph
-        // launch (graph_exec_id != 0), attach the graph_exec_id and
-        // graph_node_id as per-event UINT64 attributes. Mirrors the
-        // kernel_dispatch attribution above.
+        // Attach graph attribution for in-graph copies.
         if(itr.graph_exec_id != 0)
         {
             add_uint64_attribute(_mc_attrs, GRAPH_ATTR_GRAPH_EXEC_ID, itr.graph_exec_id);
@@ -749,11 +742,7 @@ write_otf2(const output_config&                                          cfg,
 
         auto* _kd_attrs = get_attr(sdk::category::kernel_dispatch{});
 
-        // HIP graph attribution: when this dispatch originated from a graph
-        // launch (graph_exec_id != 0), attach the graph_exec_id and
-        // graph_node_id as per-event UINT64 attributes. The empty-on-zero
-        // gate uses graph_exec_id (not graph_node_id) because
-        // graph_node_id == 0 is legitimate for the first node of a launch.
+        // Attach graph attribution for in-graph dispatches (gate on exec_id; node_id 0 is valid).
         if(itr.graph_exec_id != 0)
         {
             add_uint64_attribute(_kd_attrs, GRAPH_ATTR_GRAPH_EXEC_ID, itr.graph_exec_id);
@@ -772,16 +761,11 @@ write_otf2(const output_config&                                          cfg,
                                     nullptr});
     }
 
-    // HIP graph attribution: emit one OTF2 region per hipGraphLaunch call on
-    // the issuing thread's track. The region spans the launch enter -> return
-    // (host-side timestamps from the GRAPH_LAUNCH buffer record), and carries
-    // graph_exec_id + kernel_dispatch_count as per-event attributes.
+    // Emit one "hipGraphLaunch" region per launch on the issuing thread's track.
     if(graph_launch_data != nullptr)
     {
         for(auto itr : *graph_launch_data)
         {
-            // Skip records with no thread track (defensive; tids set is
-            // populated below from graph_launch_data too).
             auto thread_it = thread_event_info.find(itr.thread_id);
             if(thread_it == thread_event_info.end()) continue;
 
@@ -904,9 +888,7 @@ write_otf2(const output_config&                                          cfg,
     OTF2_CHECK(OTF2_GlobalDefWriter_WriteAttribute(
         global_def_writer, 0, _attr_name_hash, _attr_desc_hash, OTF2_TYPE_STRING));
 
-    // HIP graph attribution: register the per-event UINT64 attributes that
-    // kernel-dispatch and GRAPH_LAUNCH events optionally carry. Attribute
-    // ids must match the graph_attribute_id_t enum used at emission.
+    // Register per-event UINT64 attributes (ids must match graph_attribute_id_t).
     {
         auto _register_uint64_attr = [&](uint32_t _id, std::string_view _n, std::string_view _d) {
             auto _nh = add_write_string_val(_n);
