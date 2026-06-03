@@ -355,7 +355,7 @@ typedef struct rocprofiler_buffer_tracing_graph_launch_record_t
     rocprofiler_timestamp_t            end_timestamp;
     rocprofiler_agent_id_t             agent_id;
     rocprofiler_queue_id_t             queue_id;
-    uint64_t                           graph_exec_id;
+    rocprofiler_graph_exec_id_t        graph_exec_id;
     uint64_t                           kernel_dispatch_count;
 } rocprofiler_buffer_tracing_graph_launch_record_t;
 

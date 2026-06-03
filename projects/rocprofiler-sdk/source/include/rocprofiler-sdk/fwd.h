@@ -646,6 +646,15 @@ typedef struct rocprofiler_stream_id_t
 } rocprofiler_stream_id_t;
 
 /**
+ * @brief HIP graph executable instance ID. Process-monotonic identifier assigned by
+ * rocprofiler-sdk for each successful hipGraphInstantiate* call.
+ */
+typedef struct rocprofiler_graph_exec_id_t
+{
+    uint64_t handle;
+} rocprofiler_graph_exec_id_t;
+
+/**
  * @brief ROCProfiler Record Correlation ID.
  */
 typedef struct rocprofiler_correlation_id_t

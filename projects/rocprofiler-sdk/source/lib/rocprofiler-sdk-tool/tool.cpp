@@ -840,7 +840,7 @@ hip_graph_display_callback(rocprofiler_callback_tracing_record_t record,
     if(record.operation == ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_LAUNCH)
     {
         if(record.phase == ROCPROFILER_CALLBACK_PHASE_ENTER)
-            rocprofiler::tool::graph::push(payload->graph_exec_id);
+            rocprofiler::tool::graph::push(payload->graph_exec_id.handle);
         else if(record.phase == ROCPROFILER_CALLBACK_PHASE_EXIT)
             rocprofiler::tool::graph::pop();
     }
@@ -3515,7 +3515,8 @@ generate_output(cleanup_mode _cleanup_mode)
                           rccl_output.get_generator(),
                           rocdecode_output.get_generator(),
                           counters_output.get_generator(),
-                          spm_counters_output.get_generator());
+                          spm_counters_output.get_generator(),
+                          graph_launch_output.get_generator());
     }
 
     if(tool::get_config().otf2_output && outdata.num_output > 0 &&

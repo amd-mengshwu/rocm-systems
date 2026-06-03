@@ -90,7 +90,7 @@ make_hip_graph_payload(uint64_t graph_exec_id, ::hipGraphExec_t exec)
 {
     return common::init_public_api_struct(
         rocprofiler_callback_tracing_hip_graph_data_t{},
-        graph_exec_id,
+        rocprofiler_graph_exec_id_t{graph_exec_id},
         rocprofiler_address_t{.ptr = static_cast<const void*>(exec)});
 }
 
@@ -227,7 +227,7 @@ emit_graph_launch_record(const launch_state& s, rocprofiler_timestamp_t end_ts)
         end_ts,
         s.agent_id,
         s.queue_id,
-        s.graph_exec_id,
+        rocprofiler_graph_exec_id_t{s.graph_exec_id},
         s.dispatch_count};
 
     tracing::execute_buffer_record_emplace(tracing_data_v.buffered_contexts,

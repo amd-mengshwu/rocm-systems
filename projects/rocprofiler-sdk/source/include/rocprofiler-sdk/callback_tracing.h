@@ -355,7 +355,7 @@ typedef struct rocprofiler_callback_tracing_hip_stream_data_t
  *
  * Sub-operations (::rocprofiler_hip_graph_operation_t):
  *   - HIP_GRAPH_EXEC_CREATE  fires after a successful hipGraphInstantiate*
- *   - HIP_GRAPH_EXEC_DESTROY fires before hipGraphExecDestroy
+ *   - HIP_GRAPH_EXEC_DESTROY fires after a successful hipGraphExecDestroy
  *   - HIP_GRAPH_LAUNCH       fires at ENTER and EXIT phases of
  *                            hipGraphLaunch / hipGraphLaunch_spt
  *
@@ -375,9 +375,9 @@ typedef struct rocprofiler_callback_tracing_hip_stream_data_t
  */
 typedef struct rocprofiler_callback_tracing_hip_graph_data_t
 {
-    uint64_t              size;              ///< size of this struct
-    uint64_t              graph_exec_id;     ///< process-monotonic ID of the hipGraphExec_t
-    rocprofiler_address_t graph_exec_value;  ///< raw hipGraphExec_t pointer value
+    uint64_t                    size;              ///< size of this struct
+    rocprofiler_graph_exec_id_t graph_exec_id;     ///< process-monotonic ID of the hipGraphExec_t
+    rocprofiler_address_t       graph_exec_value;  ///< raw hipGraphExec_t pointer value
 } rocprofiler_callback_tracing_hip_graph_data_t;
 
 /**

@@ -1034,7 +1034,8 @@ write_rocpd(
     const generator<rocprofiler_buffer_tracing_rccl_api_record_t>&          rccl_api_gen,
     const generator<rocprofiler_buffer_tracing_rocdecode_api_ext_record_t>& rocdecode_api_gen,
     const generator<tool_counter_record_t>&                                 counter_collection_gen,
-    const generator<tool_spm_counter_record_t>& /** spm_collection_gen*/)
+    const generator<tool_spm_counter_record_t>& /** spm_collection_gen*/,
+    const generator<rocprofiler_buffer_tracing_graph_launch_record_t>&      graph_launch_gen)
 {
     static auto get_simple_timer = [](std::string_view label) {
         return common::simple_timer{fmt::format("SQLite3 generation :: {:24}", label)};
@@ -1458,6 +1459,8 @@ write_rocpd(
                                     uint64_t    end_timestamp,
                                     const auto& grid,
                                     const auto& workgroup,
+                                    uint64_t    graph_exec_id,
+                                    uint64_t    graph_node_id,
                                     bool        enable_duplicate_check) {
             // Skip if we've already processed this dispatch_id
             if(dispatch_evt_ids.size() > dispatch_id && dispatch_evt_ids[dispatch_id] != 0) return;
@@ -1525,6 +1528,8 @@ write_rocpd(
                     insert_value("grid_size_x", grid.x),
                     insert_value("grid_size_y", grid.y),
                     insert_value("grid_size_z", grid.z),
+                    insert_value("graph_exec_id", graph_exec_id),
+                    insert_value("graph_node_id", graph_node_id),
                     insert_value("region_name_id", string_entries.at(region_name)),
                     insert_value("event_id", evt_id),
                 });
@@ -1546,7 +1551,7 @@ write_rocpd(
                     auto kind =
                         tool_metadata.buffer_names.at(ROCPROFILER_BUFFER_TRACING_KERNEL_DISPATCH);
 
-                    // Process this dispatch
+                    // Process this dispatch (counter-collection path: no graph attribution).
                     process_dispatch(info.dispatch_id,                 // dispatch_id
                                      info.kernel_id,                   // kernel_id
                                      dispatch_data.correlation_id,     // corr_id
@@ -1559,6 +1564,8 @@ write_rocpd(
                                      dispatch_data.end_timestamp,      // end_timestamp
                                      info.grid_size,                   // grid
                                      info.workgroup_size,              // workgroup
+                                     0,                                // graph_exec_id
+                                     0,                                // graph_node_id
                                      false                             // enable_duplicate_check
                     );
                 }
@@ -1586,6 +1593,8 @@ write_rocpd(
                                      itr.end_timestamp,                         // end_timestamp
                                      itr.dispatch_info.grid_size,               // grid
                                      itr.dispatch_info.workgroup_size,          // workgroup
+                                     itr.graph_exec_id,                         // graph_exec_id
+                                     itr.graph_node_id,                         // graph_node_id
                                      true  // enable_duplicate_check
                     );
                 }
@@ -1666,11 +1675,66 @@ write_rocpd(
                             insert_value("src_address", itr.src_address.value),
                             insert_value("size", itr.bytes),
                             insert_value("stream_id", get_stream_id(itr.stream_id)),
+                            insert_value("graph_exec_id", itr.graph_exec_id),
+                            insert_value("graph_node_id", itr.graph_node_id),
                             insert_value("event_id", evt_id),
                         });
                 }
             }
         };
+
+    auto insert_graph_launch_data = [&db,
+                                     &tool_metadata,
+                                     &string_entries,
+                                     node_id,
+                                     this_pid,
+                                     &get_thread_id,
+                                     &get_queue_id](const auto& _gen) {
+        auto   _sqlgenperf_rocpd = get_simple_timer("rocpd_graph_launch");
+        auto   _deferred         = sql::deferred_transaction{db.conn};
+        size_t launch_idx        = 1;
+
+        for(auto pitr : _gen)
+        {
+            for(auto itr : _gen.get(pitr))
+            {
+                get_thread_id(itr.thread_id);
+
+                auto kind = tool_metadata.buffer_names.at(itr.kind);
+
+                auto evt_id = create_event(
+                    db,
+                    {
+                        insert_value("category_id", string_entries.at(kind)),
+                        insert_value("stack_id", itr.correlation_id.internal),
+                        insert_value("parent_stack_id", itr.correlation_id.internal),
+                        insert_value("correlation_id", itr.correlation_id.external.value),
+                    });
+
+                auto agent_node_id =
+                    (itr.agent_id.handle != 0)
+                        ? std::optional<uint64_t>{tool_metadata.get_agent(itr.agent_id)->node_id}
+                        : std::nullopt;
+
+                get_insert_statement(
+                    db,
+                    "rocpd_graph_launch{{uuid}}",
+                    {
+                        insert_value("id", launch_idx++),
+                        insert_value("nid", node_id),
+                        insert_value("pid", this_pid),
+                        insert_value("tid", itr.thread_id),
+                        insert_value("agent_id", agent_node_id),
+                        insert_value("queue_id", get_queue_id(itr.queue_id)),
+                        insert_value("start", itr.start_timestamp),
+                        insert_value("end", itr.end_timestamp),
+                        insert_value("graph_exec_id", itr.graph_exec_id.handle),
+                        insert_value("kernel_dispatch_count", itr.kernel_dispatch_count),
+                        insert_value("event_id", evt_id),
+                    });
+            }
+        }
+    };
 
     auto insert_memory_alloc_data = [&db,
                                      &tool_metadata,
@@ -2040,6 +2104,7 @@ write_rocpd(
     insert_kernel_dispatch_data(dispatch_to_evt_id);
     insert_pmc_event_data(dispatch_to_evt_id);
     insert_memory_copy_data(memory_copy_gen);
+    insert_graph_launch_data(graph_launch_gen);
 
     {
         auto _sqlgenperf_rocpd = get_simple_timer("rocpd_memory_allocate");
