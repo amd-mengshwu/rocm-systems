@@ -2988,8 +2988,12 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
 
     start_context(hip_stream_display_ctx, "hip stream");
 
-    // Enable HIP graph attribution tracking only when graph launch tracing is requested.
-    if(tool::get_config().graph_launch_trace)
+    // Enable HIP graph attribution whenever any consumer can carry graph-attributed records:
+    // kernel-dispatch / memory-copy / graph-launch tracing. The per-thread stack push/pop is
+    // cheap and the alternative leaves graph_exec_id/graph_node_id empty on KERNEL_DISPATCH
+    // and MEMORY_COPY records even though the data is available.
+    if(tool::get_config().graph_launch_trace || tool::get_config().kernel_trace ||
+       tool::get_config().memory_copy_trace)
     {
         auto hip_graph_display_ctx = rocprofiler_context_id_t{0};
 

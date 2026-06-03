@@ -304,11 +304,12 @@ WriteInterceptor(const void* packets,
 
     auto& queue = *static_cast<Queue*>(data);
 
-    // Keep interceptor active during a graph launch so kernel_dispatch_count is incremented.
-    const bool graph_launch_active = (::rocprofiler::hip::graph::current_launch_state() != nullptr);
-    if(pkt_count == 0 ||
-       (queue.get_notifiers() == 0 && context::get_active_contexts(context_filter).empty() &&
-        !graph_launch_active))
+    auto*      gls                 = ::rocprofiler::hip::graph::current_launch_state();
+    const bool graph_launch_active = (gls != nullptr);
+    const bool no_real_consumers =
+        (queue.get_notifiers() == 0 && context::get_active_contexts(context_filter).empty());
+
+    if(pkt_count == 0 || (no_real_consumers && !graph_launch_active))
     {
         writer(packets, pkt_count);
         return;
@@ -340,6 +341,17 @@ WriteInterceptor(const void* packets,
 
     if(num_dispatch_packets == 0)
     {
+        writer(packets, pkt_count);
+        return;
+    }
+
+    // Fast path: graph_launch is the only reason we're here. Increment the per-launch
+    // dispatch count and write the original packets without allocating signals or rewriting
+    // packets. Large graph launches in summary-only mode would otherwise pay the full
+    // tracing overhead and exhaust the HSA signal pool.
+    if(graph_launch_active && no_real_consumers)
+    {
+        gls->dispatch_count += num_dispatch_packets;
         writer(packets, pkt_count);
         return;
     }
