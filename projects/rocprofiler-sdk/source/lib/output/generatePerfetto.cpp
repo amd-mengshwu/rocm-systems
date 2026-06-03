@@ -216,11 +216,6 @@ write_perfetto(
                     agent_queue_ids[itr.dispatch_info.agent_id].emplace(itr.dispatch_info.queue_id);
                 }
             }
-
-        // Ensure GRAPH_LAUNCH host-thread tids get a track.
-        for(auto ditr : graph_launch_gen)
-            for(auto itr : graph_launch_gen.get(ditr))
-                tids.emplace(itr.thread_id);
     }
 
     uint64_t nthrn = 0;
@@ -588,15 +583,7 @@ write_perfetto(
                     "tid",
                     itr.thread_id,
                     "stream_ID",
-                    itr.stream_id.handle,
-                    [&](::perfetto::EventContext ctx) {
-                        // Annotate in-graph copies (gate on exec_id; node_id 0 is valid).
-                        if(itr.graph_exec_id != 0)
-                        {
-                            sdk::add_perfetto_annotation(ctx, "graph_exec_id", itr.graph_exec_id);
-                            sdk::add_perfetto_annotation(ctx, "graph_node_id", itr.graph_node_id);
-                        }
-                    });
+                    itr.stream_id.handle);
                 TRACE_EVENT_END(sdk::perfetto_category<sdk::category::memory_copy>::name,
                                 *_track,
                                 itr.end_timestamp);
@@ -775,16 +762,6 @@ write_perfetto(
                                         }
                                     }
                                 }
-
-                                // Annotate in-graph dispatches (gate on exec_id; node_id 0 is
-                                // valid).
-                                if(current.graph_exec_id != 0)
-                                {
-                                    sdk::add_perfetto_annotation(
-                                        ctx, "graph_exec_id", current.graph_exec_id);
-                                    sdk::add_perfetto_annotation(
-                                        ctx, "graph_node_id", current.graph_node_id);
-                                }
                             });
                         TRACE_EVENT_END(
                             sdk::perfetto_category<sdk::category::kernel_dispatch>::name,
@@ -796,41 +773,8 @@ write_perfetto(
             }
         }
 
-        // Emit one "hipGraphLaunch" slice per launch on the issuing thread's track.
-        for(auto ditr : graph_launch_gen)
-            for(auto itr : graph_launch_gen.get(ditr))
-            {
-                auto track_it = thread_tracks.find(itr.thread_id);
-                if(track_it == thread_tracks.end()) continue;
-                auto& track = track_it->second;
-
-                auto _name = fmt::format("hipGraphLaunch[exec={}]", itr.graph_exec_id);
-
-                TRACE_EVENT_BEGIN(sdk::perfetto_category<sdk::category::hip_api>::name,
-                                  ::perfetto::DynamicString{_name},
-                                  track,
-                                  itr.start_timestamp,
-                                  ::perfetto::Flow::ProcessScoped(itr.correlation_id.internal),
-                                  "begin_ns",
-                                  itr.start_timestamp,
-                                  "end_ns",
-                                  itr.end_timestamp,
-                                  "delta_ns",
-                                  (itr.end_timestamp - itr.start_timestamp),
-                                  "tid",
-                                  itr.thread_id,
-                                  "kind",
-                                  itr.kind,
-                                  "corr_id",
-                                  itr.correlation_id.internal,
-                                  "graph_exec_id",
-                                  itr.graph_exec_id,
-                                  "kernel_dispatch_count",
-                                  itr.kernel_dispatch_count);
-                TRACE_EVENT_END(
-                    sdk::perfetto_category<sdk::category::hip_api>::name, track, itr.end_timestamp);
-                tracing_session->FlushBlocking();
-            }
+        // HIP graph launch summary records: consume via rocpd/JSON (not Perfetto).
+        (void) graph_launch_gen;
     }
 
     // counter tracks

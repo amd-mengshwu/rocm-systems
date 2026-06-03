@@ -354,22 +354,6 @@ create_attribute_list()
     return _val;
 }
 
-// OTF2 attribute ids for HIP graph attribution (used at emission + registration).
-enum graph_attribute_id_t : uint32_t
-{
-    GRAPH_ATTR_CATEGORY              = 0,
-    GRAPH_ATTR_GRAPH_EXEC_ID         = 1,
-    GRAPH_ATTR_GRAPH_NODE_ID         = 2,
-    GRAPH_ATTR_KERNEL_DISPATCH_COUNT = 3,
-};
-
-void
-add_uint64_attribute(attribute_list_t* _list, uint32_t _id, uint64_t _val)
-{
-    auto _v   = OTF2_AttributeValue{};
-    _v.uint64 = _val;
-    OTF2_AttributeList_AddAttribute(_list, _id, OTF2_TYPE_UINT64, _v);
-}
 }  // namespace
 
 void
@@ -460,13 +444,6 @@ write_otf2(const output_config&                                          cfg,
             tids.emplace(itr.thread_id);
             agent_queue_ids[itr.thread_id][itr.dispatch_info.agent_id].emplace(
                 itr.dispatch_info.queue_id);
-        }
-
-        // Ensure GRAPH_LAUNCH host-thread tids get a track.
-        if(graph_launch_data != nullptr)
-        {
-            for(auto itr : *graph_launch_data)
-                tids.emplace(itr.thread_id);
         }
     }
 
@@ -678,20 +655,11 @@ write_otf2(const output_config&                                          cfg,
         auto& _evt_info = agent_memcpy_info.at(itr.thread_id).at(itr.dst_agent_id);
         _evt_info.event_count += 1;
 
-        auto* _mc_attrs = get_attr(sdk::category::memory_copy{});
-
-        // Attach graph attribution for in-graph copies.
-        if(itr.graph_exec_id != 0)
-        {
-            add_uint64_attribute(_mc_attrs, GRAPH_ATTR_GRAPH_EXEC_ID, itr.graph_exec_id);
-            add_uint64_attribute(_mc_attrs, GRAPH_ATTR_GRAPH_NODE_ID, itr.graph_node_id);
-        }
-
         _data.emplace_back(evt_data{ROCPROFILER_CALLBACK_PHASE_ENTER,
                                     name,
                                     _evt_info.get_location(),
                                     itr.start_timestamp,
-                                    _mc_attrs});
+                                    nullptr});
         _data.emplace_back(evt_data{ROCPROFILER_CALLBACK_PHASE_EXIT,
                                     name,
                                     _evt_info.get_location(),
@@ -740,20 +708,11 @@ write_otf2(const output_config&                                          cfg,
         auto& _evt_info = agent_dispatch_info.at(itr.thread_id).at(info.agent_id).at(info.queue_id);
         _evt_info.event_count += 1;
 
-        auto* _kd_attrs = get_attr(sdk::category::kernel_dispatch{});
-
-        // Attach graph attribution for in-graph dispatches (gate on exec_id; node_id 0 is valid).
-        if(itr.graph_exec_id != 0)
-        {
-            add_uint64_attribute(_kd_attrs, GRAPH_ATTR_GRAPH_EXEC_ID, itr.graph_exec_id);
-            add_uint64_attribute(_kd_attrs, GRAPH_ATTR_GRAPH_NODE_ID, itr.graph_node_id);
-        }
-
         _data.emplace_back(evt_data{ROCPROFILER_CALLBACK_PHASE_ENTER,
                                     name,
                                     _evt_info.get_location(),
                                     itr.start_timestamp,
-                                    _kd_attrs});
+                                    nullptr});
         _data.emplace_back(evt_data{ROCPROFILER_CALLBACK_PHASE_EXIT,
                                     name,
                                     _evt_info.get_location(),
@@ -761,39 +720,8 @@ write_otf2(const output_config&                                          cfg,
                                     nullptr});
     }
 
-    // Emit one "hipGraphLaunch" region per launch on the issuing thread's track.
-    if(graph_launch_data != nullptr)
-    {
-        for(auto itr : *graph_launch_data)
-        {
-            auto thread_it = thread_event_info.find(itr.thread_id);
-            if(thread_it == thread_event_info.end()) continue;
-
-            auto _name = std::string_view{"hipGraphLaunch"};
-            _hash_data.emplace(
-                get_hash_id(_name),
-                region_info{std::string{_name}, OTF2_REGION_ROLE_FUNCTION, OTF2_PARADIGM_HIP});
-
-            auto& _evt_info = thread_it->second;
-            _evt_info.event_count += 1;
-
-            auto* _gl_attrs = get_attr(sdk::category::hip_api{});
-            add_uint64_attribute(_gl_attrs, GRAPH_ATTR_GRAPH_EXEC_ID, itr.graph_exec_id);
-            add_uint64_attribute(
-                _gl_attrs, GRAPH_ATTR_KERNEL_DISPATCH_COUNT, itr.kernel_dispatch_count);
-
-            _data.emplace_back(evt_data{ROCPROFILER_CALLBACK_PHASE_ENTER,
-                                        _name,
-                                        _evt_info.get_location(),
-                                        itr.start_timestamp,
-                                        _gl_attrs});
-            _data.emplace_back(evt_data{ROCPROFILER_CALLBACK_PHASE_EXIT,
-                                        _name,
-                                        _evt_info.get_location(),
-                                        itr.end_timestamp,
-                                        nullptr});
-        }
-    }
+    // HIP graph launch summary records: consume via rocpd/JSON (not OTF2).
+    (void) graph_launch_data;
 
     std::sort(_data.begin(), _data.end(), [](const evt_data& lhs, const evt_data& rhs) {
         if(lhs.timestamp != rhs.timestamp) return (lhs.timestamp < rhs.timestamp);
@@ -887,24 +815,6 @@ write_otf2(const output_config&                                          cfg,
 
     OTF2_CHECK(OTF2_GlobalDefWriter_WriteAttribute(
         global_def_writer, 0, _attr_name_hash, _attr_desc_hash, OTF2_TYPE_STRING));
-
-    // Register per-event UINT64 attributes (ids must match graph_attribute_id_t).
-    {
-        auto _register_uint64_attr = [&](uint32_t _id, std::string_view _n, std::string_view _d) {
-            auto _nh = add_write_string_val(_n);
-            auto _dh = add_write_string_val(_d);
-            OTF2_CHECK(OTF2_GlobalDefWriter_WriteAttribute(
-                global_def_writer, _id, _nh, _dh, OTF2_TYPE_UINT64));
-        };
-        _register_uint64_attr(
-            GRAPH_ATTR_GRAPH_EXEC_ID, "graph_exec_id", "HIP graph executable instance id");
-        _register_uint64_attr(GRAPH_ATTR_GRAPH_NODE_ID,
-                              "graph_node_id",
-                              "HIP graph node ordinal within graph_exec_id");
-        _register_uint64_attr(GRAPH_ATTR_KERNEL_DISPATCH_COUNT,
-                              "kernel_dispatch_count",
-                              "kernel dispatches attributed to this hipGraphLaunch");
-    }
 
     for(const auto& itr : _attr_str)
         add_write_string(itr.first, itr.second);

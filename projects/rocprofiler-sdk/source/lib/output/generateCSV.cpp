@@ -284,9 +284,7 @@ generate_csv(const output_config&                                               
                                       "Workgroup_Size_Z",
                                       "Grid_Size_X",
                                       "Grid_Size_Y",
-                                      "Grid_Size_Z",
-                                      "Graph_Exec_Id",
-                                      "Graph_Node_Id"}};
+                                      "Grid_Size_Z"}};
 
     for(auto ditr : data)
     {
@@ -300,13 +298,6 @@ generate_csv(const output_config&                                               
                                                              record.correlation_id.external.value);
             auto lds_block_size_v =
                 (kernel_info->group_segment_size + (lds_block_size - 1)) & ~(lds_block_size - 1);
-
-            // Empty string for non-graph dispatches; gate on graph_exec_id since node_id 0 is
-            // legitimate.
-            auto graph_exec_str =
-                record.graph_exec_id != 0 ? std::to_string(record.graph_exec_id) : std::string{};
-            auto graph_node_str =
-                record.graph_exec_id != 0 ? std::to_string(record.graph_node_id) : std::string{};
 
             rocprofiler::tool::csv::kernel_trace_with_stream_csv_encoder::write_row(
                 row_ss,
@@ -332,9 +323,7 @@ generate_csv(const output_config&                                               
                 record.dispatch_info.workgroup_size.z,
                 record.dispatch_info.grid_size.x,
                 record.dispatch_info.grid_size.y,
-                record.dispatch_info.grid_size.z,
-                graph_exec_str,
-                graph_node_str);
+                record.dispatch_info.grid_size.z);
             ofs << row_ss.str();
         }
     }
@@ -444,9 +433,7 @@ generate_csv(const output_config&                                           cfg,
                                       "Destination_Agent_Id",
                                       "Correlation_Id",
                                       "Start_Timestamp",
-                                      "End_Timestamp",
-                                      "Graph_Exec_Id",
-                                      "Graph_Node_Id"}};
+                                      "End_Timestamp"}};
 
     for(auto ditr : data)
     {
@@ -454,13 +441,6 @@ generate_csv(const output_config&                                           cfg,
         {
             auto row_ss   = std::stringstream{};
             auto api_name = tool_metadata.get_operation_name(record.kind, record.operation);
-
-            // Empty string for non-graph copies; gate on graph_exec_id since node_id 0 is
-            // legitimate.
-            auto graph_exec_str =
-                record.graph_exec_id != 0 ? std::to_string(record.graph_exec_id) : std::string{};
-            auto graph_node_str =
-                record.graph_exec_id != 0 ? std::to_string(record.graph_node_id) : std::string{};
 
             rocprofiler::tool::csv::memory_copy_with_stream_csv_encoder::write_row(
                 row_ss,
@@ -473,9 +453,7 @@ generate_csv(const output_config&                                           cfg,
                     .as_string(),
                 record.correlation_id.internal,
                 record.start_timestamp,
-                record.end_timestamp,
-                graph_exec_str,
-                graph_node_str);
+                record.end_timestamp);
             ofs << row_ss.str();
         }
     }
@@ -1000,50 +978,13 @@ generate_csv(const output_config&                                               
     }
 }
 
+// CSV output for HIP graph launch summary records is deprecated; consume via rocpd/JSON.
 void
-generate_csv(const output_config&                                               cfg,
-             const metadata&                                                    tool_metadata,
-             const generator<rocprofiler_buffer_tracing_graph_launch_record_t>& data,
-             const stats_entry_t&                                               stats)
-{
-    if(data.empty()) return;
-
-    if(cfg.stats && stats)
-        write_stats(get_stats_output_file(cfg, domain_type::GRAPH_LAUNCH), stats.entries);
-
-    auto ofs = tool::csv_output_file{cfg,
-                                     domain_type::GRAPH_LAUNCH,
-                                     tool::csv::graph_launch_csv_encoder{},
-                                     {"Kind",
-                                      "Correlation_Id",
-                                      "Thread_Id",
-                                      "Agent_Id",
-                                      "Queue_Id",
-                                      "Graph_Exec_Id",
-                                      "Kernel_Dispatch_Count",
-                                      "Start_Timestamp",
-                                      "End_Timestamp"}};
-
-    for(auto ditr : data)
-    {
-        for(const auto& record : data.get(ditr))
-        {
-            auto row_ss = std::stringstream{};
-            rocprofiler::tool::csv::graph_launch_csv_encoder::write_row(
-                row_ss,
-                tool_metadata.get_kind_name(record.kind),
-                record.correlation_id.internal,
-                record.thread_id,
-                tool_metadata.get_agent_index(record.agent_id, cfg.agent_index_value).as_string(),
-                record.queue_id.handle,
-                record.graph_exec_id,
-                record.kernel_dispatch_count,
-                record.start_timestamp,
-                record.end_timestamp);
-            ofs << row_ss.str();
-        }
-    }
-}
+generate_csv(const output_config& /*cfg*/,
+             const metadata& /*tool_metadata*/,
+             const generator<rocprofiler_buffer_tracing_graph_launch_record_t>& /*data*/,
+             const stats_entry_t& /*stats*/)
+{}
 
 void
 generate_csv(const output_config& cfg,
