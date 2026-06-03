@@ -106,7 +106,10 @@ def test_graph_launch_record_shape(json_input_data, expected_nodes_per_launch):
     for rec in graph_launch:
         for f in required_fields:
             assert f in rec, f"GRAPH_LAUNCH record missing '{f}': {rec}"
-        assert int(rec["graph_exec_id"]) > 0, f"graph_exec_id must be nonzero: {rec}"
+        # graph_exec_id is a typed handle ({"handle": N}) on the GRAPH_LAUNCH record.
+        assert (
+            int(rec["graph_exec_id"]["handle"]) > 0
+        ), f"graph_exec_id must be nonzero: {rec}"
         assert (
             int(rec["kernel_dispatch_count"]) == expected_nodes_per_launch
         ), f"kernel_dispatch_count {rec['kernel_dispatch_count']} != {expected_nodes_per_launch}: {rec}"
@@ -121,7 +124,11 @@ def test_graph_launch_exec_ids_match_kernel_dispatch_records(json_input_data):
     of nonzero graph_exec_ids on the KERNEL_DISPATCH records — the two views
     must agree."""
     buffer_records = _buffer_records(json_input_data)
-    launch_ids = {int(r["graph_exec_id"]) for r in buffer_records["graph_launch"]}
+    # GRAPH_LAUNCH carries graph_exec_id as a typed handle; kernel_dispatch ext records
+    # carry it as a raw uint64.
+    launch_ids = {
+        int(r["graph_exec_id"]["handle"]) for r in buffer_records["graph_launch"]
+    }
     kernel_ids = {
         int(r["graph_exec_id"])
         for r in buffer_records["kernel_dispatch"]
