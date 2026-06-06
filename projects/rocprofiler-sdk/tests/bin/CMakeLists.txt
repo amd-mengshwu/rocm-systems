@@ -25,6 +25,7 @@ add_subdirectory(reproducible-runtime)
 add_subdirectory(reproducible-dispatch-count)
 add_subdirectory(transpose)
 add_subdirectory(openmp)
+add_subdirectory(signal-handler)
 
 set(CMAKE_BUILD_RPATH "\$ORIGIN:\$ORIGIN/../lib")
 
