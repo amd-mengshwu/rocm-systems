@@ -3809,6 +3809,13 @@ hsa_status_t GpuAgent::PcSamplingDestroy(pcs::PcsRuntime::PcSamplingSession& ses
   // Mark session as inactive
   pcs_data->session = nullptr;
 
+  // Rebinding the trap handler with null PCS buffers issues the SetTrapHandler KFD
+  // ioctl, which clears the GPU-visible pointer while device_data is still mapped
+  // and valid. Only after that do we release the buffers. (Stopping/destroying the
+  // KFD session above is what stops new samples from being generated; the KFD
+  // stop/destroy path is responsible for draining any in-flight hardware writes.)
+  UpdateTrapHandlerWithPCS(nullptr, nullptr);
+
   free(pcs_data->cmd_data);
   system_deallocator()(pcs_data->old_val);
   HSA::hsa_signal_destroy(pcs_data->exec_pm4_signal);
@@ -3820,9 +3827,6 @@ hsa_status_t GpuAgent::PcSamplingDestroy(pcs::PcsRuntime::PcSamplingSession& ses
   pcs_data->device_data = NULL;
   pcs_data->host_buffer = NULL;
   pcs_data->session = NULL;
-
-  // Update the trap handler to clear any associated device data
-  UpdateTrapHandlerWithPCS(nullptr, nullptr);
 
   return (retKmt == HSAKMT_STATUS_SUCCESS) ? HSA_STATUS_SUCCESS : HSA_STATUS_ERROR;
 }
