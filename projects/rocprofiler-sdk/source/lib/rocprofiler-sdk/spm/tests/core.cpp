@@ -50,6 +50,8 @@
 #include <cstdint>
 #include <sstream>
 
+#include "lib/common/regex.hpp"
+
 using namespace rocprofiler::counters;
 using namespace rocprofiler;
 
@@ -118,6 +120,12 @@ get_api_table()
 
 namespace
 {
+bool
+is_spm_supported_arch(const hsa::AgentCache& agent)
+{
+    return common::regex::regex_match(agent.name(), "gfx9[45][0-9a-fA-F]");
+}
+
 auto
 findSPMDeviceMetrics(const hsa::AgentCache& agent, const std::unordered_set<std::string>& metrics)
 {
@@ -144,6 +152,14 @@ findSPMDeviceMetrics(const hsa::AgentCache& agent, const std::unordered_set<std:
         }
     }
     return ret;
+}
+
+std::vector<counters::Metric>
+getSPMMetrics(const hsa::AgentCache& agent)
+{
+    auto metrics = findSPMDeviceMetrics(agent, {});
+    EXPECT_FALSE(metrics.empty()) << "SPM metrics should not be empty for " << agent.name();
+    return metrics;
 }
 
 void
@@ -210,13 +226,15 @@ TEST(spm_core, check_packet_generation)
     ASSERT_TRUE(hsa::get_queue_controller() != nullptr);
     auto agents = hsa::get_queue_controller()->get_supported_agents();
     ASSERT_GT(agents.size(), 0);
+    bool any_spm_agent = false;
     for(const auto& [_, agent] : agents)
     {
         auto rocp_agent = CHECK_NOTNULL(agent.get_rocp_agent());
         if(rocp_agent->runtime_visibility.hsa && rocp_agent->runtime_visibility.hip)
         {
-            auto metrics = findSPMDeviceMetrics(agent, {});
-            ASSERT_FALSE(metrics.empty());
+            if(!is_spm_supported_arch(agent)) continue;
+            any_spm_agent = true;
+            auto metrics  = getSPMMetrics(agent);
             ASSERT_TRUE(agent.get_rocp_agent());
             for(auto& metric : metrics)
             {
@@ -259,6 +277,11 @@ TEST(spm_core, check_packet_generation)
                                  "Could not delete profile id");
             }
         }
+    }
+    if(!any_spm_agent)
+    {
+        ROCP_ERROR << "SPM unavailable";
+        return;
     }
 }
 
@@ -366,6 +389,7 @@ TEST(spm_core, check_callbacks)
     ASSERT_GT(agents.size(), 0);
     hsa::get_queue_controller()->disable_serialization();
 
+    bool any_spm_agent = false;
     for(const auto& [_, agent] : agents)
     {
         /**
@@ -374,10 +398,11 @@ TEST(spm_core, check_callbacks)
         auto rocp_agent = CHECK_NOTNULL(agent.get_rocp_agent());
         if(rocp_agent->runtime_visibility.hsa && rocp_agent->runtime_visibility.hip)
         {
+            if(!is_spm_supported_arch(agent)) continue;
+            any_spm_agent              = true;
             rocprofiler_queue_id_t qid = {.handle = static_cast<uint64_t>(count++)};
             hsa::FakeQueue         fq(agent, qid);
-            auto                   metrics = findSPMDeviceMetrics(agent, {});
-            ASSERT_FALSE(metrics.empty());
+            auto                   metrics = getSPMMetrics(agent);
             ASSERT_TRUE(agent.get_rocp_agent());
             for(auto& metric : metrics)
             {
@@ -465,6 +490,11 @@ TEST(spm_core, check_callbacks)
             }
         }
     }
+    if(!any_spm_agent)
+    {
+        ROCP_ERROR << "SPM unavailable";
+        return;
+    }
 
     registration::set_init_status(1);
 
@@ -486,13 +516,15 @@ TEST(spm_core, destroy_counter_profile)
 
     auto agents = hsa::get_queue_controller()->get_supported_agents();
     ASSERT_GT(agents.size(), 0);
+    bool any_spm_agent = false;
     for(const auto& [_, agent] : agents)
     {
         auto rocp_agent = CHECK_NOTNULL(agent.get_rocp_agent());
         if(rocp_agent->runtime_visibility.hsa && rocp_agent->runtime_visibility.hip)
         {
-            auto metrics = findSPMDeviceMetrics(agent, {});
-            ASSERT_FALSE(metrics.empty());
+            if(!is_spm_supported_arch(agent)) continue;
+            any_spm_agent = true;
+            auto metrics  = getSPMMetrics(agent);
             ASSERT_TRUE(agent.get_rocp_agent());
             for(auto& metric : metrics)
             {
@@ -521,6 +553,11 @@ TEST(spm_core, destroy_counter_profile)
                 EXPECT_FALSE(profile);
             }
         }
+    }
+    if(!any_spm_agent)
+    {
+        ROCP_ERROR << "SPM unavailable";
+        return;
     }
     registration::set_init_status(1);
 
@@ -670,13 +707,15 @@ TEST(spm_core, test_profile_incremental)
     ASSERT_TRUE(hsa::get_queue_controller() != nullptr);
     auto agents = hsa::get_queue_controller()->get_supported_agents();
     ASSERT_GT(agents.size(), 0);
+    bool any_spm_agent = false;
     for(const auto& [_, agent] : agents)
     {
         auto rocp_agent = CHECK_NOTNULL(agent.get_rocp_agent());
         if(rocp_agent->runtime_visibility.hsa && rocp_agent->runtime_visibility.hip)
         {
-            auto metrics = findSPMDeviceMetrics(agent, {});
-            ASSERT_FALSE(metrics.empty());
+            if(!is_spm_supported_arch(agent)) continue;
+            any_spm_agent = true;
+            auto metrics  = getSPMMetrics(agent);
             ASSERT_TRUE(agent.get_rocp_agent());
 
             std::map<std::string, std::vector<counters::Metric>> metric_blocks;
@@ -745,6 +784,11 @@ TEST(spm_core, test_profile_incremental)
             EXPECT_EQ(status, ROCPROFILER_STATUS_ERROR_EXCEEDS_HW_LIMIT);
         }
     }
+    if(!any_spm_agent)
+    {
+        ROCP_ERROR << "SPM unavailable";
+        return;
+    }
 
     set_client_ctx(get_client_ctx());
 }
@@ -757,12 +801,17 @@ TEST(spm_core, public_api_iterate_agents)
     registration::init_logging();
     registration::set_init_status(-1);
     context::push_client(1);
-    auto agents = hsa::get_queue_controller()->get_supported_agents();
+    auto agents        = hsa::get_queue_controller()->get_supported_agents();
+    bool any_spm_agent = false;
     for(const auto& [_, agent] : agents)
     {
         auto rocp_agent = CHECK_NOTNULL(agent.get_rocp_agent());
         if(rocp_agent->runtime_visibility.hsa && rocp_agent->runtime_visibility.hip)
         {
+            if(!is_spm_supported_arch(agent)) continue;
+            any_spm_agent = true;
+            auto expected = getSPMMetrics(agent);
+
             std::set<uint64_t> from_api{};
 
             // Iterate through the agents and get the counters available on that agent
@@ -782,8 +831,6 @@ TEST(spm_core, public_api_iterate_agents)
                                  },
                                  static_cast<void*>(&from_api)),
                              "Could not fetch supported counters");
-
-            auto expected = findSPMDeviceMetrics(agent, {});
             for(const auto& x : expected)
             {
                 bool found = false;
@@ -804,6 +851,11 @@ TEST(spm_core, public_api_iterate_agents)
             EXPECT_TRUE(from_api.empty());
         }
     }
+    if(!any_spm_agent)
+    {
+        ROCP_ERROR << "SPM unavailable";
+        return;
+    }
     registration::set_init_status(1);
     registration::finalize();
     context::pop_client(1);
@@ -821,11 +873,15 @@ TEST(spm_core, query_agent_configurations)
     auto agents = hsa::get_queue_controller()->get_supported_agents();
     ASSERT_GT(agents.size(), 0);
 
+    bool any_spm_agent = false;
     for(const auto& [_, agent] : agents)
     {
         auto rocp_agent = CHECK_NOTNULL(agent.get_rocp_agent());
         if(rocp_agent->runtime_visibility.hsa && rocp_agent->runtime_visibility.hip)
         {
+            if(!is_spm_supported_arch(agent)) continue;
+            any_spm_agent = true;
+
             struct query_result
             {
                 size_t                                                 num_configs = 0;
@@ -868,6 +924,11 @@ TEST(spm_core, query_agent_configurations)
             }
             EXPECT_TRUE(found_interval) << "Expected a sample interval configuration";
         }
+    }
+    if(!any_spm_agent)
+    {
+        ROCP_ERROR << "SPM unavailable";
+        return;
     }
 
     registration::set_init_status(1);
