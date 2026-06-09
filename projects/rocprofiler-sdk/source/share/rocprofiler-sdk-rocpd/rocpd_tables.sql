@@ -177,8 +177,10 @@ CREATE TABLE IF NOT EXISTS
         "guid"      TEXT    DEFAULT "{{guid}}" NOT NULL,
         "nid"       INTEGER NOT NULL,
         "pid"       INTEGER NOT NULL,
+        "event_id"  INTEGER NOT NULL,
         "schema_id" INTEGER NOT NULL,
         "blob"      BLOB    NOT NULL,
+        FOREIGN KEY (event_id) REFERENCES `rocpd_event{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (schema_id) REFERENCES `rocpd_info_blob_schema{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (nid) REFERENCES `rocpd_info_node{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (pid) REFERENCES `rocpd_info_process{{uuid}}` (id) ON UPDATE CASCADE
@@ -285,7 +287,7 @@ CREATE TABLE IF NOT EXISTS
         FOREIGN KEY (event_id) REFERENCES `rocpd_event{{uuid}}` (id) ON UPDATE CASCADE
     );
 
--- GPU PC sampling data (hybrid: columns for common fields + blob for arch-specific fields)
+-- GPU PC sampling data (common fields + event_id correlation to rocpd_blob_event)
 CREATE TABLE IF NOT EXISTS
     `rocpd_gpu_pc_sample{{uuid}}` (
         "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -295,7 +297,7 @@ CREATE TABLE IF NOT EXISTS
         "pid" INTEGER NOT NULL,
         "tid" INTEGER,
         "agent_id" INTEGER,
-        "event_id" INTEGER,
+        "event_id" INTEGER NOT NULL,
         "dispatch_id" INTEGER,
         "stack_id" INTEGER,
         "parent_stack_id" INTEGER,
@@ -313,14 +315,12 @@ CREATE TABLE IF NOT EXISTS
         "inst_type" INTEGER,
         "stall_reason" INTEGER,
         "wave_count" INTEGER,
-        "blob_event_id"    INTEGER,
         FOREIGN KEY (nid) REFERENCES `rocpd_info_node{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (pid) REFERENCES `rocpd_info_process{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (tid) REFERENCES `rocpd_info_thread{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (agent_id) REFERENCES `rocpd_info_agent{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (event_id) REFERENCES `rocpd_event{{uuid}}` (id) ON UPDATE CASCADE,
-        FOREIGN KEY (code_object_id) REFERENCES `rocpd_info_code_object{{uuid}}` (id) ON UPDATE CASCADE,
-        FOREIGN KEY (blob_event_id) REFERENCES `rocpd_blob_event{{uuid}}` (id) ON UPDATE CASCADE
+        FOREIGN KEY (code_object_id) REFERENCES `rocpd_info_code_object{{uuid}}` (id) ON UPDATE CASCADE
     );
 
 -- Region with a start/stop on the same thread (CPU)
@@ -455,6 +455,6 @@ CREATE TABLE IF NOT EXISTS
 INSERT INTO
     `rocpd_metadata{{uuid}}` ("tag", "value")
 VALUES
-    ("schema_version", "4"),
+    ("schema_version", "5"),
     ("uuid", "{{uuid}}"),
     ("guid", "{{guid}}");

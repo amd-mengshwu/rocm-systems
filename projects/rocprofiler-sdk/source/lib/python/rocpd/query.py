@@ -127,20 +127,47 @@ def _get_column_names(conn, table_name: str) -> set:
     return {itr[1] for itr in rows}
 
 
-def _load_pc_blob_schema(conn, schema_table: str, field_table: str):
-    rows = conn.execute(f"""
-        SELECT
-            S.id,
-            COALESCE(S.byte_order, 'little') AS byte_order,
-            F.name,
-            F.offset,
-            F.size,
-            F.data_type,
-            F.is_signed
-        FROM {schema_table} S
-        INNER JOIN {field_table} F ON F.schema_id = S.id
-        ORDER BY S.id, F.offset
-        """).fetchall()
+def _load_pc_blob_schema(
+    conn,
+    schema_table: str,
+    field_table: str,
+    source_table: str = _PC_SAMPLE_TABLE,
+):
+    schema_cols = _get_column_names(conn, schema_table)
+
+    if "source_table" in schema_cols:
+        rows = conn.execute(
+            f"""
+            SELECT
+                S.id,
+                COALESCE(S.byte_order, 'little') AS byte_order,
+                F.name,
+                F.offset,
+                F.size,
+                F.data_type,
+                F.is_signed
+            FROM {schema_table} S
+            INNER JOIN {field_table} F ON F.schema_id = S.id
+            WHERE S.source_table = ?
+            ORDER BY S.id, F.offset
+            """,
+            (source_table,),
+        ).fetchall()
+    else:
+        # Backward compatibility: older DBs may not have source_table.
+        rows = conn.execute(f"""
+            SELECT
+                S.id,
+                COALESCE(S.byte_order, 'little') AS byte_order,
+                F.name,
+                F.offset,
+                F.size,
+                F.data_type,
+                F.is_signed
+            FROM {schema_table} S
+            INNER JOIN {field_table} F ON F.schema_id = S.id
+            ORDER BY S.id, F.offset
+            """).fetchall()
 
     schema_map = {}
     all_fields = []
@@ -235,13 +262,19 @@ def _setup_pc_sampling_view(
     sample_table = _resolve_table_name(conn, _PC_SAMPLE_TABLE)
     schema_table = _resolve_table_name(conn, "rocpd_info_blob_schema")
     field_table = _resolve_table_name(conn, "rocpd_info_blob_field")
+    blob_event_table = _resolve_table_name(conn, "rocpd_blob_event")
 
     if not all([sample_table, schema_table, field_table]):
         return query
 
     _t0 = time.perf_counter()
 
-    schema_map, all_blob_fields = _load_pc_blob_schema(conn, schema_table, field_table)
+    schema_map, all_blob_fields = _load_pc_blob_schema(
+        conn,
+        schema_table,
+        field_table,
+        source_table=_PC_SAMPLE_TABLE,
+    )
     if not schema_map or not all_blob_fields:
         return query
 
@@ -255,14 +288,20 @@ def _setup_pc_sampling_view(
         "rocpd_pc_blob_field", 3, _make_pc_blob_field_function(schema_map)
     )
 
-    # Detect whether the table uses the new blob_event_id FK (new schema) or the
-    # legacy extdata_blob/extdata_schema_id inline columns (old schema).
-    use_blob_event = "blob_event_id" in base_columns
+    schema_ids = sorted(schema_map.keys())
+    schema_filter = ""
+    if schema_ids:
+        schema_filter = " AND BE.schema_id IN (" + ", ".join(str(itr) for itr in schema_ids) + ")"
 
-    if use_blob_event:
-        blob_event_table = _resolve_table_name(conn, "rocpd_blob_event")
-        if blob_event_table is None:
-            return query
+    use_event_id_blob = (
+        blob_event_table is not None
+        and "event_id" in base_columns
+        and "blob_event_id" not in base_columns
+    )
+    use_blob_event_id = blob_event_table is not None and "blob_event_id" in base_columns
+    use_inline_blob = {"extdata_blob", "extdata_schema_id"}.issubset(base_columns)
+
+    if use_event_id_blob:
         computed_columns = ",\n        ".join(
             [
                 f"rocpd_pc_blob_field(BE.blob, BE.schema_id, '{itr}') AS \"{itr}\""
@@ -275,9 +314,24 @@ def _setup_pc_sampling_view(
             {sample_table}.*,
             {computed_columns}
         FROM {sample_table}
-        LEFT JOIN {blob_event_table} BE ON BE.id = {sample_table}.blob_event_id
+        LEFT JOIN {blob_event_table} BE ON BE.event_id = {sample_table}.event_id{schema_filter}
         """
-    else:
+    elif use_blob_event_id:
+        computed_columns = ",\n        ".join(
+            [
+                f"rocpd_pc_blob_field(BE.blob, BE.schema_id, '{itr}') AS \"{itr}\""
+                for itr in selected_blob_fields
+            ]
+        )
+        view_body = f"""
+        CREATE TEMP VIEW {view_name} AS
+        SELECT
+            {sample_table}.*,
+            {computed_columns}
+        FROM {sample_table}
+        LEFT JOIN {blob_event_table} BE ON BE.id = {sample_table}.blob_event_id{schema_filter}
+        """
+    elif use_inline_blob:
         computed_columns = ",\n        ".join(
             [
                 f"rocpd_pc_blob_field(extdata_blob, extdata_schema_id, '{itr}') AS \"{itr}\""
@@ -291,6 +345,8 @@ def _setup_pc_sampling_view(
             {computed_columns}
         FROM {sample_table}
         """
+    else:
+        return query
 
     conn.execute(f"DROP VIEW IF EXISTS {view_name}")
     # Use execute (not executescript) to avoid implicitly committing any open transaction.

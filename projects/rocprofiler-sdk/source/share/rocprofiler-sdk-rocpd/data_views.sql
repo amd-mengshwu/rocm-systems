@@ -756,8 +756,11 @@ SELECT
     PS.inst_type,
     PS.stall_reason,
     PS.wave_count,
-    PS.blob_event_id
+    BE.schema_id AS extdata_schema_id,
+    BE.blob AS extdata_blob
 FROM
     `rocpd_gpu_pc_sample{{uuid}}` PS
     LEFT JOIN `rocpd_info_agent{{uuid}}` A ON A.id = PS.agent_id
-    AND A.guid = PS.guid;
+    AND A.guid = PS.guid
+    LEFT JOIN `rocpd_blob_event{{uuid}}` BE ON BE.event_id = PS.event_id
+    AND BE.guid = PS.guid;

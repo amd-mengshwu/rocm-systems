@@ -503,6 +503,13 @@ normalize_batch_table_name(const rocpd_db& db, std::string_view table)
     return std::string{table};
 }
 
+std::string
+quote_sql_identifier(std::string_view value)
+{
+    // SQLite accepts backtick-quoted identifiers; escape embedded backticks by doubling.
+    return fmt::format("`{}`", replace_all(std::string{value}, '`', "``"));
+}
+
 void
 log_batch_flush_stats(const rocpd_db& db)
 {
@@ -555,11 +562,23 @@ get_or_prepare_batch_statement(rocpd_db&                   db,
     const auto row_placeholder  = fmt::format("({})", fmt::join(placeholders, ", "));
     const auto row_placeholders = std::vector(rows_per_exec, row_placeholder);
     const auto values_clause    = fmt::format("{}", fmt::join(row_placeholders, ", "));
-    const auto field_names      = fmt::format("{}", fmt::join(pending.fields, ", "));
+    auto       quoted_fields    = std::vector<std::string>{};
+    quoted_fields.reserve(pending.fields.size());
+    for(const auto& field : pending.fields)
+        quoted_fields.emplace_back(quote_sql_identifier(field));
+
+    const auto table_name  = quote_sql_identifier(pending.table);
+    const auto field_names = fmt::format("{}", fmt::join(quoted_fields, ", "));
 
     const auto sql =
-        fmt::format("INSERT INTO {} ({}) VALUES {};", pending.table, field_names, values_clause);
-    SQLITE3_CHECK(sqlite3_prepare_v2(db.conn, sql.c_str(), -1, &stmt, nullptr));
+        fmt::format("INSERT INTO {} ({}) VALUES {};", table_name, field_names, values_clause);
+
+    auto prepare_rc = sqlite3_prepare_v2(db.conn, sql.c_str(), -1, &stmt, nullptr);
+    ROCP_FATAL_IF(prepare_rc != SQLITE_OK)
+        << "sqlite3_prepare_v2 failed with error code " << prepare_rc
+        << ", sqlite3_errmsg: " << sqlite3_errmsg(db.conn) << ", table: " << pending.table
+        << ", rows_per_exec: " << rows_per_exec
+        << ", field_count: " << pending.fields.size() << ", sql: " << sql;
     return stmt;
 }
 
@@ -2076,7 +2095,7 @@ write_rocpd(
 #pragma pack(push, 1)
     struct pc_sample_extdata_v1
     {
-        // hw_id fields (present for both host-trap and stochastic)
+        // hw_id fields
         uint32_t hw_id_chiplet          = 0;
         uint32_t hw_id_wave_id          = 0;
         uint32_t hw_id_simd_id          = 0;
@@ -2088,7 +2107,7 @@ write_rocpd(
         uint32_t hw_id_vm_id            = 0;
         uint32_t hw_id_queue_id         = 0;
         uint32_t hw_id_microengine_id   = 0;
-        // arbiter-state fields (stochastic only; remain zero for host-trap)
+        // arbiter-state fields
         uint8_t dual_issue_valu            = 0;
         uint8_t arb_state_issue_valu       = 0;
         uint8_t arb_state_issue_matrix     = 0;
@@ -2120,6 +2139,9 @@ write_rocpd(
     // any field rows are inserted.
     // ---------------------------------------------------------------------------
     auto register_blob_schema = [&db, node_id, this_pid]() -> uint64_t {
+        auto schema_table     = replace_uuid(db, "rocpd_info_blob_schema{{uuid}}");
+        auto schema_field_tbl = replace_uuid(db, "rocpd_info_blob_field{{uuid}}");
+
         auto _deferred = sql::deferred_transaction{db.conn};
 
         get_insert_statement(db,
@@ -2140,7 +2162,6 @@ write_rocpd(
                              });
 
         // Flush the schema row now so last_insert_rowid is valid.
-        auto schema_table = replace_uuid(db, "rocpd_info_blob_schema{{uuid}}");
         if(auto itr = db.pending_batches.find(schema_table); itr != db.pending_batches.end())
             flush_pending_insert_batch(db, itr->second);
 
@@ -2221,11 +2242,9 @@ write_rocpd(
 
     // Insert PC sampling rows, one per sample.
     //
-    // Design note: rocpd_gpu_pc_sample follows the same pattern as rocpd_pmc_event — it carries
-    // an event_id that references the parent kernel-dispatch rocpd_event row rather than creating
-    // its own event/track/sample triple.  This keeps the row count at 1 per sample, avoids
-    // phantom entries in rocpd_info_thread, and ensures a clean FK chain:
-    //   rocpd_event (dispatch) <- rocpd_gpu_pc_sample.event_id
+    // Design note: each sample gets its own rocpd_event row (event_id) and one
+    // rocpd_blob_event row with the same event_id. The parent kernel-dispatch
+    // event (when known) is linked via rocpd_event.parent_id.
     auto insert_pc_sampling_data = [&db,
                                     node_id,
                                     this_pid,
@@ -2239,29 +2258,6 @@ write_rocpd(
         auto _sqlgenperf_rocpd = get_simple_timer("rocpd_gpu_pc_sample");
         auto _deferred         = sql::deferred_transaction{db.conn};
 
-        // Flush any pending rocpd_blob_event rows committed by a prior call
-        // (e.g. host-trap followed by stochastic) so that MAX(id) is accurate.
-        const auto blob_event_table = replace_uuid(db, "rocpd_blob_event{{uuid}}");
-        if(auto it = db.pending_batches.find(blob_event_table); it != db.pending_batches.end())
-            flush_pending_insert_batch(db, it->second);
-
-        // Pre-compute the starting blob_event id for this batch.  Within a
-        // deferred transaction, SQLite AUTOINCREMENT always assigns MAX(id)+1,
-        // so we can compute IDs ahead of time without flushing after every row.
-        uint64_t next_blob_event_id = 1;
-        {
-            sqlite3_stmt* max_stmt = nullptr;
-            const auto    max_sql  = fmt::format(
-                "SELECT COALESCE(MAX(id), 0) FROM {}", blob_event_table);
-            if(sqlite3_prepare_v2(db.conn, max_sql.c_str(), -1, &max_stmt, nullptr) == SQLITE_OK)
-            {
-                if(sqlite3_step(max_stmt) == SQLITE_ROW)
-                    next_blob_event_id =
-                        static_cast<uint64_t>(sqlite3_column_int64(max_stmt, 0)) + 1;
-                sqlite3_finalize(max_stmt);
-            }
-        }
-
         for(auto pitr : pc_sampling_gen)
         {
             for(const auto& itr : pc_sampling_gen.get(pitr))
@@ -2271,10 +2267,10 @@ write_rocpd(
                 // Resolve parent dispatch context.  All three lookups guard against the case
                 // where PC sampling data arrives for a dispatch that was not captured by the
                 // kernel_dispatch buffer (e.g. counter-collection-only traces).
-                auto event_id = std::optional<uint64_t>{};
+                auto parent_event_id = std::optional<uint64_t>{};
                 if(record.dispatch_id < dispatch_to_evt_id.size() &&
                    dispatch_to_evt_id.at(record.dispatch_id) != 0)
-                    event_id = dispatch_to_evt_id.at(record.dispatch_id);
+                    parent_event_id = dispatch_to_evt_id.at(record.dispatch_id);
 
                 auto agent_id = std::optional<uint64_t>{};
                 if(record.dispatch_id < dispatch_to_agent_id.size() &&
@@ -2348,16 +2344,20 @@ write_rocpd(
                 auto blob_bytes = std::string(reinterpret_cast<const char*>(&extdata),
                                               sizeof(pc_sample_extdata_v1));
 
-                // Insert one row into rocpd_blob_event; use the pre-computed
-                // sequential ID so we can reference it in the pc_sample row
-                // without an extra flush-and-rowid round-trip per sample.
-                const auto current_blob_event_id = next_blob_event_id++;
+                const auto sample_event_id = create_event(
+                    db,
+                    {
+                        insert_value("correlation_id", record.correlation_id.external.value),
+                        insert_nullable_value("parent_id", parent_event_id),
+                    });
+
                 get_insert_statement(
                     db,
                     "rocpd_blob_event{{uuid}}",
                     {
                         insert_value("nid", node_id),
                         insert_value("pid", this_pid),
+                        insert_value("event_id", static_cast<int64_t>(sample_event_id)),
                         insert_value("schema_id", static_cast<int64_t>(ext_schema_id)),
                         insert_blob_value("blob", std::move(blob_bytes)),
                     });
@@ -2371,7 +2371,7 @@ write_rocpd(
                         insert_value("pid", this_pid),
                         insert_nullable_value("tid", tid),
                         insert_nullable_value("agent_id", agent_id),
-                        insert_nullable_value("event_id", event_id),
+                        insert_value("event_id", static_cast<int64_t>(sample_event_id)),
                         insert_value("dispatch_id", record.dispatch_id),
                         insert_value("correlation_id", record.correlation_id.external.value),
                         insert_value("sampling_method", sampling_method),
@@ -2391,8 +2391,6 @@ write_rocpd(
                         insert_nullable_value("inst_type", inst_type),
                         insert_nullable_value("stall_reason", stall_reason),
                         insert_nullable_value("wave_count", wave_count),
-                        insert_value("blob_event_id",
-                                     static_cast<int64_t>(current_blob_event_id)),
                     });
             }
         }
@@ -2429,12 +2427,22 @@ write_rocpd(
             !pc_sampling_host_trap_gen.empty() || !pc_sampling_stochastic_gen.empty();
         const auto ext_schema_id = has_pc_sampling ? register_blob_schema() : uint64_t{0};
 
-        insert_pc_sampling_data(pc_sampling_host_trap_gen,
-                                static_cast<int64_t>(ROCPROFILER_PC_SAMPLING_METHOD_HOST_TRAP),
-                                ext_schema_id);
-        insert_pc_sampling_data(pc_sampling_stochastic_gen,
-                                static_cast<int64_t>(ROCPROFILER_PC_SAMPLING_METHOD_STOCHASTIC),
-                                ext_schema_id);
+        if(ext_schema_id == 0)
+        {
+            ROCP_CI_LOG_IF(WARNING, has_pc_sampling)
+                << "PC sampling records were collected but are being skipped in ROCPD output due "
+                   "to schema incompatibility";
+        }
+        else
+        {
+            insert_pc_sampling_data(pc_sampling_host_trap_gen,
+                                    static_cast<int64_t>(ROCPROFILER_PC_SAMPLING_METHOD_HOST_TRAP),
+                                    ext_schema_id);
+            insert_pc_sampling_data(
+                pc_sampling_stochastic_gen,
+                static_cast<int64_t>(ROCPROFILER_PC_SAMPLING_METHOD_STOCHASTIC),
+                ext_schema_id);
+        }
     }
 
     {
