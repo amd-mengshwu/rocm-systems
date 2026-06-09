@@ -88,9 +88,9 @@ Full documentation for ROCprofiler-SDK is available at [rocm.docs.amd.com/projec
   - Enables profiling long-running or production-style jobs at the point of interest.
   - Results integrate with the existing PC sampling analysis flow.
 
-- HIP graph attribution columns and trace:
-  - Kernel and memory-copy CSVs gain `Graph_Exec_Id` and `Graph_Node_Id` columns (rendered empty for non-graph dispatches). The fields appear as top-level siblings (alongside `Stream_Id`) in JSON output and as event attributes / debug annotations in OTF2 and Perfetto outputs.
-  - New `--graph-launch-trace` CLI flag enables a new `graph_launch_trace.csv` containing per-launch summary records (one row per successful `hipGraphLaunch`).
+- HIP graph attribution fields and trace:
+  - Kernel and memory-copy records gain `graph_exec_id` and `graph_node_id` fields in JSON and rocpd output. rocpd conversion exposes these fields in CSV, OTF2, and Perfetto output.
+  - New `--graph-launch-trace` CLI flag emits per-launch summary records (one row per successful `hipGraphLaunch`) in JSON and rocpd output, including `graph_exec_id` and `kernel_dispatch_count`.
 
 **Documentation:**
 

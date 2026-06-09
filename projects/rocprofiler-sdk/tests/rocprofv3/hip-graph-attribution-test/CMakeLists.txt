@@ -18,7 +18,8 @@ endif()
 # Pin determinism preconditions: segmented-scheduling + direct-dispatch keep the
 # per-launch node_id sequence stable across iterations.
 list(APPEND HIP_GRAPH_ATTRIBUTION_ENVIRONMENT "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING=1"
-     "AMD_DIRECT_DISPATCH=1")
+     "AMD_DIRECT_DISPATCH=1"
+     "ROCPD_SCHEMA_PATH=${CMAKE_BINARY_DIR}/share/rocprofiler-sdk-rocpd")
 
 set(ITERATIONS 50)
 
@@ -79,7 +80,7 @@ rocprofiler_add_integration_execute_test(
     ${TEST_NAME_GLO}
     COMMAND
         $<TARGET_FILE:rocprofiler-sdk::rocprofv3> --graph-launch-trace -d
-        ${OUTPUT_DIR_GLO} -o out --output-format csv --
+        ${OUTPUT_DIR_GLO} -o out --output-format rocpd --
         $<TARGET_FILE:hip-graph-attribution> ${ITERATIONS}
     DEPENDS hip-graph-attribution
     TIMEOUT 120
@@ -92,9 +93,8 @@ rocprofiler_add_integration_validate_test(
     TEST_PATHS validate_graph_launch_only.py
     COPY conftest.py
     CONFIG pytest.ini
-    ARGS --graph-launch-input ${OUTPUT_DIR_GLO}/out_graph_launch_trace.csv
-         --expected-iterations ${ITERATIONS} --expected-execs 2
-         --expected-nodes-per-launch 6
+    ARGS --rocpd-input ${OUTPUT_DIR_GLO}/out_results.db --expected-iterations
+         ${ITERATIONS} --expected-execs 2 --expected-nodes-per-launch 6
     TIMEOUT 60
     LABELS "integration-tests"
     FIXTURES_REQUIRED ${TEST_NAME_GLO})

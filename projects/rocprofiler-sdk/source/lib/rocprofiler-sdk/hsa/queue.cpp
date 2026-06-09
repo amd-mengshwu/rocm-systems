@@ -105,11 +105,10 @@ context_filter(const context::context* ctx, DomainT domain, Args... args)
 }
 
 bool
-context_filter(const context::context* ctx)
+full_packet_instrumentation_context_filter(const context::context* ctx)
 {
     return (context_filter(ctx, ROCPROFILER_BUFFER_TRACING_KERNEL_DISPATCH) ||
-            context_filter(ctx, ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH) ||
-            context_filter(ctx, ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH));
+            context_filter(ctx, ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH));
 }
 
 bool
@@ -307,7 +306,8 @@ WriteInterceptor(const void* packets,
     auto*      gls                 = ::rocprofiler::hip::graph::current_launch_state();
     const bool graph_launch_active = (gls != nullptr);
     const bool no_real_consumers =
-        (queue.get_notifiers() == 0 && context::get_active_contexts(context_filter).empty());
+        (queue.get_notifiers() == 0 &&
+         context::get_active_contexts(full_packet_instrumentation_context_filter).empty());
 
     if(pkt_count == 0 || (no_real_consumers && !graph_launch_active))
     {

@@ -22,25 +22,40 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-"""GRAPH_LAUNCH-only subscription smoke test.
-
-Direct CSV output for GRAPH_LAUNCH has been removed; consume the summary
-record via JSON or rocpd. Function names preserved for stable ctest IDs."""
+"""GRAPH_LAUNCH-only subscription smoke test against rocpd output."""
 
 import sys
 import pytest
 
 
-def test_graph_launch_record_count(
-    graph_launch_input_data, expected_iterations, expected_execs
-):
-    pytest.skip("GRAPH_LAUNCH CSV output removed; see JSON / rocpd")
+def _graph_launch_rows(rocpd_connection):
+    cur = rocpd_connection.execute("""
+        SELECT graph_exec_id, kernel_dispatch_count, start, end
+        FROM rocpd_graph_launch
+        ORDER BY start ASC, end DESC
+        """)
+    return cur.fetchall()
 
 
-def test_graph_launch_kernel_dispatch_count(
-    graph_launch_input_data, expected_nodes_per_launch
-):
-    pytest.skip("GRAPH_LAUNCH CSV output removed; see JSON / rocpd")
+def test_graph_launch_record_count(rocpd_connection, expected_iterations, expected_execs):
+    rows = _graph_launch_rows(rocpd_connection)
+    expected_launches = expected_iterations * expected_execs + 1
+    assert len(rows) == expected_launches
+
+
+def test_graph_launch_kernel_dispatch_count(rocpd_connection, expected_nodes_per_launch):
+    rows = _graph_launch_rows(rocpd_connection)
+    assert rows, "expected GRAPH_LAUNCH records in rocpd"
+    for _, kernel_dispatch_count, _, _ in rows:
+        assert kernel_dispatch_count == expected_nodes_per_launch
+
+
+def test_graph_launch_exec_ids_nonzero(rocpd_connection):
+    rows = _graph_launch_rows(rocpd_connection)
+    assert rows, "expected GRAPH_LAUNCH records in rocpd"
+    for graph_exec_id, _, start, end in rows:
+        assert graph_exec_id > 0
+        assert end >= start
 
 
 if __name__ == "__main__":

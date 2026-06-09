@@ -474,7 +474,7 @@ For attachment profiling of running processes:
     add_parser_bool_argument(
         basic_tracing_options,
         "--graph-launch-trace",
-        help="For collecting one record per hipGraphLaunch invocation. Emits graph_launch_trace.csv with the graph_exec_id and kernel_dispatch_count for each launch. Independent of --kernel-trace; kernel-dispatch records are emitted by --kernel-trace.",
+        help="For collecting one record per hipGraphLaunch invocation. Emits graph launch records to JSON and rocpd with the graph_exec_id and kernel_dispatch_count for each launch. Independent of --kernel-trace; kernel-dispatch records are emitted by --kernel-trace.",
     )
     add_parser_bool_argument(
         basic_tracing_options,

@@ -325,29 +325,33 @@ operations back to the specific graph node that produced them. This enables
 consumers to group dispatches across many graph launches by source node and
 to track per-node statistics over a workload's lifetime.
 
-Two new columns are added to the kernel dispatch and memory copy CSVs when
-the corresponding trace is enabled:
+Graph attribution is emitted by direct JSON output and by the rocpd database.
+For kernel dispatches and memory copies, the graph fields are:
 
-* ``Graph_Exec_Id``: process-monotonic ID assigned per ``hipGraphExec_t``.
-  Empty for operations that did not originate from a graph launch.
-* ``Graph_Node_Id``: 0-based ordinal within a single ``hipGraphLaunch`` call.
-  Empty for non-graph operations.
+* ``graph_exec_id``: process-monotonic ID assigned per ``hipGraphExec_t``.
+  Zero for operations that did not originate from a graph launch.
+* ``graph_node_id``: 0-based ordinal within a single ``hipGraphLaunch`` call.
+  Zero for non-graph operations.
 
-In JSON output the same fields appear as top-level siblings of ``stream_id``.
-In OTF2 and Perfetto outputs they appear as per-event attributes / debug
-annotations.
+In direct JSON output, these fields appear as top-level siblings of
+``stream_id``. In rocpd, they are stored on the kernel-dispatch and
+memory-copy tables and exposed through rocpd post-processing. Direct
+``rocprofv3`` CSV, OTF2, and Perfetto output do not carry graph attribution;
+use rocpd conversion for those formats.
 
 A new ``--graph-launch-trace`` flag enables a separate
-``graph_launch_trace.csv`` containing one row per successful ``hipGraphLaunch``
-call, including ``Graph_Exec_Id``, ``Kernel_Dispatch_Count``, agent, and
-launch timestamps. This flag is independent of ``--kernel-trace`` -- the
-launch summary records are emitted regardless of whether kernel-dispatch
-tracing is subscribed.
+``graph_launch`` JSON/rocpd record containing one row per successful
+``hipGraphLaunch`` call, including ``graph_exec_id``,
+``kernel_dispatch_count``, agent, and launch timestamps. This flag is
+independent of ``--kernel-trace`` -- the launch summary records are emitted
+regardless of whether kernel-dispatch tracing is subscribed. For CSV, OTF2,
+and Perfetto views of graph launches, collect rocpd output and convert it with
+the rocpd tools.
 
 Determinism contract
 ^^^^^^^^^^^^^^^^^^^^
 
-The ``Graph_Node_Id`` value identifies the same source node across launches of
+The ``graph_node_id`` value identifies the same source node across launches of
 the same ``hipGraphExec_t`` **if and only if** all of the following hold:
 
 1. Segmented scheduling is in use (default; suppressed by
@@ -363,7 +367,7 @@ underlying scheduling writes AQL packets from a different host thread
 (e.g., the classic-path command-processor thread when
 ``AMD_DIRECT_DISPATCH=0``, or any worker thread under non-segmented
 scheduling), those packets do not see the attribution state and their
-records are produced with empty ``Graph_Exec_Id`` / ``Graph_Node_Id``
+records are produced with zero ``graph_exec_id`` / ``graph_node_id``
 fields. ``Kernel_Dispatch_Count`` on the ``GRAPH_LAUNCH`` summary record
 may then under-report the actual count. Consumers cannot distinguish
 missing-attribution rows from genuinely non-graph rows.
@@ -374,13 +378,13 @@ Limitations
 * On AMD HIP, in-graph memcpy operations are typically dispatched as blit
   kernels (``__amd_rocclr_copyBuffer``) and surface as kernel dispatches
   rather than memory-copy records. They are still attributed (via the
-  kernel-dispatch path) but appear in ``kernel_trace.csv``, not in
-  ``memory_copy_trace.csv``.
-* ``Graph_Exec_Id`` is per-``hipGraphExec_t``. Two ``hipGraphInstantiate``
+  kernel-dispatch path) but appear as kernel-dispatch records, not
+  memory-copy records.
+* ``graph_exec_id`` is per-``hipGraphExec_t``. Two ``hipGraphInstantiate``
   calls on the same source ``hipGraph_t`` produce different IDs; consumers
   wanting cross-instantiation grouping must track that separately.
 * Child graphs nested via ``hipGraphAddChildGraphNode`` are attributed to the
-  outer launch's ``Graph_Exec_Id``; the inner graph's instantiation ID is not
+  outer launch's ``graph_exec_id``; the inner graph's instantiation ID is not
   surfaced.
 
 Memory copy trace

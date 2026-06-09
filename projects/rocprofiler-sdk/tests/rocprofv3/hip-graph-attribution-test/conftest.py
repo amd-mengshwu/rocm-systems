@@ -24,6 +24,7 @@
 
 import csv
 import json
+import sqlite3
 import pytest
 
 from rocprofiler_sdk.pytest_utils import collapse_dict_list
@@ -36,6 +37,7 @@ def pytest_addoption(parser):
     parser.addoption("--graph-launch-input", action="store", default=None)
     parser.addoption("--hip-api-input", action="store", default=None)
     parser.addoption("--json-input", action="store", default=None)
+    parser.addoption("--rocpd-input", action="store", default=None)
     parser.addoption("--expected-iterations", action="store", type=int, default=None)
     parser.addoption("--expected-execs", action="store", type=int, default=None)
     parser.addoption(
@@ -116,6 +118,18 @@ def json_input_data(request):
         pytest.fail("--json-input argument is required")
     with open(filename, "r") as inp:
         return dotdict(collapse_dict_list(json.load(inp)))
+
+
+@pytest.fixture
+def rocpd_connection(request):
+    filename = request.config.getoption("--rocpd-input")
+    if filename is None:
+        pytest.fail("--rocpd-input argument is required")
+    conn = sqlite3.connect(filename)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 @pytest.fixture

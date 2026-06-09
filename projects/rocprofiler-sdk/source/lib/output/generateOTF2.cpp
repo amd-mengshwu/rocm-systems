@@ -659,7 +659,7 @@ write_otf2(const output_config&                                          cfg,
                                     name,
                                     _evt_info.get_location(),
                                     itr.start_timestamp,
-                                    nullptr});
+                                    get_attr(sdk::category::memory_copy{})});
         _data.emplace_back(evt_data{ROCPROFILER_CALLBACK_PHASE_EXIT,
                                     name,
                                     _evt_info.get_location(),
