@@ -34,7 +34,7 @@ inline hipDeviceptr_t memDevPtr(const amd::Memory* m) {
 // Abstract Structures
 class Function {
  public:
-  Function(const std::string& name, FatBinaryInfo** modules = nullptr);
+  Function(const std::string& name, FatBinaryInfo** modules = nullptr, bool isStatic = false);
   ~Function();
 
   hipError_t GetDynFunc(hipFunction_t* hfunc, hipModule_t hmod);
@@ -51,6 +51,7 @@ class Function {
   std::vector<amd::Kernel*> dFunc_;  //!< Per-device kernel objects; index matches g_devices
   std::string name_;                 //!< Symbol name for kernel lookup in the program
   FatBinaryInfo** modules_;          //!< Owning fat binary; nullptr for dynamic COs
+  bool isStatic_;  //!< Performance flag, allows retain on NDRangeKernelCommand to be skipped
 };
 
 class Var {

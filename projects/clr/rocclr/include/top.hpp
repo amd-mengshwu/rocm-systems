@@ -153,7 +153,10 @@ class MemoryPoolObject {
 /*! \brief For all reference counted objects.
  */
 class ReferenceCountedObject {
-  std::atomic<uint> referenceCount_;
+  static_assert(sizeof(std::atomic<uint>) < 64,
+                "std::atomic<uint> must be smaller than 64 bytes for cache-line padding");
+  alignas(64) std::atomic<uint> referenceCount_;
+  char referenceCountPadding_[64 - sizeof(std::atomic<uint>)];
 
  protected:
   virtual ~ReferenceCountedObject() {}
@@ -162,8 +165,8 @@ class ReferenceCountedObject {
  public:
   ReferenceCountedObject() : referenceCount_(1) {}
 
-  void* operator new(size_t size) { return ::operator new(size); }
-  void operator delete(void* p) { return ::operator delete(p); }
+  void* operator new(size_t size) { return ::operator new(size, std::align_val_t(64)); }
+  void operator delete(void* p) { return ::operator delete(p, std::align_val_t(64)); }
   void* operator new(size_t size, size_t extSize) {
     return ReferenceCountedObject::operator new(size + extSize);
   };

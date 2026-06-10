@@ -30,7 +30,7 @@ Event::Event(HostQueue& queue, bool profilingEnabled)
       device_(&queue.device()),
       profilingInfo_(profilingEnabled) {
   event_entry_scope_.store(Device::kCacheStateInvalid, std::memory_order_relaxed);
-  notified_.clear();
+  notified_.clear(std::memory_order_relaxed);
 }
 
 // ================================================================================================
@@ -41,7 +41,7 @@ Event::Event()
       notify_event_(nullptr),
       device_(nullptr) {
   event_entry_scope_.store(Device::kCacheStateInvalid, std::memory_order_relaxed);
-  notified_.clear();
+  notified_.clear(std::memory_order_relaxed);
 }
 
 // ================================================================================================
@@ -342,7 +342,7 @@ void Command::operator delete(void* ptr) {
   if (DEBUG_CLR_SYSMEM_POOL) {
     command_pool_->Free(ptr);
   } else {
-    ::operator delete(ptr);
+    ::operator delete(ptr, std::align_val_t(alignof(Command)));
   }
 }
 
@@ -351,7 +351,7 @@ void* Command::operator new(size_t size) {
   if (DEBUG_CLR_SYSMEM_POOL) {
     return command_pool_->Alloc(size);
   } else {
-    return ::operator new(size);
+    return ::operator new(size, std::align_val_t(alignof(Command)));
   }
 }
 
@@ -466,13 +466,21 @@ NDRangeKernelCommand::NDRangeKernelCommand(HostQueue& queue, const EventWaitList
     profilingInfo_.correlation_id_ = activity_prof::correlation_id;
     profilingInfo_.marker_ts_ = true;
   }
-  kernel_.retain();
+  // Static-code-object kernels outlive every launch (their owner is destroyed only
+  // after all streams are drained at teardown), so we skip the per-launch retain to
+  // avoid contending on the kernel's reference count.
+  if (!kernel_.isStatic()) {
+    kernel_.retain();
+  }
 }
 
 void NDRangeKernelCommand::releaseResources() {
   kernel_.parameters().release(parameters_);
   DEBUG_ONLY(parameters_ = NULL);
-  kernel_.release();
+  // Only release if we retained (non-static kernels).
+  if (!kernel_.isStatic()) {
+    kernel_.release();
+  }
   Command::releaseResources();
 }
 
