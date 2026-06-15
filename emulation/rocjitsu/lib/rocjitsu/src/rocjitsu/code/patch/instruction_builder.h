@@ -35,6 +35,7 @@ class Instruction;
 inline constexpr uint32_t kSoppEncodingPrefix = 0x17F;
 inline constexpr uint32_t kSop1EncodingPrefix = 0x17D;
 inline constexpr uint32_t kSop2EncodingPrefix = 0x2;
+inline constexpr uint32_t kSopcEncodingPrefix = 0x17E;
 inline constexpr uint16_t kScalarPositiveInlineBase = 128;
 inline constexpr uint16_t kDelayAluSaluDep1 = 9;
 
@@ -58,6 +59,14 @@ inline constexpr uint16_t kDelayAluSaluDep1 = 9;
                                                   uint32_t ssrc1) {
   return (kSop2EncodingPrefix << 30) | ((op & 0x7Fu) << 23) | ((sdst & 0x7Fu) << 16) |
          ((ssrc1 & 0xFFu) << 8) | (ssrc0 & 0xFFu);
+}
+
+/// @brief Pack a SOPC instruction word from its constituent fields.
+///
+/// SOPC compares two scalar sources and writes only SCC; there is no sdst.
+[[nodiscard]] inline constexpr uint32_t pack_sopc(uint32_t op, uint32_t ssrc0, uint32_t ssrc1) {
+  return (kSopcEncodingPrefix << 23) | ((op & 0x7Fu) << 16) | ((ssrc1 & 0xFFu) << 8) |
+         (ssrc0 & 0xFFu);
 }
 
 /// @brief Scalar source operand encoding for a non-negative inline integer.
@@ -163,6 +172,51 @@ inline constexpr uint16_t kDelayAluSaluDep1 = 9;
   }
 }
 
+/// @brief Get the s_getpc_b64 (SOP1) opcode for a target ISA.
+[[nodiscard]] inline constexpr uint32_t sop1_op_getpc_b64(rj_code_arch_t arch) {
+  // GFX9 (CDNA1-4): 0x1C; GFX10 (RDNA1/2): 0x1F; GFX11/12 (RDNA3/3.5/4): 0x47.
+  switch (arch) {
+  case ROCJITSU_CODE_ARCH_RDNA3:
+  case ROCJITSU_CODE_ARCH_RDNA3_5:
+  case ROCJITSU_CODE_ARCH_RDNA4:
+    return 0x47;
+  case ROCJITSU_CODE_ARCH_RDNA1:
+  case ROCJITSU_CODE_ARCH_RDNA2:
+    return 0x1F;
+  default:
+    return 0x1C;
+  }
+}
+
+/// @brief Get the s_swappc_b64 (SOP1) opcode for a target ISA.
+[[nodiscard]] inline constexpr uint32_t sop1_op_swappc_b64(rj_code_arch_t arch) {
+  // GFX9 (CDNA1-4): 0x1E; GFX10 (RDNA1/2): 0x21; GFX11/12 (RDNA3/3.5/4): 0x49.
+  switch (arch) {
+  case ROCJITSU_CODE_ARCH_RDNA3:
+  case ROCJITSU_CODE_ARCH_RDNA3_5:
+  case ROCJITSU_CODE_ARCH_RDNA4:
+    return 0x49;
+  case ROCJITSU_CODE_ARCH_RDNA1:
+  case ROCJITSU_CODE_ARCH_RDNA2:
+    return 0x21;
+  default:
+    return 0x1E;
+  }
+}
+
+/// @brief Get the s_cselect_b32 (SOP2) opcode for a target ISA.
+[[nodiscard]] inline constexpr uint32_t sop2_op_cselect_b32(rj_code_arch_t arch) {
+  // GFX9/GFX10 (CDNA1-4, RDNA1/2): 0x0A; GFX11/12 (RDNA3/3.5/4): 0x30.
+  switch (arch) {
+  case ROCJITSU_CODE_ARCH_RDNA3:
+  case ROCJITSU_CODE_ARCH_RDNA3_5:
+  case ROCJITSU_CODE_ARCH_RDNA4:
+    return 0x30;
+  default:
+    return 0x0A;
+  }
+}
+
 /// @brief Encode an s_branch instruction for the given target ISA.
 ///
 /// @param offset_dwords  Signed offset in dwords from (PC + 4).
@@ -234,6 +288,45 @@ build_s_nop(uint16_t cycles = 0, rj_code_arch_t arch = ROCJITSU_CODE_ARCH_RDNA4)
 [[nodiscard]] inline constexpr uint32_t build_s_lshr_b32(uint16_t sdst, uint16_t ssrc0,
                                                          uint16_t ssrc1, rj_code_arch_t arch) {
   return pack_sop2(sop2_op_lshr_b32(arch), sdst, ssrc0, ssrc1);
+}
+
+/// @brief Encode s_getpc_b64 for the given target ISA.
+[[nodiscard]] inline constexpr uint32_t build_s_getpc_b64(uint16_t sdst_pair_base,
+                                                          rj_code_arch_t arch) {
+  return pack_sop1(sop1_op_getpc_b64(arch), sdst_pair_base, /*ssrc0=*/0);
+}
+
+/// @brief Encode s_add_u32 for the given target ISA (SOP2 opcode 0, all gens).
+[[nodiscard]] inline constexpr uint32_t build_s_add_u32(uint16_t sdst, uint16_t ssrc0,
+                                                        uint16_t ssrc1, rj_code_arch_t) {
+  constexpr uint32_t kSop2AddU32 = 0;
+  return pack_sop2(kSop2AddU32, sdst, ssrc0, ssrc1);
+}
+
+/// @brief Encode s_addc_u32 for the given target ISA (SOP2 opcode 4, all gens).
+[[nodiscard]] inline constexpr uint32_t build_s_addc_u32(uint16_t sdst, uint16_t ssrc0,
+                                                         uint16_t ssrc1, rj_code_arch_t) {
+  constexpr uint32_t kSop2AddcU32 = 4;
+  return pack_sop2(kSop2AddcU32, sdst, ssrc0, ssrc1);
+}
+
+/// @brief Encode s_swappc_b64 for the given target ISA.
+[[nodiscard]] inline constexpr uint32_t
+build_s_swappc_b64(uint16_t sdst_link_base, uint16_t ssrc0_target_base, rj_code_arch_t arch) {
+  return pack_sop1(sop1_op_swappc_b64(arch), sdst_link_base, ssrc0_target_base);
+}
+
+/// @brief Encode s_cselect_b32 for the given target ISA.
+[[nodiscard]] inline constexpr uint32_t build_s_cselect_b32(uint16_t sdst, uint16_t ssrc0,
+                                                            uint16_t ssrc1, rj_code_arch_t arch) {
+  return pack_sop2(sop2_op_cselect_b32(arch), sdst, ssrc0, ssrc1);
+}
+
+/// @brief Encode s_cmp_lg_u32 for the given target ISA (SOPC opcode 7, all gens).
+[[nodiscard]] inline constexpr uint32_t build_s_cmp_lg_u32(uint16_t ssrc0, uint16_t ssrc1,
+                                                           rj_code_arch_t) {
+  constexpr uint32_t kSopcCmpLgU32 = 7;
+  return pack_sopc(kSopcCmpLgU32, ssrc0, ssrc1);
 }
 
 } // namespace rocjitsu
