@@ -27,12 +27,17 @@ def _stop_service(argv: list[str]) -> int:
     return services.main(["stop", *argv])
 
 
+def _check_alive(argv: list[str]) -> int:
+    return services.main(["check-alive", *argv])
+
+
 _SUBCOMMANDS = {
     "prepare-submodules": submodules.main,
     "prepare-build-env": build_env.main,
     "write-gpp-wrapper": gpp_wrapper.main,
     "start-service": _start_service,
     "stop-service": _stop_service,
+    "check-alive": _check_alive,
     "verify-metrics": metrics.main,
 }
 

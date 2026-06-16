@@ -115,6 +115,35 @@ def start(
     return proc.pid
 
 
+def check_alive(
+    *, name: str, pid_file: Path, delay: float = 2.0, log_file: Path | None = None
+) -> bool:
+    """Wait ``delay`` seconds, then verify the service is still running.
+
+    Returns True if the process is alive, False (and emits a GH error) if it
+    died.  Used as a post-start health check to detect early crashes (e.g. ABI
+    mismatches causing immediate segfaults or stack-smashing aborts).
+    """
+    if not pid_file.is_file():
+        gh_error(f"{name}: no pid file at {pid_file}")
+        return False
+    try:
+        pid = int(pid_file.read_text().strip())
+    except ValueError:
+        gh_error(f"{name}: invalid pid file {pid_file}")
+        return False
+
+    time.sleep(delay)
+    if _process_alive(pid):
+        logger.info("%s (pid=%s) still alive after %.1fs", name, pid, delay)
+        return True
+
+    gh_error(f"{name} (pid={pid}) died within {delay}s of start")
+    if log_file is not None:
+        _tail_log(log_file, lines=30)
+    return False
+
+
 def stop(*, name: str, pid_file: Path) -> None:
     if not pid_file.is_file():
         logger.info("no pid file for %s at %s -- nothing to stop", name, pid_file)
@@ -157,6 +186,17 @@ def main(argv: list[str] | None = None) -> int:
         "--ld-library-path", help="Value to set for LD_LIBRARY_PATH on the child process."
     )
 
+    p_check = sub.add_parser("check-alive", help="Verify a service is still running")
+    p_check.add_argument("--name", required=True)
+    p_check.add_argument("--pid-file", required=True, type=Path)
+    p_check.add_argument("--log-file", type=Path, default=None)
+    p_check.add_argument(
+        "--delay",
+        type=float,
+        default=2.0,
+        help="Seconds to wait before checking liveness (default: 2).",
+    )
+
     p_stop = sub.add_parser("stop", help="Stop a previously-started service")
     p_stop.add_argument("--name", required=True)
     p_stop.add_argument("--pid-file", required=True, type=Path)
@@ -179,6 +219,12 @@ def main(argv: list[str] | None = None) -> int:
             ready_timeout=args.ready_timeout,
             extra_env=extra_env,
         )
+    elif args.action == "check-alive":
+        alive = check_alive(
+            name=args.name, pid_file=args.pid_file, delay=args.delay, log_file=args.log_file
+        )
+        if not alive:
+            return 1
     elif args.action == "stop":
         stop(name=args.name, pid_file=args.pid_file)
     return 0
