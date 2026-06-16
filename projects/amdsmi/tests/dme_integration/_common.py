@@ -33,12 +33,7 @@ def run(
     logger = logging.getLogger("dme.run")
     logger.info("$ %s", " ".join(shlex.quote(c) for c in cmd))
     return subprocess.run(
-        cmd,
-        cwd=str(cwd) if cwd else None,
-        check=check,
-        text=True,
-        capture_output=capture,
-        env=env,
+        cmd, cwd=str(cwd) if cwd else None, check=check, text=True, capture_output=capture, env=env
     )
 
 

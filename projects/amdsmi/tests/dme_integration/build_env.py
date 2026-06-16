@@ -52,12 +52,7 @@ def _copy_tree(src_dir: Path, dst_dir: Path) -> None:
             shutil.copy2(entry, target)
 
 
-def prepare(
-    *,
-    gpuagent_src: Path,
-    gpu_agent_workdir: Path,
-    rocm_dir: Path,
-) -> None:
+def prepare(*, gpuagent_src: Path, gpu_agent_workdir: Path, rocm_dir: Path) -> None:
     # Symlink to satisfy gpu-agent Makefile's hard-coded ABS_DIR.
     gpu_agent_workdir.parent.mkdir(parents=True, exist_ok=True)
     if gpu_agent_workdir.is_symlink() or gpu_agent_workdir.exists():

@@ -25,10 +25,7 @@ from ._common import configure_logging, gh_error, run
 
 logger = logging.getLogger("dme.submodules")
 
-_GIT_SSH_PATTERNS = (
-    re.compile(r"git@github\.com:"),
-    re.compile(r"ssh://git@github\.com/"),
-)
+_GIT_SSH_PATTERNS = (re.compile(r"git@github\.com:"), re.compile(r"ssh://git@github\.com/"))
 _HTTPS_REPLACEMENT = "https://github.com/"
 
 
@@ -58,33 +55,16 @@ def _verify_protobuf_submodule(gpuagent_dir: Path) -> None:
 
     gh_error("protobuf submodule is empty -- nested submodule init failed")
     if (gpuagent_dir / ".gitmodules").is_file():
-        run(
-            ["git", "config", "--file", ".gitmodules", "-l"],
-            cwd=gpuagent_dir,
-            check=False,
-        )
+        run(["git", "config", "--file", ".gitmodules", "-l"], cwd=gpuagent_dir, check=False)
     run(["git", "submodule", "status", "--recursive"], cwd=gpuagent_dir, check=False)
     raise SystemExit(1)
 
 
 def prepare(
-    *,
-    dme_repo: str,
-    dme_branch: str,
-    dme_dir: Path,
-    gpu_agent_repo: str,
-    gpu_agent_branch: str,
+    *, dme_repo: str, dme_branch: str, dme_dir: Path, gpu_agent_repo: str, gpu_agent_branch: str
 ) -> None:
     # CI containers have no SSH keys; force HTTPS for github.com submodule URLs.
-    run(
-        [
-            "git",
-            "config",
-            "--global",
-            "url.https://github.com/.insteadOf",
-            "git@github.com:",
-        ]
-    )
+    run(["git", "config", "--global", "url.https://github.com/.insteadOf", "git@github.com:"])
     # Note: a second --global insteadOf with the same key would overwrite the
     # first, so we only set one and rely on the .gitmodules rewrite below
     # for ``ssh://git@github.com/`` style URLs.

@@ -86,11 +86,7 @@ def start(
     logger.info("starting %s: %s", name, " ".join(cmd))
     log_handle = log_file.open("wb")
     proc = subprocess.Popen(
-        cmd,
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-        env=env,
-        start_new_session=True,
+        cmd, stdout=log_handle, stderr=subprocess.STDOUT, env=env, start_new_session=True
     )
     pid_file.parent.mkdir(parents=True, exist_ok=True)
     pid_file.write_text(str(proc.pid))
@@ -111,9 +107,7 @@ def start(
         if not _process_alive(proc.pid):
             gh_error(f"{name} exited before becoming ready (see {log_file})")
         else:
-            gh_error(
-                f"{name} did not open {ready_host}:{ready_port} within {ready_timeout}s"
-            )
+            gh_error(f"{name} did not open {ready_host}:{ready_port} within {ready_timeout}s")
         _tail_log(log_file)
         raise SystemExit(1)
 
@@ -152,12 +146,15 @@ def main(argv: list[str] | None = None) -> int:
     p_start.add_argument("--log-file", required=True, type=Path)
     p_start.add_argument("--pid-file", required=True, type=Path)
     p_start.add_argument("--ready-host", default="127.0.0.1")
-    p_start.add_argument("--ready-port", required=True, type=int,
-                         help="Port to wait for (TCP). Use 0 to skip and only check process liveness.")
+    p_start.add_argument(
+        "--ready-port",
+        required=True,
+        type=int,
+        help="Port to wait for (TCP). Use 0 to skip and only check process liveness.",
+    )
     p_start.add_argument("--ready-timeout", type=float, default=_DEFAULT_READY_TIMEOUT_S)
     p_start.add_argument(
-        "--ld-library-path",
-        help="Value to set for LD_LIBRARY_PATH on the child process.",
+        "--ld-library-path", help="Value to set for LD_LIBRARY_PATH on the child process."
     )
 
     p_stop = sub.add_parser("stop", help="Stop a previously-started service")

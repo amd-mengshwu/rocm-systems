@@ -41,11 +41,7 @@ _SAMPLE_RE = re.compile(
 
 # Default GPU metrics that should always be exposed by the AMDSMI-backed
 # Device Metrics Exporter once GPU Agent is up. Override via CLI flag.
-_DEFAULT_REQUIRED_METRICS = (
-    "gpu_edge_temperature",
-    "gpu_power_usage",
-    "gpu_gfx_activity",
-)
+_DEFAULT_REQUIRED_METRICS = ("gpu_edge_temperature", "gpu_power_usage", "gpu_gfx_activity")
 
 
 def _fetch(url: str, timeout: float) -> tuple[int, str]:
@@ -87,7 +83,9 @@ def verify(
         logger.info("HTTP %s -- retrying in %.1fs", status, retry_delay)
         time.sleep(retry_delay)
     else:
-        gh_error(f"Metrics endpoint unreachable after {max_retries} attempts (last status {last_status})")
+        gh_error(
+            f"Metrics endpoint unreachable after {max_retries} attempts (last status {last_status})"
+        )
         raise SystemExit(1)
 
     if output_path is not None:
@@ -101,17 +99,13 @@ def verify(
     exposed = _exposed_metric_names(body)
     missing = [m for m in required_metrics if m not in exposed]
     if missing:
-        gh_error(
-            "Required GPU metrics missing from /metrics: " + ", ".join(missing)
-        )
+        gh_error("Required GPU metrics missing from /metrics: " + ", ".join(missing))
         sample = ", ".join(sorted(exposed)[:20])
         gh_warning(f"Exposed metrics (sample): {sample}")
         raise SystemExit(1)
 
     logger.info(
-        "All %d required metrics present (total exposed: %d)",
-        len(required_metrics),
-        len(exposed),
+        "All %d required metrics present (total exposed: %d)", len(required_metrics), len(exposed)
     )
 
 
