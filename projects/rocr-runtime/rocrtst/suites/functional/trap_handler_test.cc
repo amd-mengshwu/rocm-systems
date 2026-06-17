@@ -51,10 +51,14 @@ static void TrapErrorCallback(hsa_status_t status, hsa_queue_t* source, void* da
   // Verify queue pointer if available
   if (test_data->queue_pointer != nullptr) {
     hsa_queue_t* expected_queue = *(test_data->queue_pointer);
-    if (expected_queue != nullptr && source != nullptr) {
-      if (source->id != expected_queue->id) {
-        std::cerr << "WARNING: Queue ID mismatch in callback. "
+    if (expected_queue != nullptr) {
+      if (source == nullptr) {
+        std::cerr << "ERROR: Queue source is NULL in callback" << std::endl;
+        test_data->queue_mismatch.store(true, std::memory_order_release);
+      } else if (source->id != expected_queue->id) {
+        std::cerr << "ERROR: Queue ID mismatch in callback. "
                   << "Expected: " << expected_queue->id << " Got: " << source->id << std::endl;
+        test_data->queue_mismatch.store(true, std::memory_order_release);
       }
     }
   }
@@ -183,24 +187,36 @@ bool TrapHandlerTest::RunTrapTest(hsa_agent_t cpuAgent, hsa_agent_t gpuAgent,
   if (!pass_null_ptr) {
     err = hsa_amd_memory_pool_allocate(global_pool, kNumWorkItems * sizeof(int), 0,
                                        reinterpret_cast<void**>(&ptr_buffer));
-    if (err == HSA_STATUS_SUCCESS) {
-      hsa_amd_agents_allow_access(1, &gpuAgent, NULL, ptr_buffer);
-      memset(ptr_buffer, 0x42, kNumWorkItems * sizeof(int));
+    if (err != HSA_STATUS_SUCCESS) {
+      hsa_memory_free(out_buffer);
+      hsa_queue_destroy(queue);
+      std::cout << "FAILED (cannot allocate ptr buffer)" << std::endl;
+      return false;
     }
+    err = hsa_amd_agents_allow_access(1, &gpuAgent, NULL, ptr_buffer);
+    if (err != HSA_STATUS_SUCCESS) {
+      hsa_memory_free(ptr_buffer);
+      hsa_memory_free(out_buffer);
+      hsa_queue_destroy(queue);
+      std::cout << "FAILED (cannot allow GPU access to ptr buffer)" << std::endl;
+      return false;
+    }
+    memset(ptr_buffer, 0x42, kNumWorkItems * sizeof(int));
   }
 
-  // Kernel arguments structure
-  // Layout depends on which kernel we're calling
-  struct __attribute__((aligned(16))) TrapKernelArgs {
-    void* ptr;    // First pointer (ptr or out depending on kernel)
-    void* out;    // Second pointer (out)
-    int divisor;  // Divisor for math exception test
-    int pad;      // Padding
-  };
+  // Kernel arguments - allocate max needed size and zero-initialize
+  // Different kernels have different argument layouts:
+  //   - Single pointer kernels: trap_abort, trap_debugger, trap_generic,
+  //                             trap_illegal_instruction, trap_aperture_violation, trap_none
+  //     ABI: [ptr (8 bytes)]
+  //   - Memory violation kernel: trap_memory_violation(__global int *ptr, __global int *out)
+  //     ABI: [ptr (8 bytes), out (8 bytes)]
+  //   - Math exception kernel: trap_math_exception(__global int *out, int divisor)
+  //     ABI: [out (8 bytes), divisor (4 bytes), pad (4 bytes)]
+  const size_t max_kernarg_size = 32;  // Enough for any kernel layout
 
-  TrapKernelArgs* kern_args = nullptr;
-  err = hsa_amd_memory_pool_allocate(kernarg_pool, sizeof(TrapKernelArgs), 0,
-                                     reinterpret_cast<void**>(&kern_args));
+  void* kern_args = nullptr;
+  err = hsa_amd_memory_pool_allocate(kernarg_pool, max_kernarg_size, 0, &kern_args);
   if (err != HSA_STATUS_SUCCESS) {
     if (ptr_buffer) hsa_memory_free(ptr_buffer);
     hsa_memory_free(out_buffer);
@@ -219,24 +235,34 @@ bool TrapHandlerTest::RunTrapTest(hsa_agent_t cpuAgent, hsa_agent_t gpuAgent,
     return false;
   }
 
+  // Zero-initialize kernarg buffer
+  memset(kern_args, 0, max_kernarg_size);
+
   // Set kernel arguments based on kernel type
-  // Kernels with single output: trap_abort, trap_debugger, trap_generic,
-  //                             trap_illegal_instruction, trap_aperture_violation, trap_none
-  // Kernels with ptr + output: trap_memory_violation
-  // Kernels with output + divisor: trap_math_exception
   bool is_memory_violation = (strstr(kernel_name, "memory_violation") != nullptr);
   bool is_math_exception = (strstr(kernel_name, "math_exception") != nullptr);
 
   if (is_memory_violation) {
-    kern_args->ptr = pass_null_ptr ? nullptr : ptr_buffer;
-    kern_args->out = out_buffer;
+    // trap_memory_violation(__global int *ptr, __global int *out)
+    // ABI layout: [ptr at offset 0, out at offset 8]
+    void** args = reinterpret_cast<void**>(kern_args);
+    args[0] = pass_null_ptr ? nullptr : ptr_buffer;  // ptr
+    args[1] = out_buffer;                            // out
   } else if (is_math_exception) {
-    kern_args->ptr = out_buffer;
-    kern_args->out = nullptr;
-    kern_args->divisor = divisor_value;
+    // trap_math_exception(__global int *out, int divisor)
+    // ABI layout: [out at offset 0, divisor at offset 8]
+    struct __attribute__((packed)) MathExceptionArgs {
+      void* out;
+      int divisor;
+    };
+    MathExceptionArgs* math_args = reinterpret_cast<MathExceptionArgs*>(kern_args);
+    math_args->out = out_buffer;
+    math_args->divisor = divisor_value;
   } else {
-    kern_args->ptr = out_buffer;
-    kern_args->out = nullptr;
+    // Single pointer kernels: trap_abort, trap_debugger, trap_generic, etc.
+    // ABI layout: [out at offset 0]
+    void** args = reinterpret_cast<void**>(kern_args);
+    args[0] = out_buffer;
   }
 
   // Load kernel
@@ -247,8 +273,8 @@ bool TrapHandlerTest::RunTrapTest(hsa_agent_t cpuAgent, hsa_agent_t gpuAgent,
     if (ptr_buffer) hsa_memory_free(ptr_buffer);
     hsa_memory_free(out_buffer);
     hsa_queue_destroy(queue);
-    std::cout << "SKIPPED (kernel not found: " << kernel_name << ")" << std::endl;
-    return true;  // Not a failure, just skip
+    std::cout << "FAILED (kernel not found: " << kernel_name << ")" << std::endl;
+    return false;  // Kernel loading failure is a test failure
   }
 
   // Create completion signal
@@ -318,14 +344,27 @@ bool TrapHandlerTest::RunTrapTest(hsa_agent_t cpuAgent, hsa_agent_t gpuAgent,
       // Brief sleep to avoid busy-waiting
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+
+    // If trap callback not received, wait briefly for kernel completion to avoid
+    // freeing resources while dispatch may still be in-flight
+    if (!test_data.trap_triggered.load(std::memory_order_acquire)) {
+      hsa_signal_wait_scacquire(signal, HSA_SIGNAL_CONDITION_LT, 1, 500000000ULL /* 500ms */,
+                                HSA_WAIT_STATE_BLOCKED);
+    }
   } else {
     // Wait for normal completion
     completion = hsa_signal_wait_scacquire(signal, HSA_SIGNAL_CONDITION_LT, 1,
                                            kTrapTimeoutMs * 1000000ULL, HSA_WAIT_STATE_BLOCKED);
   }
 
+  // Check for queue ID mismatch (applies to all test types)
+  if (test_data.queue_mismatch.load(std::memory_order_acquire)) {
+    std::cout << "FAILED (queue ID mismatch in callback)" << std::endl;
+    test_passed = false;
+  }
+
   // Verify results
-  if (expected_status != HSA_STATUS_SUCCESS) {
+  if (test_passed && expected_status != HSA_STATUS_SUCCESS) {
     // We expected a trap
     if (!test_data.trap_triggered.load(std::memory_order_acquire)) {
       std::cout << "FAILED (trap not triggered)" << std::endl;
@@ -354,7 +393,7 @@ bool TrapHandlerTest::RunTrapTest(hsa_agent_t cpuAgent, hsa_agent_t gpuAgent,
         std::cout << "PASSED" << std::endl;
       }
     }
-  } else {
+  } else if (test_passed) {
     // We expected normal completion
     if (test_data.trap_triggered.load(std::memory_order_acquire)) {
       std::cout << "FAILED (unexpected trap)" << std::endl;
@@ -367,12 +406,12 @@ bool TrapHandlerTest::RunTrapTest(hsa_agent_t cpuAgent, hsa_agent_t gpuAgent,
     }
   }
 
-  // Cleanup
+  // Cleanup - destroy queue first to ensure no pending work before freeing resources
+  hsa_queue_destroy(queue);
   hsa_signal_destroy(signal);
   hsa_memory_free(kern_args);
   if (ptr_buffer) hsa_memory_free(ptr_buffer);
   hsa_memory_free(out_buffer);
-  hsa_queue_destroy(queue);
 
   return test_passed;
 }
@@ -394,6 +433,7 @@ void TrapHandlerTest::RunTestOnAllGPUs(const char* kernel_name, hsa_status_t exp
   ASSERT_GT(gpus.size(), 0u);
 
   // Run test on each GPU
+  uint32_t tests_failed_before = tests_failed_;
   for (size_t i = 0; i < gpus.size(); ++i) {
     bool passed =
         RunTrapTest(cpus[0], gpus[i], kernel_name, expected_status, pass_null_ptr, divisor_value);
@@ -403,6 +443,10 @@ void TrapHandlerTest::RunTestOnAllGPUs(const char* kernel_name, hsa_status_t exp
       tests_failed_++;
     }
   }
+
+  // Fail the gtest if any GPU failed this test
+  EXPECT_EQ(tests_failed_, tests_failed_before)
+      << "Test " << kernel_name << " failed on one or more GPUs";
 }
 
 void TrapHandlerTest::TestTrapAbort() {

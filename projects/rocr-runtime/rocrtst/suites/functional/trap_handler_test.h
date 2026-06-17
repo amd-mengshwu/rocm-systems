@@ -22,6 +22,7 @@
 struct TrapTestData {
   std::atomic<bool> trap_triggered{false};
   std::atomic<hsa_status_t> received_status{HSA_STATUS_SUCCESS};
+  std::atomic<bool> queue_mismatch{false};
   hsa_queue_t** queue_pointer{nullptr};
 };
 
