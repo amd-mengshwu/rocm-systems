@@ -157,8 +157,10 @@ def verify(
     gpu_agent_alive = True
     if gpu_agent_pid_file is not None:
         pid = _read_pid_file(gpu_agent_pid_file)
+        logger.info("GPU Agent PID file: %s, PID: %s", gpu_agent_pid_file, pid)
         if pid is not None:
             gpu_agent_alive = _process_alive(pid)
+            logger.info("GPU Agent process (PID %s) alive: %s", pid, gpu_agent_alive)
 
     if not gpu_agent_alive:
         gh_warning(
