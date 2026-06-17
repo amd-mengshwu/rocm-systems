@@ -3498,8 +3498,7 @@ generate_output(cleanup_mode _cleanup_mode)
                              rccl_output.get_generator(),
                              memory_allocation_output.get_generator(),
                              rocdecode_output.get_generator(),
-                             rocjpeg_output.get_generator(),
-                             graph_launch_output.get_generator());
+                             rocjpeg_output.get_generator());
     }
 
     if(tool::get_config().rocpd_output && outdata.num_output > 0 &&

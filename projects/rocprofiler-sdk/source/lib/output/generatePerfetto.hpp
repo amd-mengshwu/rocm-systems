@@ -50,7 +50,6 @@ write_perfetto(
     const generator<rocprofiler_buffer_tracing_rccl_api_record_t>&          rccl_api_gen,
     const generator<tool_buffer_tracing_memory_allocation_ext_record_t>&    memory_allocation_gen,
     const generator<rocprofiler_buffer_tracing_rocdecode_api_ext_record_t>& rocdecode_api_gen,
-    const generator<rocprofiler_buffer_tracing_rocjpeg_api_record_t>&       rocjpeg_api_gen,
-    const generator<rocprofiler_buffer_tracing_graph_launch_record_t>&      graph_launch_gen);
+    const generator<rocprofiler_buffer_tracing_rocjpeg_api_record_t>&       rocjpeg_api_gen);
 }  // namespace tool
 }  // namespace rocprofiler

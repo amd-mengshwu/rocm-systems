@@ -552,8 +552,9 @@ WriteInterceptor(const void* packets,
 
             // Always feed GRAPH_LAUNCH summary's kernel_dispatch_count (independent of
             // subscription).
-            if(auto* gls = ::rocprofiler::hip::graph::current_launch_state(); gls != nullptr)
-                ++gls->dispatch_count;
+            if(auto* graph_launch_state = ::rocprofiler::hip::graph::current_launch_state();
+               graph_launch_state != nullptr)
+                ++graph_launch_state->dispatch_count;
 
             _packet_data.callback_record =
                 callback_record_t{sizeof(callback_record_t),
