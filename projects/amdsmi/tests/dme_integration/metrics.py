@@ -158,7 +158,11 @@ def verify(
     if gpu_agent_pid_file is not None:
         pid = _read_pid_file(gpu_agent_pid_file)
         logger.info("GPU Agent PID file: %s, PID: %s", gpu_agent_pid_file, pid)
-        if pid is not None:
+        if pid is None:
+            # PID file missing or invalid → assume GPU Agent crashed
+            logger.info("GPU Agent PID file invalid or missing")
+            gpu_agent_alive = False
+        else:
             gpu_agent_alive = _process_alive(pid)
             logger.info("GPU Agent process (PID %s) alive: %s", pid, gpu_agent_alive)
 
