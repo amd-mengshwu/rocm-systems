@@ -92,6 +92,25 @@ def _tail_file(path: Path, lines: int = 30) -> str:
         return "(log file unavailable)"
 
 
+def _gpu_agent_crashed(log_file: Path) -> bool:
+    """Check if GPU Agent log contains crash indicators."""
+    if not log_file.is_file():
+        return False
+    try:
+        log_content = log_file.read_text(errors="replace")
+        crash_indicators = [
+            "stack smashing detected",
+            "Segmentation fault",
+            "Aborted",
+            "core dumped",
+            "SIGSEGV",
+            "SIGABRT",
+        ]
+        return any(indicator in log_content for indicator in crash_indicators)
+    except OSError:
+        return False
+
+
 def verify(
     *,
     url: str,
@@ -163,8 +182,17 @@ def verify(
             logger.info("GPU Agent PID file invalid or missing")
             gpu_agent_alive = False
         else:
+            # Check both process status AND log file for crash indicators.
+            # GPU Agent may be in zombie state after crash, so os.kill(pid, 0)
+            # succeeds but the process is actually dead.
             gpu_agent_alive = _process_alive(pid)
             logger.info("GPU Agent process (PID %s) alive: %s", pid, gpu_agent_alive)
+
+            # Even if process appears alive, check log for crash indicators
+            if gpu_agent_alive and gpu_agent_log_file is not None:
+                if _gpu_agent_crashed(gpu_agent_log_file):
+                    logger.info("GPU Agent log contains crash indicators (zombie process)")
+                    gpu_agent_alive = False
 
     if not gpu_agent_alive:
         gh_warning(
