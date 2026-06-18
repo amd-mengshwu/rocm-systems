@@ -40,34 +40,22 @@ __all__ = [
     "export_sqlite_query",
     "send_report_email",
     "zip_files",
+    "setup_blob_views",
     "add_args",
     "execute",
     "main",
 ]
 
 
-_PC_BLOB_TYPE_MAP = {
-    "uint8_t": "B",
-    "uint8": "B",
-    "int8_t": "b",
-    "int8": "b",
-    "uint16_t": "H",
-    "uint16": "H",
-    "int16_t": "h",
-    "int16": "h",
-    "uint32_t": "I",
-    "uint32": "I",
-    "int32_t": "i",
-    "int32": "i",
-    "uint64_t": "Q",
-    "uint64": "Q",
-    "int64_t": "q",
-    "int64": "q",
-    "float": "f",
-    "double": "d",
-}
+def _resolve_blob_format(is_integral: bool, is_signed: bool, size: int):
+    """Return a struct format character from (integral, signed, byte-size) attributes."""
+    if not is_integral:
+        return {4: "f", 8: "d"}.get(size)
+    if is_signed:
+        return {1: "b", 2: "h", 4: "i", 8: "q"}.get(size)
+    return {1: "B", 2: "H", 4: "I", 8: "Q"}.get(size)
 
-_PC_SAMPLE_TABLE = "rocpd_gpu_pc_sample"
+_BLOB_DECODED_SUFFIX = "_decoded"
 
 
 def _list_db_schemas(conn) -> List[str]:
@@ -127,18 +115,20 @@ def _get_column_names(conn, table_name: str) -> set:
     return {itr[1] for itr in rows}
 
 
-def _load_pc_blob_schema(
-    conn,
-    schema_table: str,
-    field_table: str,
-    source_table: str = _PC_SAMPLE_TABLE,
-):
-    schema_cols = _get_column_names(conn, schema_table)
+def _load_all_blob_schemas(conn, schema_table: str, field_table: str):
+    """Return a dict mapping source_table -> (schema_map, ordered_field_list).
 
-    if "source_table" in schema_cols:
+    Falls back to loading all schemas without source_table filtering when the
+    column does not exist (older databases).
+    """
+    schema_cols = _get_column_names(conn, schema_table)
+    has_source_table = "source_table" in schema_cols
+
+    if has_source_table:
         rows = conn.execute(
             f"""
             SELECT
+                S.source_table,
                 S.id,
                 COALESCE(S.byte_order, 'little') AS byte_order,
                 F.name,
@@ -148,15 +138,16 @@ def _load_pc_blob_schema(
                 F.is_signed
             FROM {schema_table} S
             INNER JOIN {field_table} F ON F.schema_id = S.id
-            WHERE S.source_table = ?
-            ORDER BY S.id, F.offset
-            """,
-            (source_table,),
+            WHERE S.source_table IS NOT NULL
+            ORDER BY S.source_table, S.id, F.offset
+            """
         ).fetchall()
     else:
-        # Backward compatibility: older DBs may not have source_table.
-        rows = conn.execute(f"""
+        # Backward compatibility: older DBs without source_table column.
+        rows = conn.execute(
+            f"""
             SELECT
+                NULL AS source_table,
                 S.id,
                 COALESCE(S.byte_order, 'little') AS byte_order,
                 F.name,
@@ -167,40 +158,40 @@ def _load_pc_blob_schema(
             FROM {schema_table} S
             INNER JOIN {field_table} F ON F.schema_id = S.id
             ORDER BY S.id, F.offset
-            """).fetchall()
+            """
+        ).fetchall()
 
-    schema_map = {}
-    all_fields = []
-    field_seen = set()
+    by_table = {}
+    for source_table, schema_id, byte_order, name, offset, size, data_type, is_signed in rows:
+        key = source_table or "__unknown__"
+        if key not in by_table:
+            by_table[key] = {"schema_map": {}, "all_fields": [], "field_seen": set()}
 
-    for schema_id, byte_order, name, offset, size, data_type, is_signed in rows:
+        entry = by_table[key]
         schema_id = int(schema_id)
-        if schema_id not in schema_map:
-            schema_map[schema_id] = {}
+        if schema_id not in entry["schema_map"]:
+            entry["schema_map"][schema_id] = {}
 
-        schema_map[schema_id][name] = {
+        norm_type = str(data_type).strip().lower() if data_type is not None else ""
+        entry["schema_map"][schema_id][name] = {
             "byte_order": byte_order,
             "offset": int(offset),
             "size": int(size),
-            "data_type": data_type,
+            "is_integral": norm_type not in ("float", "double", "float32", "float64"),
             "is_signed": int(is_signed),
         }
 
-        if name not in field_seen:
-            field_seen.add(name)
-            all_fields.append(name)
+        if name not in entry["field_seen"]:
+            entry["field_seen"].add(name)
+            entry["all_fields"].append(name)
 
-    return schema_map, all_fields
+    return {k: (v["schema_map"], v["all_fields"]) for k, v in by_table.items()}
 
 
-def _make_pc_blob_field_function(schema_map):
-    def _resolve_format(data_type):
-        if data_type is None:
-            return None
-        norm = str(data_type).strip().lower()
-        return _PC_BLOB_TYPE_MAP.get(norm)
+def _make_blob_field_function(schema_map):
+    """Return a SQLite scalar function rocpd_blob_field(blob, schema_id, field_name)."""
 
-    def _pc_blob_field(blob, schema_id, field_name):
+    def _blob_field(blob, schema_id, field_name):
         if blob is None or schema_id is None or field_name is None:
             return None
 
@@ -213,7 +204,9 @@ def _make_pc_blob_field_function(schema_map):
         if field_info is None:
             return None
 
-        fmt = _resolve_format(field_info["data_type"])
+        fmt = _resolve_blob_format(
+            field_info["is_integral"], bool(field_info["is_signed"]), field_info["size"]
+        )
         if fmt is None:
             return None
 
@@ -235,134 +228,130 @@ def _make_pc_blob_field_function(schema_map):
         except Exception:
             return None
 
-    return _pc_blob_field
+    return _blob_field
 
 
-def _rewrite_pc_sample_table_name(query: str, view_name: str) -> str:
-    return re.sub(rf"(?i)\b{_PC_SAMPLE_TABLE}\b", re.escape(view_name), query)
+def setup_blob_views(conn, query: str = None, profile: bool = False):
+    """Create a TEMP VIEW for every blob schema registered in the database.
 
+    For each source_table recorded in rocpd_info_blob_schema, creates a view
+    named ``{source_table}_decoded`` that exposes all base-table columns plus
+    one extra column per blob field decoded by the registered scalar function
+    ``rocpd_blob_field(blob, schema_id, field_name)``.
 
-def _setup_pc_sampling_view(
-    conn,
-    query: str,
-    view_name: str = "gpu_pc_sample",
-    profile: bool = False,
-):
-    """Create a temporary view that expands arch-specific blob fields as columns.
-
-    When rocpd_info_blob_schema / rocpd_info_blob_field have no rows (the common
-    case for non-blob traces) this function returns the query unchanged.
+    If *query* is supplied, any reference to a registered base-table name is
+    rewritten to its decoded view name and the updated query is returned.
+    When no blob schemas are registered the function is a no-op and returns
+    *query* unchanged.
     """
-    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", view_name):
-        raise ValueError(
-            f"Invalid --pc-sampling-view name '{view_name}'. "
-            "Use letters, digits, and underscores only."
-        )
-
-    sample_table = _resolve_table_name(conn, _PC_SAMPLE_TABLE)
     schema_table = _resolve_table_name(conn, "rocpd_info_blob_schema")
     field_table = _resolve_table_name(conn, "rocpd_info_blob_field")
     blob_event_table = _resolve_table_name(conn, "rocpd_blob_event")
 
-    if not all([sample_table, schema_table, field_table]):
+    if not all([schema_table, field_table]):
         return query
 
     _t0 = time.perf_counter()
 
-    schema_map, all_blob_fields = _load_pc_blob_schema(
-        conn,
-        schema_table,
-        field_table,
-        source_table=_PC_SAMPLE_TABLE,
-    )
-    if not schema_map or not all_blob_fields:
+    all_schemas = _load_all_blob_schemas(conn, schema_table, field_table)
+    if not all_schemas:
         return query
 
-    base_columns = _get_column_names(conn, sample_table)
-    selected_blob_fields = [itr for itr in all_blob_fields if itr not in base_columns]
+    # Build a single merged schema_map so one scalar function covers all tables.
+    merged_schema_map = {}
+    for schema_map, _ in all_schemas.values():
+        merged_schema_map.update(schema_map)
 
-    if not selected_blob_fields:
+    conn.create_function("rocpd_blob_field", 3, _make_blob_field_function(merged_schema_map))
+
+    views_created = []
+    for source_table, (schema_map, all_blob_fields) in all_schemas.items():
+        if source_table == "__unknown__":
+            continue  # skip legacy rows with no source_table
+
+        resolved_table = _resolve_table_name(conn, source_table)
+        if resolved_table is None:
+            continue
+
+        base_columns = _get_column_names(conn, resolved_table)
+        selected_fields = [f for f in all_blob_fields if f not in base_columns]
+        if not selected_fields:
+            continue
+
+        schema_ids = sorted(schema_map.keys())
+        schema_filter = (
+            " AND BE.schema_id IN (" + ", ".join(str(i) for i in schema_ids) + ")"
+            if schema_ids and blob_event_table
+            else ""
+        )
+
+        use_event_id = (
+            blob_event_table is not None
+            and "event_id" in base_columns
+            and "blob_event_id" not in base_columns
+        )
+        use_blob_event_id = blob_event_table is not None and "blob_event_id" in base_columns
+        use_inline = {"extdata_blob", "extdata_schema_id"}.issubset(base_columns)
+
+        computed_columns = ",\n        ".join(
+            f"rocpd_blob_field(BE.blob, BE.schema_id, '{f}') AS \"{f}\""
+            for f in selected_fields
+        )
+
+        view_name = f"{source_table}{_BLOB_DECODED_SUFFIX}"
+
+        if use_event_id:
+            view_body = f"""
+        CREATE TEMP VIEW {view_name} AS
+        SELECT
+            {resolved_table}.*,
+            {computed_columns}
+        FROM {resolved_table}
+        LEFT JOIN {blob_event_table} BE ON BE.event_id = {resolved_table}.event_id{schema_filter}
+        """
+        elif use_blob_event_id:
+            view_body = f"""
+        CREATE TEMP VIEW {view_name} AS
+        SELECT
+            {resolved_table}.*,
+            {computed_columns}
+        FROM {resolved_table}
+        LEFT JOIN {blob_event_table} BE ON BE.id = {resolved_table}.blob_event_id{schema_filter}
+        """
+        elif use_inline:
+            inline_columns = ",\n        ".join(
+                f"rocpd_blob_field(extdata_blob, extdata_schema_id, '{f}') AS \"{f}\""
+                for f in selected_fields
+            )
+            view_body = f"""
+        CREATE TEMP VIEW {view_name} AS
+        SELECT
+            {resolved_table}.*,
+            {inline_columns}
+        FROM {resolved_table}
+        """
+        else:
+            continue
+
+        conn.execute(f"DROP VIEW IF EXISTS {view_name}")
+        conn.execute(view_body)
+        views_created.append((source_table, view_name, len(selected_fields)))
+
+    if not views_created:
         return query
 
-    conn.create_function(
-        "rocpd_pc_blob_field", 3, _make_pc_blob_field_function(schema_map)
-    )
-
-    schema_ids = sorted(schema_map.keys())
-    schema_filter = ""
-    if schema_ids:
-        schema_filter = " AND BE.schema_id IN (" + ", ".join(str(itr) for itr in schema_ids) + ")"
-
-    use_event_id_blob = (
-        blob_event_table is not None
-        and "event_id" in base_columns
-        and "blob_event_id" not in base_columns
-    )
-    use_blob_event_id = blob_event_table is not None and "blob_event_id" in base_columns
-    use_inline_blob = {"extdata_blob", "extdata_schema_id"}.issubset(base_columns)
-
-    if use_event_id_blob:
-        computed_columns = ",\n        ".join(
-            [
-                f"rocpd_pc_blob_field(BE.blob, BE.schema_id, '{itr}') AS \"{itr}\""
-                for itr in selected_blob_fields
-            ]
-        )
-        view_body = f"""
-        CREATE TEMP VIEW {view_name} AS
-        SELECT
-            {sample_table}.*,
-            {computed_columns}
-        FROM {sample_table}
-        LEFT JOIN {blob_event_table} BE ON BE.event_id = {sample_table}.event_id{schema_filter}
-        """
-    elif use_blob_event_id:
-        computed_columns = ",\n        ".join(
-            [
-                f"rocpd_pc_blob_field(BE.blob, BE.schema_id, '{itr}') AS \"{itr}\""
-                for itr in selected_blob_fields
-            ]
-        )
-        view_body = f"""
-        CREATE TEMP VIEW {view_name} AS
-        SELECT
-            {sample_table}.*,
-            {computed_columns}
-        FROM {sample_table}
-        LEFT JOIN {blob_event_table} BE ON BE.id = {sample_table}.blob_event_id{schema_filter}
-        """
-    elif use_inline_blob:
-        computed_columns = ",\n        ".join(
-            [
-                f"rocpd_pc_blob_field(extdata_blob, extdata_schema_id, '{itr}') AS \"{itr}\""
-                for itr in selected_blob_fields
-            ]
-        )
-        view_body = f"""
-        CREATE TEMP VIEW {view_name} AS
-        SELECT
-            {sample_table}.*,
-            {computed_columns}
-        FROM {sample_table}
-        """
-    else:
-        return query
-
-    conn.execute(f"DROP VIEW IF EXISTS {view_name}")
-    # Use execute (not executescript) to avoid implicitly committing any open transaction.
-    conn.execute(view_body)
-
-    if re.search(rf"(?i)\b{_PC_SAMPLE_TABLE}\b", query) and not re.search(
-        rf"(?i)\b{re.escape(view_name)}\b", query
-    ):
-        query = _rewrite_pc_sample_table_name(query, view_name)
+    # Rewrite base-table references in the query to their decoded view names.
+    if query:
+        for source_table, view_name, _ in views_created:
+            if re.search(rf"(?i)\b{re.escape(source_table)}\b", query) and not re.search(
+                rf"(?i)\b{re.escape(view_name)}\b", query
+            ):
+                query = re.sub(rf"(?i)\b{re.escape(source_table)}\b", view_name, query)
 
     if profile:
         elapsed_ms = (time.perf_counter() - _t0) * 1000.0
-        print(
-            f"PC sampling query setup: fields={len(selected_blob_fields)}, "
-            f"view={view_name}, elapsed={elapsed_ms:.2f} ms"
-        )
+        names = [f"{t} -> {v}" for t, v, _ in views_created]
+        print(f"Blob view setup: {names}, elapsed={elapsed_ms:.2f} ms")
 
     return query
 
@@ -726,17 +715,9 @@ def add_args(parser):
     )
 
     query_options.add_argument(
-        "--pc-sampling-view",
-        default="gpu_pc_sample",
-        type=str,
-        help="Temporary view name for expanded PC sampling columns "
-        "(all blob fields are exposed) (default: %(default)s)",
-    )
-
-    query_options.add_argument(
-        "--pc-sampling-profile",
+        "--blob-view-profile",
         action="store_true",
-        help="Print setup timing for PC sampling column exposure",
+        help="Print setup timing for blob decoded-view creation",
     )
 
     email_options = parser.add_argument_group("Query Email Options")
@@ -812,11 +793,10 @@ def execute(input, args, config=None, **kwargs):
     query = args.query
     db = input
 
-    query = _setup_pc_sampling_view(
+    query = setup_blob_views(
         db,
         query=query,
-        view_name=getattr(args, "pc_sampling_view", "gpu_pc_sample"),
-        profile=getattr(args, "pc_sampling_profile", False),
+        profile=getattr(args, "blob_view_profile", False),
     )
 
     export_format = args.format

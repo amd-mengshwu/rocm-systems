@@ -299,18 +299,9 @@ CREATE TABLE IF NOT EXISTS
         "agent_id" INTEGER,
         "event_id" INTEGER NOT NULL,
         "dispatch_id" INTEGER,
-        "stack_id" INTEGER,
-        "parent_stack_id" INTEGER,
         "correlation_id" INTEGER,
-        "sampling_method" INTEGER,
         "exec_mask" BIGINT,
         "inst_index" INTEGER,
-        "code_object_id" INTEGER,
-        "code_object_offset" INTEGER,
-        "wave_in_group" INTEGER,
-        "workgroup_id_x" INTEGER,
-        "workgroup_id_y" INTEGER,
-        "workgroup_id_z" INTEGER,
         "wave_issued" INTEGER,
         "inst_type" INTEGER,
         "stall_reason" INTEGER,
@@ -319,8 +310,7 @@ CREATE TABLE IF NOT EXISTS
         FOREIGN KEY (pid) REFERENCES `rocpd_info_process{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (tid) REFERENCES `rocpd_info_thread{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (agent_id) REFERENCES `rocpd_info_agent{{uuid}}` (id) ON UPDATE CASCADE,
-        FOREIGN KEY (event_id) REFERENCES `rocpd_event{{uuid}}` (id) ON UPDATE CASCADE,
-        FOREIGN KEY (code_object_id) REFERENCES `rocpd_info_code_object{{uuid}}` (id) ON UPDATE CASCADE
+        FOREIGN KEY (event_id) REFERENCES `rocpd_event{{uuid}}` (id) ON UPDATE CASCADE
     );
 
 -- Region with a start/stop on the same thread (CPU)
@@ -455,6 +445,6 @@ CREATE TABLE IF NOT EXISTS
 INSERT INTO
     `rocpd_metadata{{uuid}}` ("tag", "value")
 VALUES
-    ("schema_version", "5"),
+    ("schema_version", "6"),
     ("uuid", "{{uuid}}"),
     ("guid", "{{guid}}");
