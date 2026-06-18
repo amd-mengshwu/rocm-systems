@@ -232,4 +232,9 @@ __device__ void IPCContext::barrier_wg(rocshmem_team_t team) {
   __syncthreads();
 }
 
+__device__ int IPCContext::alltoallmem_wave(rocshmem_team_t team, void* dest, 
+                                  const void* source, int nelems) {
+  return ROCSHMEM_ERROR;
+}
+
 }  // namespace rocshmem
