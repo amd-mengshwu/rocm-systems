@@ -308,7 +308,7 @@ __device__ void ROContext::amo_xor(void *dst, T value, int pe) {
 }
 
 template <typename T>
-__device__ void ROContext::broadcast(rocshmem_team_t team, T *dest,
+__device__ void ROContext::broadcast_wg(rocshmem_team_t team, T *dest,
                                      const T *source, int nelems, int pe_root) {
   if (!is_thread_zero_in_block()) {
     __syncthreads();
