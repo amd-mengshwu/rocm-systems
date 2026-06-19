@@ -163,6 +163,7 @@ declare -A TEST_NUMBERS=(
   ["host_wait_until_all_status"]="146"
   ["host_wait_until_any_status"]="147"
   ["host_wait_until_some_status"]="148"
+  ["broadcast_wave"]="149"
 )
 
 # Detect which runtime to use
@@ -720,6 +721,8 @@ TestColl() {
   ExecTest  "fcollect"         2       1            64        32768
 
   ExecTest  "teamreduction"    2       1            64        32768
+
+  ExecTest  "broadcast_wave"   2       1            64        32768
 }
 
 TestOnStream() {
