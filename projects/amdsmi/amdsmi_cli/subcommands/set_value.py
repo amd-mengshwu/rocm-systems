@@ -1341,7 +1341,7 @@ class SetValueCommands:
                 except amdsmi_exception.AmdSmiLibraryException as e:
                     detected_exception = e
                     msgs.append(
-                        "Failed to get current memory partition for GPU {gpu_id} | {e.get_error_info()}"
+                        f"Failed to get current memory partition for GPU {gpu_id} | {e.get_error_info()}"
                     )
                     logging.debug(msgs[-1])
 

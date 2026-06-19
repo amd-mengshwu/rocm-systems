@@ -49,7 +49,7 @@ except ImportError as e:
         file=sys.stderr,
     )
     print(f"Unhandled import error: {e}. Error code: {error_code}", file=sys.stderr)
-    sys.exit(1)
+    sys.exit(error_code)
 
 # Using basic python logging for user errors and development
 logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.ERROR)  # User level logging

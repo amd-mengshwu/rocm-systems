@@ -72,7 +72,7 @@ except ImportError:
         error_code = 192
         print(f"Unable to import amdsmi_cli files. Check {cli_files_path} if they are present")
         print(f"Unhandled import error: {e}. Error code: {error_code}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(error_code)
 
 
 def _print_error(e, destination):
