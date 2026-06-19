@@ -294,7 +294,13 @@ __device__ void Context::getmem_nbi_wave(void* dest, const void* source,
 }
 
 __device__ int Context::alltoallmem_wave(rocshmem_team_t team, void* dest, const void* source, int nelems){
-  ctxStats.incStat(NUM_ALLTOALL);
+  if (nelems == 0) {
+    return ROCSHMEM_SUCCESS;
+  }
+
+  if (is_thread_zero_in_block()) {
+    ctxStats.incStat(NUM_ALLTOALL);
+  }
 
   DISPATCH_RET(alltoallmem_wave(team, dest, source, nelems));
 }
