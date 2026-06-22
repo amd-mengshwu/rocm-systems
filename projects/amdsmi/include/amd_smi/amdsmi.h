@@ -5685,7 +5685,8 @@ amdsmi_status_t amdsmi_free_fabric_telemetry(amdsmi_processor_handle processor_h
 typedef enum {
   AMDSMI_FABRIC_ACTIVE_ACCELERATORS_BITMAP_SIZE =
       32,  //!< Active accelerators bitmap size (32 x 32-bit words = 1024 bits)
-  AMDSMI_FABRIC_MAX_LOCAL_GPUS = 8  //!< Maximum local GPUs in fabric
+  AMDSMI_FABRIC_MAX_LOCAL_GPUS = 16,  //!< Maximum local GPUs in fabric
+  AMDSMI_FABRIC_MAX_BITMAP_SIZE = 64  //!< Maximum bitmap size (64 bytes = 512 bits)
 } amdsmi_fabric_size_constants_t;
 
 /**
@@ -5770,31 +5771,239 @@ typedef struct {
  *
  *  @platform{gpu_bm_linux} @platform{host}
  *
- *  @details Reads optional UALoE fabric attributes from sysfs (one file per field).
- *  Missing or unreadable files are skipped so the call can return partial data:
- *    - any field that was not updated from sysfs keeps its sentinel value (ie:
+ *  @details Reads optional UALoE fabric attributes
+ *  Missing/unreadable files are skipped so the call can return partial data:
+ *      - any field that was not updated from sysfs keeps its sentinel value (ie:
  *      numeric fields at their maximum representable value, and unknown enumeration
- *      values where documented for ::amdsmi_fabric_info_v1_t).
- *    - The device BDF in @p info is always filled when the call completes successfully
- *      or returns ::AMDSMI_STATUS_NO_DATA.
+ *      values where documented for ::amdsmi_fabric_info_v1_t)
+ *      - The device BDF in @p info is always filled when the call completes
+ *      successfully or returns ::AMDSMI_STATUS_NO_DATA
  *
  *  @param[in] processor_handle - Handle for the target processor
  *
- *  @param[out] info - Pointer to Fabric information structure to be populated.
+ *  @param[out] info - Pointer to Fabric information structure to be populated
  *  Must be allocated by the caller. Written on every return except errors such
- *  as ::AMDSMI_STATUS_INVAL.
+ *  as ::AMDSMI_STATUS_INVAL
  *
  *  @return ::amdsmi_status_t
- *  - ::AMDSMI_STATUS_SUCCESS if at least one sysfs file yielded usable content.
- *  - ::AMDSMI_STATUS_NO_DATA if no sysfs file yielded usable lines (output still
- *    contains BDF and default/sentinel fabric fields).
- *  - Other codes (e.g. invalid processor handle) on failure.
+ *  - ::AMDSMI_STATUS_SUCCESS if at least one attribute yielded usable content
+ *  - ::AMDSMI_STATUS_NO_DATA if no attribute yielded usable data (output still
+ *    contains BDF and default/sentinel fabric fields)
+ *  - Other codes (e.g. invalid processor handle) on failure
  *
- *  @note This path reads sysfs only. It does not require UALoE netlink
- *  (::ualoe_open) to succeed; that handle is still needed for fabric telemetry APIs.
  */
 amdsmi_status_t amdsmi_get_gpu_fabric_info(amdsmi_processor_handle processor_handle,
                                            amdsmi_fabric_info_t* info);
+
+/**
+ * @brief UALink fabric configuration struct versions
+ *
+ * @cond @tag{gpu_bm_linux} @tag{host} @endcond
+ */
+#define AMDSMI_FABRIC_PPOD_CONFIG_V1 1
+#define AMDSMI_FABRIC_VPOD_CONFIG_V1 1
+#define AMDSMI_FABRIC_STATION_CONFIG_V1 1
+
+/**
+ * @brief PPOD config field mask bits (::amdsmi_fabric_ppod_config_t::mask)
+ *
+ * @cond @tag{gpu_bm_linux} @tag{host} @endcond
+ */
+#define AMDSMI_FABRIC_PPOD_FIELD_ACCEL_ID       (1u << 0)
+#define AMDSMI_FABRIC_PPOD_FIELD_PPOD_ID        (1u << 1)
+#define AMDSMI_FABRIC_PPOD_FIELD_PPOD_SIZE      (1u << 2)
+#define AMDSMI_FABRIC_PPOD_FIELD_LOCAL_ACCELS   (1u << 3)
+#define AMDSMI_FABRIC_PPOD_FIELD_BANDWIDTH      (1u << 4)
+#define AMDSMI_FABRIC_PPOD_FIELD_LATENCY        (1u << 5)
+
+/**
+ * @brief VPOD config field mask bits (::amdsmi_fabric_vpod_config_t::mask)
+ *
+ * @cond @tag{gpu_bm_linux} @tag{host} @endcond
+ */
+#define AMDSMI_FABRIC_VPOD_FIELD_VPOD_ID            (1u << 0)
+#define AMDSMI_FABRIC_VPOD_FIELD_VPOD_SIZE          (1u << 1)
+#define AMDSMI_FABRIC_VPOD_FIELD_VPOD_ACTIVE_ACCELS (1u << 2)
+#define AMDSMI_FABRIC_VPOD_FIELD_ADDR_MODE          (1u << 3)
+
+/**
+ * @brief DF/station config field mask bits (::amdsmi_fabric_station_config_t::mask)
+ *
+ * @cond @tag{gpu_bm_linux} @tag{host} @endcond
+ */
+#define AMDSMI_FABRIC_DF_FIELD_STATION_FLAGS    (1u << 0)
+#define AMDSMI_FABRIC_DF_FIELD_LANE_EN_BITMAP   (1u << 1)
+#define AMDSMI_FABRIC_DF_FIELD_NUM_STATIONS     (1u << 2)
+
+/**
+ * @brief PPOD setup request
+ *
+ * @cond @tag{gpu_bm_linux} @tag{host} @endcond
+ */
+typedef struct {
+    uint32_t version;   //!< Must be ::AMDSMI_FABRIC_PPOD_CONFIG_V1
+    uint32_t mask;      //!< ::AMDSMI_FABRIC_PPOD_FIELD_* bits for parameters to write
+    bool commit;        //!< When true, write setup/commit after masked parameters
+    uint32_t accelerator_id;
+    uint8_t ppod_id[AMDSMI_MAX_UUID_ELEMENTS];
+    uint32_t ppod_size;
+    uint32_t local_accelerators[AMDSMI_FABRIC_MAX_LOCAL_GPUS];
+    uint32_t local_accelerator_count;
+    uint32_t bandwidth;
+    uint32_t latency;
+} amdsmi_fabric_ppod_config_t;
+
+/**
+ * @brief VPOD configuration request
+ *
+ * @cond @tag{gpu_bm_linux} @tag{host} @endcond
+ */
+typedef struct {
+    uint32_t version;   //!< Must be ::AMDSMI_FABRIC_VPOD_CONFIG_V1
+    uint32_t mask;
+    bool commit;
+    uint32_t vpod_id;
+    uint32_t vpod_size;
+    uint32_t vpod_active_accelerators[AMDSMI_FABRIC_ACTIVE_ACCELERATORS_BITMAP_SIZE];
+    amdsmi_fabric_npa_address_mode_t addr_mode;
+} amdsmi_fabric_vpod_config_t;
+
+/**
+ * @brief DF reconfiguration request
+ *
+ * @cond @tag{gpu_bm_linux} @tag{host} @endcond
+ */
+typedef struct {
+    uint32_t version;   //!< Must be ::AMDSMI_FABRIC_STATION_CONFIG_V1
+    uint32_t mask;
+    bool commit;
+    uint32_t station_flags;
+    uint8_t num_stations;
+    uint8_t lane_en_bitmap[AMDSMI_FABRIC_MAX_BITMAP_SIZE];
+} amdsmi_fabric_station_config_t;
+
+/**
+ *  @brief Apply PPOD configuration
+ *
+ *  @ingroup tagFabric
+ *
+ *  @platform{gpu_bm_linux} @platform{host}
+ *
+ *  @details Writes setup/accel_id, setup/ppod_id, setup/ppod_size, setup/local_accels,
+ *  setup/bandwidth, and setup/latency for each bit set in @p config->mask (fixed order),
+ *  then setup/commit when @p config->commit is true
+ *
+ *  @param[in] processor_handle Handle for the target GPU
+ *  @param[in] config Non-NULL request; @p config->mask and @p config->commit must not both be false
+ *
+ *  @return ::amdsmi_status_t
+ */
+amdsmi_status_t amdsmi_set_gpu_fabric_ppod_config(amdsmi_processor_handle processor_handle,
+                                                  const amdsmi_fabric_ppod_config_t* config);
+
+/**
+ *  @brief Apply VPOD configuration
+ *
+ *  @ingroup tagFabric
+ *
+ *  @platform{gpu_bm_linux} @platform{host}
+ *
+ *  @details Writes config/vpod_id, config/vpod_size, config/vpod_active_accels, and
+ *  config/addr_mode for each bit set in @p config->mask, then config/commit when
+ *  @p config->commit is true
+ *
+ *  @param[in] processor_handle Handle for the target GPU
+ *  @param[in] config Non-NULL request
+ *
+ *  @return ::amdsmi_status_t
+ */
+amdsmi_status_t amdsmi_set_gpu_fabric_vpod_config(amdsmi_processor_handle processor_handle,
+                                                  const amdsmi_fabric_vpod_config_t* config);
+
+/**
+ *  @brief Apply DF/Station configuration
+ *
+ *  @ingroup tagFabric
+ *
+ *  @platform{gpu_bm_linux} @platform{host}
+ *
+ *  @details Writes df/station_flags and df/lane_en_bitmap for each bit set
+ *  in @p config->mask, then df/commit when @p config->commit is true
+ *
+ *  @param[in] processor_handle Handle for the target GPU
+ *  @param[in] config Non-NULL request
+ *
+ *  @return ::amdsmi_status_t
+ */
+amdsmi_status_t amdsmi_set_gpu_fabric_station_config(amdsmi_processor_handle processor_handle,
+                                                     const amdsmi_fabric_station_config_t* config);
+
+/**
+ *  @brief Read live PPOD configuration
+ *
+ *  @ingroup tagFabric
+ *
+ *  @platform{gpu_bm_linux} @platform{host}
+ *
+ *  @details Reads setup/accel_id, setup/ppod_id, setup/ppod_size, setup/local_accels,
+ *  setup/local_accelerator_count, setup/bandwidth, and setup/latency for each bit set
+ *  in @p config->mask. The subtree reflects active, post-commit fabric state (not the
+ *  staged write buffer).
+ *
+ *  @param[in] processor_handle Handle for the target GPU
+ *  @param[in,out] config Non-NULL. On input, @p config->version and @p config->mask select
+ *  the fields to read. On output, @p config->mask is overwritten with the subset of fields
+ *  actually populated; @p config->commit is ignored
+ *
+ *  @return ::amdsmi_status_t ::AMDSMI_STATUS_SUCCESS if any masked field was read,
+ *  ::AMDSMI_STATUS_NOT_SUPPORTED if none were
+ */
+amdsmi_status_t amdsmi_get_gpu_fabric_ppod_config(amdsmi_processor_handle processor_handle,
+                                                  amdsmi_fabric_ppod_config_t* config);
+
+/**
+ *  @brief Read live VPOD configuration
+ *
+ *  @ingroup tagFabric
+ *
+ *  @platform{gpu_bm_linux} @platform{host}
+ *
+ *  @details Reads config/vpod_id, config/vpod_size, config/vpod_active_accels, and
+ *  config/addr_mode for each bit set in @p config->mask. The subtree reflects active,
+ *  post-commit fabric state
+ *
+ *  @param[in] processor_handle Handle for the target GPU
+ *  @param[in,out] config Non-NULL. On input, @p config->version and @p config->mask select
+ *  the fields to read. On output, @p config->mask is overwritten with the subset of fields
+ *  actually populated; @p config->commit is ignored
+ *
+ *  @return ::amdsmi_status_t ::AMDSMI_STATUS_SUCCESS if any masked field was read,
+ *  ::AMDSMI_STATUS_NOT_SUPPORTED if none were
+ */
+amdsmi_status_t amdsmi_get_gpu_fabric_vpod_config(amdsmi_processor_handle processor_handle,
+                                                  amdsmi_fabric_vpod_config_t* config);
+
+/**
+ *  @brief Read live DF/station configuration
+ *
+ *  @ingroup tagFabric
+ *
+ *  @platform{gpu_bm_linux} @platform{host}
+ *
+ *  @details Reads df/station_flags, df/num_stations, and df/lane_en_bitmap for each bit set
+ *  in @p config->mask. The subtree reflects active, post-commit fabric state
+ *
+ *  @param[in] processor_handle Handle for the target GPU
+ *  @param[in,out] config Non-NULL. On input, @p config->version and @p config->mask select
+ *  the fields to read. On output, @p config->mask is overwritten with the subset of fields
+ *  actually populated; @p config->commit is ignored
+ *
+ *  @return ::amdsmi_status_t ::AMDSMI_STATUS_SUCCESS if any masked field was read,
+ *  ::AMDSMI_STATUS_NOT_SUPPORTED if none were
+ */
+amdsmi_status_t amdsmi_get_gpu_fabric_station_config(amdsmi_processor_handle processor_handle,
+                                                     amdsmi_fabric_station_config_t* config);
+
 
 /** @} End tagFabric */
 

@@ -20,6 +20,7 @@
  * THE SOFTWARE.
  */
 
+#include "amd_smi/impl/amd_smi_common.h"
 #include "amd_smi/impl/amd_smi_gpu_device.h"
 #include "amd_smi/impl/amd_smi_gpu_mutex.h"
 #include "amd_smi/impl/amd_smi_system.h"
@@ -734,4 +735,130 @@ amdsmi_status_t amdsmi_get_gpu_fabric_info(amdsmi_processor_handle processor_han
   status_code = device->get_fabric_info_from_ualoe(*info);
 
   return status_code;
+}
+
+amdsmi_status_t amdsmi_set_gpu_fabric_ppod_config(amdsmi_processor_handle processor_handle,
+                                                  const amdsmi_fabric_ppod_config_t* config)
+{
+  AMDSMI_CHECK_INIT();
+
+  if (!processor_handle || !config) {
+    return AMDSMI_STATUS_INVAL;
+  }
+
+  amd::smi::AMDSmiGPUDevice* device = nullptr;
+  const auto handle_status = get_gpu_device_from_handle(processor_handle, &device);
+  if (handle_status != AMDSMI_STATUS_SUCCESS) {
+    return handle_status;
+  }
+
+  SMIGPUDEVICE_MUTEX(device->get_mutex());
+  return device->apply_fabric_ppod_config(*config);
+}
+
+amdsmi_status_t amdsmi_set_gpu_fabric_vpod_config(amdsmi_processor_handle processor_handle,
+                                                  const amdsmi_fabric_vpod_config_t* config)
+{
+  AMDSMI_CHECK_INIT();
+
+  if (!processor_handle || !config) {
+    return AMDSMI_STATUS_INVAL;
+  }
+
+  amd::smi::AMDSmiGPUDevice* device = nullptr;
+  const auto handle_status = get_gpu_device_from_handle(processor_handle, &device);
+  if (handle_status != AMDSMI_STATUS_SUCCESS) {
+    return handle_status;
+  }
+
+  SMIGPUDEVICE_MUTEX(device->get_mutex());
+  return device->apply_fabric_vpod_config(*config);
+}
+
+amdsmi_status_t amdsmi_set_gpu_fabric_station_config(amdsmi_processor_handle processor_handle,
+                                                     const amdsmi_fabric_station_config_t* config)
+{
+  AMDSMI_CHECK_INIT();
+
+  if (!processor_handle || !config) {
+    return AMDSMI_STATUS_INVAL;
+  }
+
+  amd::smi::AMDSmiGPUDevice* device = nullptr;
+  const auto handle_status = get_gpu_device_from_handle(processor_handle, &device);
+  if (handle_status != AMDSMI_STATUS_SUCCESS) {
+    return handle_status;
+  }
+
+  SMIGPUDEVICE_MUTEX(device->get_mutex());
+  return device->apply_fabric_station_config(*config);
+}
+
+/**
+ *  Note:   This is a "best-effort" read, so if a masked field is absent or empty,
+ *          it is left at a sentinel value and its bit is cleared in the returned mask
+ */
+amdsmi_status_t amdsmi_get_gpu_fabric_ppod_config(amdsmi_processor_handle processor_handle,
+                                                  amdsmi_fabric_ppod_config_t* config)
+{
+  AMDSMI_CHECK_INIT();
+
+  if (!processor_handle || !config) {
+    return AMDSMI_STATUS_INVAL;
+  }
+
+  amd::smi::AMDSmiGPUDevice* device = nullptr;
+  const auto handle_status = get_gpu_device_from_handle(processor_handle, &device);
+  if (handle_status != AMDSMI_STATUS_SUCCESS) {
+    return handle_status;
+  }
+
+  SMIGPUDEVICE_MUTEX(device->get_mutex());
+  return device->query_fabric_ppod_config(*config);
+}
+
+/**
+ *  Note:   This is a "best-effort" read, so if a masked field is absent or empty,
+ *          it is left at a sentinel value and its bit is cleared in the returned mask
+ */
+amdsmi_status_t amdsmi_get_gpu_fabric_vpod_config(amdsmi_processor_handle processor_handle,
+                                                  amdsmi_fabric_vpod_config_t* config)
+{
+  AMDSMI_CHECK_INIT();
+
+  if (!processor_handle || !config) {
+    return AMDSMI_STATUS_INVAL;
+  }
+
+  amd::smi::AMDSmiGPUDevice* device = nullptr;
+  const auto handle_status = get_gpu_device_from_handle(processor_handle, &device);
+  if (handle_status != AMDSMI_STATUS_SUCCESS) {
+    return handle_status;
+  }
+
+  SMIGPUDEVICE_MUTEX(device->get_mutex());
+  return device->query_fabric_vpod_config(*config);
+}
+
+/**
+ *  Note:   This is a "best-effort" read, so if a masked field is absent or empty,
+ *          it is left at a sentinel value and its bit is cleared in the returned mask
+ */
+amdsmi_status_t amdsmi_get_gpu_fabric_station_config(amdsmi_processor_handle processor_handle,
+                                                     amdsmi_fabric_station_config_t* config)
+{
+  AMDSMI_CHECK_INIT();
+
+  if (!processor_handle || !config) {
+    return AMDSMI_STATUS_INVAL;
+  }
+
+  amd::smi::AMDSmiGPUDevice* device = nullptr;
+  const auto handle_status = get_gpu_device_from_handle(processor_handle, &device);
+  if (handle_status != AMDSMI_STATUS_SUCCESS) {
+    return handle_status;
+  }
+
+  SMIGPUDEVICE_MUTEX(device->get_mutex());
+  return device->query_fabric_station_config(*config);
 }

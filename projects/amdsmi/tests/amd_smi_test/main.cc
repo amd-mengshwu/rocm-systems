@@ -31,6 +31,7 @@
 #include "functional/err_cnt_read.h"
 #include "functional/evt_notif_read_write.h"
 #include "functional/fabric_read.h"
+#include "functional/fabric_write.h"
 #include "functional/fan_read.h"
 #include "functional/fan_read_write.h"
 #include "functional/frequencies_read.h"
@@ -360,6 +361,11 @@ TEST(amdsmitstReadWrite, TestMemoryReadWrite) {
 
 TEST(amdsmitstReadOnly, TestFabricRead) {
   TestFabricRead tst;
+  RunGenericTest(&tst);
+}
+
+TEST(amdsmitstReadWrite, TestFabricWrite) {
+  TestFabricWrite tst;
   RunGenericTest(&tst);
 }
 

@@ -72,7 +72,15 @@ constexpr auto kUALOE_VPOD_ACTIVE_ACCELS = std::string_view("vpod_active_accels"
 constexpr auto kUALOE_LOCAL_ACCELS = std::string_view("local_accels");
 constexpr auto kUALOE_ADDR_MODE = std::string_view("addr_mode");
 constexpr auto kUALOE_ACCEL_STATE = std::string_view("accel_state");
+constexpr auto kUALOE_STATION_FLAGS = std::string_view("station_flags");
+constexpr auto kUALOE_NUM_STATIONS = std::string_view("num_stations");
+constexpr auto kUALOE_LANE_EN_BITMAP = std::string_view("lane_en_bitmap");
 constexpr auto kUALOE_BDF_OFFSET = std::uint16_t(0x01);  // TODO: Example offset - TBD
+
+constexpr auto kUALOE_UALINK_SETUP_SUBDIR = std::string_view("setup/");
+constexpr auto kUALOE_UALINK_CONFIG_SUBDIR = std::string_view("config/");
+constexpr auto kUALOE_UALINK_DF_SUBDIR = std::string_view("df/");
+constexpr auto kUALOE_UALINK_COMMIT_FILE = std::string_view("commit");
 
 enum class UALoeLinkInfo_t : std::uint16_t {
   LINK_TYPE = 0,
@@ -159,12 +167,28 @@ class AMDSmiGPUDevice : public AMDSmiProcessor {
   // Get the UALoE handle
   ualoe_handle_t get_ualoe_handle() const { return ualoe_handle_; }
 
-  /** UALoE fabric sysfs:
-   *    - partial reads; see amdsmi_get_gpu_fabric_info() for status info
+  /**
+   *    UALoE fabric sysfs:
+   *        - partial reads (see amdsmi_get_gpu_fabric_info() for status info)
    */
   auto get_fabric_info_from_ualoe(
       amdsmi_fabric_info_t& fabric_info,
       UALoeLinkInfo_t link_info_type = UALoeLinkInfo_t::ALL_LINK_INFO) const -> amdsmi_status_t;
+
+  auto apply_fabric_ppod_config(const amdsmi_fabric_ppod_config_t& config) const -> amdsmi_status_t;
+  auto apply_fabric_vpod_config(const amdsmi_fabric_vpod_config_t& config) const -> amdsmi_status_t;
+  auto apply_fabric_station_config(const amdsmi_fabric_station_config_t& config) const
+      -> amdsmi_status_t;
+
+  /**
+   *    UALoE fabric write-subtree readback (live, post-commit state):
+   *        - config.mask selects fields to read. On return it reports fields actually populated
+   *        - absent/empty masked fields keep a sentinel value and clear their readback bit
+   */
+  auto query_fabric_ppod_config(amdsmi_fabric_ppod_config_t& config) const -> amdsmi_status_t;
+  auto query_fabric_vpod_config(amdsmi_fabric_vpod_config_t& config) const -> amdsmi_status_t;
+  auto query_fabric_station_config(amdsmi_fabric_station_config_t& config) const
+      -> amdsmi_status_t;
 
   auto has_ifoe_related_bdf() const -> bool;
   auto get_ifoe_bdf_string() const -> std::string;
