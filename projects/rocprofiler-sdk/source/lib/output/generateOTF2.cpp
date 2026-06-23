@@ -344,11 +344,10 @@ create_attribute_list()
 {
     auto* _val = OTF2_AttributeList_New();
 
-    const auto* _name = sdk::perfetto_category<Tp>::name;
-    auto        _hash = get_hash_id(_name);
-
-    auto _attr_value      = OTF2_AttributeValue{};
-    _attr_value.stringRef = _hash;
+    const auto* _name       = sdk::perfetto_category<Tp>::name;
+    auto        _hash       = get_hash_id(_name);
+    auto        _attr_value = OTF2_AttributeValue{};
+    _attr_value.stringRef   = _hash;
     OTF2_AttributeList_AddAttribute(_val, 0, OTF2_TYPE_STRING, _attr_value);
 
     return _val;
@@ -370,8 +369,7 @@ write_otf2(const output_config&                                          cfg,
            std::deque<rocprofiler_buffer_tracing_rccl_api_record_t>*       rccl_api_data,
            std::deque<tool_buffer_tracing_memory_allocation_ext_record_t>* memory_allocation_data,
            std::deque<rocprofiler_buffer_tracing_rocdecode_api_ext_record_t>* rocdecode_api_data,
-           std::deque<rocprofiler_buffer_tracing_rocjpeg_api_record_t>*       rocjpeg_api_data,
-           std::deque<rocprofiler_buffer_tracing_graph_launch_record_t>*      graph_launch_data)
+           std::deque<rocprofiler_buffer_tracing_rocjpeg_api_record_t>*       rocjpeg_api_data)
 {
     namespace sdk = ::rocprofiler::sdk;
 
@@ -719,9 +717,6 @@ write_otf2(const output_config&                                          cfg,
                                     itr.end_timestamp,
                                     nullptr});
     }
-
-    // HIP graph launch summary records: consume via rocpd/JSON (not OTF2).
-    (void) graph_launch_data;
 
     std::sort(_data.begin(), _data.end(), [](const evt_data& lhs, const evt_data& rhs) {
         if(lhs.timestamp != rhs.timestamp) return (lhs.timestamp < rhs.timestamp);

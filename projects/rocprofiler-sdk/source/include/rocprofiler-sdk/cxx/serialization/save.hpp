@@ -203,6 +203,13 @@ save(ArchiveT& ar, rocprofiler_graph_exec_id_t data)
 
 template <typename ArchiveT>
 void
+save(ArchiveT& ar, rocprofiler_graph_node_id_t data)
+{
+    ROCP_SDK_SAVE_DATA_FIELD(handle);
+}
+
+template <typename ArchiveT>
+void
 save(ArchiveT& ar, rocprofiler_counter_id_t data)
 {
     ROCP_SDK_SAVE_DATA_FIELD(handle);

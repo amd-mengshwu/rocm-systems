@@ -42,8 +42,8 @@ struct tool_buffer_tracing_kernel_dispatch_ext_record_t
 
     tool_buffer_tracing_kernel_dispatch_ext_record_t(const base_type&              _base,
                                                      const rocprofiler_stream_id_t _stream_id,
-                                                     uint64_t                      _graph_exec_id,
-                                                     uint64_t                      _graph_node_id)
+                                                     rocprofiler_graph_exec_id_t   _graph_exec_id,
+                                                     rocprofiler_graph_node_id_t   _graph_node_id)
     : base_type{_base}
     , stream_id{_stream_id}
     , graph_exec_id{_graph_exec_id}
@@ -61,9 +61,9 @@ struct tool_buffer_tracing_kernel_dispatch_ext_record_t
     tool_buffer_tracing_kernel_dispatch_ext_record_t& operator       =(
         tool_buffer_tracing_kernel_dispatch_ext_record_t&&) noexcept = default;
 
-    rocprofiler_stream_id_t stream_id     = {.handle = 0};
-    uint64_t                graph_exec_id = 0;
-    uint64_t                graph_node_id = 0;
+    rocprofiler_stream_id_t     stream_id     = {.handle = 0};
+    rocprofiler_graph_exec_id_t graph_exec_id = {.handle = 0};
+    rocprofiler_graph_node_id_t graph_node_id = {.handle = 0};
 };
 
 struct tool_buffer_tracing_memory_copy_ext_record_t
@@ -73,8 +73,8 @@ struct tool_buffer_tracing_memory_copy_ext_record_t
 
     tool_buffer_tracing_memory_copy_ext_record_t(const base_type&              _base,
                                                  const rocprofiler_stream_id_t _stream_id,
-                                                 uint64_t                      _graph_exec_id,
-                                                 uint64_t                      _graph_node_id)
+                                                 rocprofiler_graph_exec_id_t   _graph_exec_id,
+                                                 rocprofiler_graph_node_id_t   _graph_node_id)
     : base_type{_base}
     , stream_id{_stream_id}
     , graph_exec_id{_graph_exec_id}
@@ -92,9 +92,9 @@ struct tool_buffer_tracing_memory_copy_ext_record_t
     tool_buffer_tracing_memory_copy_ext_record_t& operator       =(
         tool_buffer_tracing_memory_copy_ext_record_t&&) noexcept = default;
 
-    rocprofiler_stream_id_t stream_id     = {};
-    uint64_t                graph_exec_id = 0;
-    uint64_t                graph_node_id = 0;
+    rocprofiler_stream_id_t     stream_id     = {};
+    rocprofiler_graph_exec_id_t graph_exec_id = {.handle = 0};
+    rocprofiler_graph_node_id_t graph_node_id = {.handle = 0};
 };
 
 struct tool_buffer_tracing_memory_allocation_ext_record_t
@@ -160,8 +160,8 @@ save(ArchiveT&                                                                  
 {
     cereal::save(ar, static_cast<const rocprofiler_buffer_tracing_kernel_dispatch_record_t&>(data));
     SAVE_DATA_FIELD(stream_id);
-    SAVE_DATA_FIELD(graph_exec_id);
-    SAVE_DATA_FIELD(graph_node_id);
+    ar(make_nvp("graph_exec_id", data.graph_exec_id.handle));
+    ar(make_nvp("graph_node_id", data.graph_node_id.handle));
 }
 
 template <typename ArchiveT>
@@ -170,8 +170,8 @@ save(ArchiveT& ar, const ::rocprofiler::tool::tool_buffer_tracing_memory_copy_ex
 {
     cereal::save(ar, static_cast<const rocprofiler_buffer_tracing_memory_copy_record_t&>(data));
     SAVE_DATA_FIELD(stream_id);
-    SAVE_DATA_FIELD(graph_exec_id);
-    SAVE_DATA_FIELD(graph_node_id);
+    ar(make_nvp("graph_exec_id", data.graph_exec_id.handle));
+    ar(make_nvp("graph_node_id", data.graph_node_id.handle));
 }
 
 template <typename ArchiveT>

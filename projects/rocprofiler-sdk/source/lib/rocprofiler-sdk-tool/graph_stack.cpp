@@ -50,9 +50,10 @@ graph_stack_not_null()
 }
 
 void
-push(uint64_t graph_exec_id)
+push(rocprofiler_graph_exec_id_t graph_exec_id)
 {
-    CHECK_NOTNULL(get_graph_stack())->emplace_back(attribution{graph_exec_id, 0});
+    CHECK_NOTNULL(get_graph_stack())
+        ->emplace_back(attribution{graph_exec_id, rocprofiler_graph_node_id_t{.handle = 0}});
 }
 
 void

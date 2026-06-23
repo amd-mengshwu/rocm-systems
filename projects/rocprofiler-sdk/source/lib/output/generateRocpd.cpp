@@ -1593,8 +1593,8 @@ write_rocpd(
                                      itr.end_timestamp,                         // end_timestamp
                                      itr.dispatch_info.grid_size,               // grid
                                      itr.dispatch_info.workgroup_size,          // workgroup
-                                     itr.graph_exec_id,                         // graph_exec_id
-                                     itr.graph_node_id,                         // graph_node_id
+                                     itr.graph_exec_id.handle,                  // graph_exec_id
+                                     itr.graph_node_id.handle,                  // graph_node_id
                                      true  // enable_duplicate_check
                     );
                 }
@@ -1675,8 +1675,8 @@ write_rocpd(
                             insert_value("src_address", itr.src_address.value),
                             insert_value("size", itr.bytes),
                             insert_value("stream_id", get_stream_id(itr.stream_id)),
-                            insert_value("graph_exec_id", itr.graph_exec_id),
-                            insert_value("graph_node_id", itr.graph_node_id),
+                            insert_value("graph_exec_id", itr.graph_exec_id.handle),
+                            insert_value("graph_node_id", itr.graph_node_id.handle),
                             insert_value("event_id", evt_id),
                         });
                 }

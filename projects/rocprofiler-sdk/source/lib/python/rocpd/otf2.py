@@ -150,7 +150,10 @@ def write_otf2(importData, config):
                     )
                     graph_node_attribute = archive.definitions.attribute(
                         name="graph_node_id",
-                        description="0-based HIP graph node ordinal within a launch",
+                        description=(
+                            "Zero-based HIP graph node ordinal within a launch; "
+                            "valid only when graph_exec_id is nonzero"
+                        ),
                     )
                     kernel_dispatch_count_attribute = archive.definitions.attribute(
                         name="kernel_dispatch_count",

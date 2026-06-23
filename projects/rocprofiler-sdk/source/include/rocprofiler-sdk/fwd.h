@@ -655,6 +655,15 @@ typedef struct rocprofiler_graph_exec_id_t
 } rocprofiler_graph_exec_id_t;
 
 /**
+ * @brief Zero-based HIP graph node ordinal within a graph launch. A handle of 0
+ * can be the first node when paired with a nonzero rocprofiler_graph_exec_id_t.
+ */
+typedef struct rocprofiler_graph_node_id_t
+{
+    uint64_t handle;
+} rocprofiler_graph_node_id_t;
+
+/**
  * @brief ROCProfiler Record Correlation ID.
  */
 typedef struct rocprofiler_correlation_id_t

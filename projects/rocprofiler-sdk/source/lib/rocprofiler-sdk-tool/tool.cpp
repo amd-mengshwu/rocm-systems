@@ -295,10 +295,10 @@ auto pause_resume_contexts = context_id_set_t{};
 // kernel-rename, hip-stream-display, and hip-graph-display services.
 struct kernel_rename_and_stream_data
 {
-    uint64_t                region_id     = 0;  // roctx region correlation id
-    rocprofiler_stream_id_t stream_id     = {.handle = 0};
-    uint64_t                graph_exec_id = 0;
-    uint64_t                graph_node_id = 0;
+    uint64_t                    region_id     = 0;  // roctx region correlation id
+    rocprofiler_stream_id_t     stream_id     = {.handle = 0};
+    rocprofiler_graph_exec_id_t graph_exec_id = {.handle = 0};
+    rocprofiler_graph_node_id_t graph_node_id = {.handle = 0};
 };
 
 bool
@@ -508,9 +508,9 @@ record_execution_profile(rocprofiler_thread_id_t                            thr_
 // payload allocated by set_kernel_rename_and_stream_correlation_id().
 struct ext_attribution_t
 {
-    rocprofiler_stream_id_t stream_id     = {.handle = 0};
-    uint64_t                graph_exec_id = 0;
-    uint64_t                graph_node_id = 0;
+    rocprofiler_stream_id_t     stream_id     = {.handle = 0};
+    rocprofiler_graph_exec_id_t graph_exec_id = {.handle = 0};
+    rocprofiler_graph_node_id_t graph_node_id = {.handle = 0};
 };
 
 template <typename Tp>
@@ -576,7 +576,8 @@ set_kernel_rename_and_stream_correlation_id(rocprofiler_thread_id_t  thr_id,
         if(auto* _g = rocprofiler::tool::graph::current(); _g != nullptr)
         {
             _info->graph_exec_id = _g->graph_exec_id;
-            _info->graph_node_id = _g->node_counter++;
+            _info->graph_node_id = _g->node_counter;
+            ++_g->node_counter.handle;
         }
     }
 
@@ -840,7 +841,7 @@ hip_graph_display_callback(rocprofiler_callback_tracing_record_t record,
     if(record.operation == ROCPROFILER_HIP_GRAPH_OPERATION_HIP_GRAPH_LAUNCH)
     {
         if(record.phase == ROCPROFILER_CALLBACK_PHASE_ENTER)
-            rocprofiler::tool::graph::push(payload->graph_exec_id.handle);
+            rocprofiler::tool::graph::push(payload->graph_exec_id);
         else if(record.phase == ROCPROFILER_CALLBACK_PHASE_EXIT)
             rocprofiler::tool::graph::pop();
     }
@@ -3535,8 +3536,6 @@ generate_output(cleanup_mode _cleanup_mode)
         auto memory_allocation_elem_data = memory_allocation_output.load_all();
         auto rocdecode_elem_data         = rocdecode_output.load_all();
         auto rocjpeg_elem_data           = rocjpeg_output.load_all();
-        auto graph_launch_elem_data      = graph_launch_output.load_all();
-
         tool::write_otf2(tool::get_config(),
                          *tool_metadata,
                          getpid(),
@@ -3550,8 +3549,7 @@ generate_output(cleanup_mode _cleanup_mode)
                          &rccl_elem_data,
                          &memory_allocation_elem_data,
                          &rocdecode_elem_data,
-                         &rocjpeg_elem_data,
-                         &graph_launch_elem_data);
+                         &rocjpeg_elem_data);
     }
 
     if(tool::get_config().summary_output && outdata.num_output > 0 &&

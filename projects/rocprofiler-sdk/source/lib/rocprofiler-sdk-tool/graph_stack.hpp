@@ -22,7 +22,7 @@
 
 #pragma once
 
-#include <cstdint>
+#include <rocprofiler-sdk/fwd.h>
 
 namespace rocprofiler
 {
@@ -33,15 +33,15 @@ namespace graph
 /// Per-launch attribution captured on HIP_GRAPH_LAUNCH ENTER.
 struct attribution
 {
-    uint64_t graph_exec_id = 0;
-    uint64_t node_counter  = 0;
+    rocprofiler_graph_exec_id_t graph_exec_id = {.handle = 0};
+    rocprofiler_graph_node_id_t node_counter  = {.handle = 0};
 };
 
 bool
 graph_stack_not_null();
 
 void
-push(uint64_t graph_exec_id);
+push(rocprofiler_graph_exec_id_t graph_exec_id);
 
 void
 pop();
