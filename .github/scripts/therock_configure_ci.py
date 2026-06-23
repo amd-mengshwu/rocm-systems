@@ -146,6 +146,7 @@ SKIPPABLE_PATH_PATTERNS = [
     ".github/label*.yml",
     ".github/workflows/labeler.yml",
     ".github/workflows/amdsmi-manylinux-build.yml",
+    ".github/workflows/rdc-ci.yml",
     ".github/workflows/rocjitsu-corpus-tests.yml",
 ]
 
