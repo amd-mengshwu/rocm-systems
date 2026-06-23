@@ -100,7 +100,8 @@ __hip_cvt_double_to_fp4(const double x, const __hip_fp4_interpretation_t /* fp4_
   u.ui32 = __builtin_amdgcn_cvt_scalef32_pk_fp4_f32(u.ui32, float(x), 0.0f, 1.0f /* scale */, 0);
   return u.fp4[0];
 #elif HIP_ENABLE_GFX1250_OCP_BUILTINS
-  __amd_floatx8_storage_t fp32x8{x, x, x, x, x, x, x, x};
+  __amd_floatx8_storage_t fp32x8{float(x), float(x), float(x), float(x),
+                                 float(x), float(x), float(x), float(x)};
   u.ui32 = __builtin_amdgcn_cvt_scalef32_pk8_fp4_f32(fp32x8, 1.0f);
   return u.fp4[0];
 #else
@@ -121,7 +122,8 @@ __FP4_HOST_DEVICE_STATIC__ __hip_fp4x2_storage_t __hip_cvt_double2_to_fp4x2(
       __builtin_amdgcn_cvt_scalef32_pk_fp4_f32(u.ui32, float(x.x), float(x.y), 1.0f /* scale */, 0);
   return u.fp4x2[0];
 #elif HIP_ENABLE_GFX1250_OCP_BUILTINS
-  __amd_floatx8_storage_t fp32x8{x.x, x.y, x.x, x.y, x.x, x.y, x.x, x.y};
+  __amd_floatx8_storage_t fp32x8{float(x.x), float(x.y), float(x.x), float(x.y),
+                                 float(x.x), float(x.y), float(x.x), float(x.y)};
   u.ui32 = __builtin_amdgcn_cvt_scalef32_pk8_fp4_f32(fp32x8, 1.0f);
   return u.fp4x2[0];
 #else
