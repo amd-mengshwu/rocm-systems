@@ -94,6 +94,35 @@ fn profile_create_list_show_delete() {
         .failure();
 }
 
+/// Regression for the removal of the interactive "wizards": `profile
+/// create` and `session start` must be fully non-interactive. Creating a
+/// profile with only a name (no other flags) must succeed from defaults
+/// without ever prompting, and `session start` without a profile must
+/// fail fast with a clear message rather than waiting on a prompt.
+#[test]
+fn profile_create_defaults_without_prompting() {
+    let env = Env::new();
+    // No flags beyond the name: must not prompt, must use defaults.
+    env.mirage()
+        .args(["profile", "create", "defp"])
+        .assert()
+        .success();
+    env.mirage()
+        .args(["profile", "show", "defp"])
+        .assert()
+        .success()
+        .stdout(str::contains("\"name\": \"defp\""))
+        .stdout(str::contains("\"num_nodes\": 1"))
+        .stdout(str::contains("\"gpus_per_node\": 1"))
+        .stdout(str::contains("MI350X"));
+    // A required value that is missing is an error, not a prompt.
+    env.mirage()
+        .args(["session", "start"])
+        .assert()
+        .failure()
+        .stderr(str::contains("profile is required"));
+}
+
 #[test]
 fn run_command_streams_stdout_stderr_and_exit_code() {
     let env = Env::new();

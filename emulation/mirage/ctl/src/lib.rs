@@ -9,7 +9,6 @@
 //!
 //! All commands are documented in `docs/cli.md`.
 
-use std::io::IsTerminal;
 use std::io::Write;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -246,13 +245,12 @@ pub enum ProfileCmd {
     Show { name: String },
     /// Create a new profile.
     ///
-    /// Any field not given as a flag is prompted for interactively when
-    /// stdin is a terminal; otherwise its default is used. This makes
-    /// `profile create <name>` an interactive UI while `profile create
-    /// <name> --emulator ... --agent ...` stays fully non-interactive
-    /// (e.g. in scripts and tests).
+    /// Every field is taken from its flag; any field left unspecified
+    /// uses a sensible default (only the profile name is required).
+    /// `profile create` never prompts, so it behaves identically on a
+    /// terminal, in a script or a pipe.
     Create {
-        /// Profile name. Prompted for when omitted on a terminal.
+        /// Profile name (required).
         name: Option<String>,
         /// Emulator name (e.g. `rocjitsu`, `noop`). Defaults to the
         /// first installed emulator (rocjitsu if present, otherwise
@@ -705,7 +703,9 @@ fn profile_cmd(ctl: &dyn MirageCtl, cmd: ProfileCmd, json: bool) -> anyhow::Resu
             provider,
             no_input,
         } => {
-            let interactive = !no_input && std::io::stdin().is_terminal();
+            // `profile create` is fully non-interactive; `--no-input` is
+            // accepted for backward compatibility but is now a no-op.
+            let _ = no_input;
             let p = build_profile_create(
                 name,
                 emulator,
@@ -717,7 +717,6 @@ fn profile_cmd(ctl: &dyn MirageCtl, cmd: ProfileCmd, json: bool) -> anyhow::Resu
                 mounts,
                 ports,
                 provider,
-                interactive,
             )?;
             if let Err(e) = validate_profile(&p) {
                 anyhow::bail!("cannot create profile {}: {e}", p.name);
@@ -968,11 +967,11 @@ fn build_containerize(
 
 /// Build a [`ProfileDef`] for `profile create`.
 ///
-/// Every field passed as a flag is used verbatim. When `interactive`
-/// is set, any field left unspecified is prompted for; otherwise the
-/// field's default is used. This keeps `profile create <name>` a
-/// friendly interactive UI on a terminal while remaining fully
-/// non-interactive (defaults) in scripts, pipes and tests.
+/// Every field is taken verbatim from its flag; any field left
+/// unspecified falls back to a sensible default (a profile name is the
+/// one required field). `profile create` is fully non-interactive: it
+/// never prompts, so it behaves identically on a terminal, in a script
+/// or a pipe.
 #[allow(clippy::too_many_arguments)]
 fn build_profile_create(
     name: Option<String>,
@@ -985,28 +984,14 @@ fn build_profile_create(
     mounts: Vec<String>,
     ports: Vec<String>,
     provider: Option<String>,
-    interactive: bool,
 ) -> anyhow::Result<ProfileDef> {
-    use dialoguer::{Confirm, Input, Select};
-    let theme = dialoguer::theme::ColorfulTheme::default();
-
-    // ----- name -----
+    // ----- name (the one required field) -----
     let name = match name {
         Some(n) => n,
-        None if interactive => Input::with_theme(&theme)
-            .with_prompt("Profile name")
-            .validate_with(|s: &String| -> Result<(), &str> {
-                if s.trim().is_empty() {
-                    Err("name required")
-                } else {
-                    Ok(())
-                }
-            })
-            .interact_text()?,
         None => anyhow::bail!("a profile name is required"),
     };
 
-    // ----- emulator -----
+    // ----- emulator (defaults to the registry default) -----
     let spec = match emulator.as_deref() {
         Some(n) => match find_emulator(n) {
             Some(s) => s,
@@ -1019,127 +1004,21 @@ fn build_profile_create(
                     .join(", ")
             ),
         },
-        None if interactive => {
-            let specs = registry();
-            let default_name = default_emulator().name;
-            let default_idx = specs
-                .iter()
-                .position(|s| s.name == default_name)
-                .unwrap_or(0);
-            let labels: Vec<String> = specs
-                .iter()
-                .map(|s| {
-                    let installed = if s.installed {
-                        "[installed]"
-                    } else {
-                        "[not installed]"
-                    };
-                    let supported = if s.support.supported {
-                        ""
-                    } else {
-                        " [unsupported hardware]"
-                    };
-                    format!("{:<10} {installed}{supported}  {}", s.name, s.description)
-                })
-                .collect();
-            let pick = Select::with_theme(&theme)
-                .with_prompt("Emulator")
-                .items(&labels)
-                .default(default_idx)
-                .interact()?;
-            specs[pick].clone()
-        }
         None => default_emulator(),
     };
 
-    // ----- topology -----
-    let num_nodes = resolve_count(num_nodes, "Nodes per rack", interactive, &theme)?;
-    let gpus_per_node = resolve_count(gpus_per_node, "GPUs per node", interactive, &theme)?;
+    // ----- topology (defaults to a single GPU on a single node) -----
+    let num_nodes = num_nodes.unwrap_or(1);
+    let gpus_per_node = gpus_per_node.unwrap_or(1);
 
-    // ----- agent -----
-    let agent = match agent {
-        Some(a) => a,
-        None if interactive => {
-            let known = mirage_core::agent::store::list().unwrap_or_default();
-            if known.is_empty() {
-                "MI350X".to_string()
-            } else {
-                let default_idx = known
-                    .iter()
-                    .position(|n| n.eq_ignore_ascii_case("MI350X"))
-                    .unwrap_or(0);
-                let pick = Select::with_theme(&theme)
-                    .with_prompt("Agent")
-                    .items(&known)
-                    .default(default_idx)
-                    .interact()?;
-                known[pick].clone()
-            }
-        }
-        None => "MI350X".to_string(),
-    };
+    // ----- agent (defaults to MI350X) -----
+    let agent = agent.unwrap_or_else(|| "MI350X".to_string());
 
-    // ----- description -----
-    let description = match description {
-        Some(d) => Some(d),
-        None if interactive => {
-            let d: String = Input::with_theme(&theme)
-                .with_prompt("Description (optional)")
-                .allow_empty(true)
-                .interact_text()?;
-            if d.is_empty() { None } else { Some(d) }
-        }
-        None => None,
-    };
-
-    // ----- containerisation -----
-    let containerize =
-        if image.is_some() || !mounts.is_empty() || !ports.is_empty() || provider.is_some() {
-            // Any explicit container flag: build directly (errors if mounts
-            // or provider were given without an image).
-            build_containerize(image, &mounts, &ports, provider)?
-        } else if interactive
-            && Confirm::with_theme(&theme)
-                .with_prompt("Run each node inside a container?")
-                .default(false)
-                .interact()?
-        {
-            let img: String = Input::with_theme(&theme)
-                .with_prompt("Image")
-                .validate_with(|s: &String| -> Result<(), &str> {
-                    if s.trim().is_empty() {
-                        Err("image required")
-                    } else {
-                        Ok(())
-                    }
-                })
-                .interact_text()?;
-            let prov: String = Input::with_theme(&theme)
-                .with_prompt("Provider (blank to auto-detect)")
-                .allow_empty(true)
-                .interact_text()?;
-            let mut specs: Vec<String> = Vec::new();
-            while Confirm::with_theme(&theme)
-                .with_prompt("Add a bind mount?")
-                .default(false)
-                .interact()?
-            {
-                let m: String = Input::with_theme(&theme)
-                    .with_prompt("Mount (HOST[:CONTAINER[:ro|rw]])")
-                    .interact_text()?;
-                if !m.trim().is_empty() {
-                    specs.push(m);
-                }
-            }
-            build_containerize(
-                Some(img),
-                &specs,
-                &ports,
-                if prov.is_empty() { None } else { Some(prov) },
-            )?
-        } else {
-            None
-        };
+    // ----- containerisation (only when container flags were given) -----
+    // `build_containerize` returns `None` when no `--image` was passed
+    // and errors if `--mount`/`--port`/`--container-provider` were given
+    // without one.
+    let containerize = build_containerize(image, &mounts, &ports, provider)?;
 
     let topo = mirage_core::topology::TopologyDef {
         num_nodes,
@@ -1152,23 +1031,6 @@ fn build_profile_create(
         emulator: mirage_core::registry::make_def(&spec, topo),
         containerize,
     })
-}
-
-/// Resolve a topology count: explicit value, interactive prompt, or 1.
-fn resolve_count(
-    value: Option<u32>,
-    prompt: &str,
-    interactive: bool,
-    theme: &dialoguer::theme::ColorfulTheme,
-) -> anyhow::Result<u32> {
-    match value {
-        Some(v) => Ok(v),
-        None if interactive => Ok(dialoguer::Input::with_theme(theme)
-            .with_prompt(prompt)
-            .default(1)
-            .interact_text()?),
-        None => Ok(1),
-    }
 }
 
 /// Parse CLI `--mount` specs into [`FileMount`]s.
@@ -1420,16 +1282,16 @@ async fn session_start<C: MirageCtl>(
     args: StartArgs,
     json: bool,
 ) -> anyhow::Result<ExitCode> {
-    // Any field left off the command line is prompted for when stdin is
-    // a terminal (and `--no-input` wasn't given); otherwise its default
-    // is used. This makes `session start` an interactive UI while
-    // staying fully non-interactive in scripts, pipes and tests.
-    let interactive = !args.no_input && std::io::stdin().is_terminal();
+    // `session start` is fully non-interactive: every field is taken
+    // from its flag or a default, and a missing required field is a
+    // hard error rather than a prompt. `--no-input` is accepted for
+    // backward compatibility but is now a no-op.
+    let _ = args.no_input;
 
-    let profile_name = resolve_start_profile(ctl, args.profile, interactive)?;
-    let id = resolve_start_id(args.id, interactive)?;
-    let workdir = resolve_start_workdir(args.workdir, interactive)?;
-    let ready_timeout = resolve_start_ready_timeout(args.ready_timeout, interactive)?;
+    let profile_name = resolve_start_profile(args.profile)?;
+    let id = args.id;
+    let workdir = resolve_start_workdir(args.workdir);
+    let ready_timeout = args.ready_timeout;
 
     // Validate profile exists and resolve it so container overrides can
     // be applied.
@@ -1468,81 +1330,23 @@ async fn session_start<C: MirageCtl>(
     Ok(ExitCode::from(0))
 }
 
-/// Resolve the profile name for `session start`: the `--profile` flag, an
-/// interactive picker over the known profiles, or a hard error when no
-/// profile was given and we can't prompt.
-fn resolve_start_profile<C: MirageCtl>(
-    ctl: &C,
-    profile: Option<String>,
-    interactive: bool,
-) -> anyhow::Result<String> {
-    if let Some(p) = profile {
-        return Ok(p);
-    }
-    if !interactive {
-        anyhow::bail!("a profile is required (pass --profile NAME)");
-    }
-    let profiles = ctl.profile_list()?;
-    if profiles.is_empty() {
-        anyhow::bail!("no profiles found; run `mirage profile create` first");
-    }
-    let pick = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-        .with_prompt("Profile")
-        .items(&profiles)
-        .default(0)
-        .interact()?;
-    Ok(profiles[pick].clone())
-}
-
-/// Resolve the session id: the `--id` flag, an interactive prompt (blank
-/// for auto), or `None` (auto-generated).
-fn resolve_start_id(id: Option<SessionId>, interactive: bool) -> anyhow::Result<Option<SessionId>> {
-    if id.is_some() || !interactive {
-        return Ok(id);
-    }
-    let id_raw: String = dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
-        .with_prompt("Session id (blank for auto)")
-        .allow_empty(true)
-        .interact_text()?;
-    if id_raw.trim().is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(SessionId::new(id_raw)?))
+/// Resolve the profile name for `session start`: the `--profile` flag,
+/// or a hard error when no profile was given.
+fn resolve_start_profile(profile: Option<String>) -> anyhow::Result<String> {
+    match profile {
+        Some(p) => Ok(p),
+        None => anyhow::bail!("a profile is required (pass --profile NAME)"),
     }
 }
 
-/// Resolve the working directory: the `--workdir` flag, an interactive
-/// prompt defaulting to the current directory, or the current directory.
-fn resolve_start_workdir(workdir: Option<String>, interactive: bool) -> anyhow::Result<String> {
-    let cwd = || {
+/// Resolve the working directory: the `--workdir` flag, or the current
+/// directory.
+fn resolve_start_workdir(workdir: Option<String>) -> String {
+    workdir.unwrap_or_else(|| {
         std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "/".to_string())
-    };
-    match workdir {
-        Some(w) => Ok(w),
-        None if interactive => Ok(dialoguer::Input::with_theme(
-            &dialoguer::theme::ColorfulTheme::default(),
-        )
-        .with_prompt("Working directory")
-        .with_initial_text(cwd())
-        .interact_text()?),
-        None => Ok(cwd()),
-    }
-}
-
-/// Resolve the host ready timeout: prompts (defaulting to the current
-/// value) when interactive, otherwise uses the value as-is.
-fn resolve_start_ready_timeout(ready_timeout: u64, interactive: bool) -> anyhow::Result<u64> {
-    if !interactive {
-        return Ok(ready_timeout);
-    }
-    Ok(
-        dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
-            .with_prompt("Host ready timeout (seconds)")
-            .default(ready_timeout)
-            .interact_text()?,
-    )
+    })
 }
 
 /// Look up an executable named `name` on `PATH`, returning the first hit.
@@ -2287,5 +2091,42 @@ mod tests {
             },
             MaybeRef::Ref(_) => panic!("expected an inlined (owned) profile"),
         }
+    }
+
+    // ----- regression: the interactive "wizards" were removed -----
+    //
+    // `profile create` and `session start` must be fully flag-driven and
+    // never prompt. These tests pin the non-interactive contract: a
+    // missing name/profile is a hard error (not a prompt), and the
+    // working directory falls back to a default rather than asking for
+    // one. (The "build from defaults" path needs the backend registry,
+    // which is only linked into the full binary, so it is covered by the
+    // `profile_create_defaults_without_prompting` end-to-end test.)
+
+    #[test]
+    fn profile_create_requires_a_name_instead_of_prompting() {
+        let err = build_profile_create(
+            None, None, None, None, None, None, None, vec![], vec![], None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("name is required"), "{err}");
+    }
+
+    #[test]
+    fn session_start_requires_a_profile_instead_of_prompting() {
+        let err = resolve_start_profile(None).unwrap_err();
+        assert!(err.to_string().contains("profile is required"), "{err}");
+        assert_eq!(resolve_start_profile(Some("p".to_string())).unwrap(), "p");
+    }
+
+    #[test]
+    fn session_start_workdir_defaults_without_prompting() {
+        assert_eq!(
+            resolve_start_workdir(Some("/tmp/x".to_string())),
+            "/tmp/x"
+        );
+        // No explicit workdir resolves to a concrete path (cwd or "/"),
+        // never an interactive prompt.
+        assert!(!resolve_start_workdir(None).is_empty());
     }
 }
