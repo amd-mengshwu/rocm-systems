@@ -245,6 +245,7 @@ impl Engine {
         image: &str,
         network: Option<&str>,
         host_gpus: bool,
+        user: Option<&str>,
         mounts: &[FileMount],
         ports: &[PortMapping],
         devices: &[String],
@@ -260,6 +261,22 @@ impl Engine {
             "--hostname".to_string(),
             name.to_string(),
         ];
+        // Run the container's processes as a specific host uid:gid so any
+        // files they create in the bind-mounted, read-write session
+        // directory are owned by that user and can be cleaned up later.
+        //
+        // Only applied to docker: docker's daemon runs as root, so an
+        // un-`--user`ed container writes root-owned files the
+        // unprivileged orchestrator then cannot remove. Rootless podman
+        // already maps the container's root to the launching user, so
+        // forcing `--user` there would instead break that mapping; podman
+        // callers pass `None`.
+        if let Some(u) = user
+            && !provider_is_podman(provider)
+        {
+            argv.push("--user".to_string());
+            argv.push(u.to_string());
+        }
         if host_gpus {
             // Run the GPU device nodes unconfined and grant the container
             // the supplementary groups that own `/dev/kfd` and
@@ -515,7 +532,9 @@ impl Engine {
     ///
     /// `host_gpus` requests host GPU access for the container; the
     /// group passthrough it implies is provider-specific (see
-    /// [`Self::run_argv`]).
+    /// [`Self::run_argv`]). `user` (a `uid:gid`) runs the container's
+    /// processes as that host user so bind-mounted writes are cleanable;
+    /// it is honoured only for docker (see [`Self::run_argv`]).
     #[allow(clippy::too_many_arguments)]
     pub fn launch_node(
         &self,
@@ -523,6 +542,7 @@ impl Engine {
         image: &str,
         network: Option<&str>,
         host_gpus: bool,
+        user: Option<&str>,
         mounts: &[FileMount],
         ports: &[PortMapping],
         devices: &[String],
@@ -536,6 +556,7 @@ impl Engine {
             image,
             network,
             host_gpus,
+            user,
             mounts,
             ports,
             devices,
@@ -579,6 +600,11 @@ impl Engine {
     /// [`Self::run_argv`]); the emulator decides whether its workload
     /// needs it.
     ///
+    /// `user` (a `uid:gid`) runs every node container's processes as that
+    /// host user so the files they write into the bind-mounted session
+    /// directory stay host-owned and cleanable; it is honoured only for
+    /// docker (see [`Self::run_argv`]).
+    ///
     /// `node_env(rank)` yields the environment for the node of that rank
     /// (mirage injects `MIRAGE_RANK`/`MIRAGE_HEAD_ADDR`/`MIRAGE_HEAD_PORT`
     /// there). `node_command(rank)` yields the container's foreground
@@ -594,6 +620,7 @@ impl Engine {
         session: &mirage_core::session::SessionId,
         def: &ContainerizedDef,
         host_gpus: bool,
+        user: Option<&str>,
         node_count: u32,
         head_port: u16,
         mut node_env: F,
@@ -680,6 +707,7 @@ impl Engine {
                 &def.image,
                 Some(&network),
                 host_gpus,
+                user,
                 &def.mounts,
                 &def.ports,
                 &devices,
@@ -888,6 +916,9 @@ mod tests {
             "img:latest",
             Some("mirage-s"),
             true,
+            // podman ignores `user` (it maps container root to the host
+            // user already), so passing one must not add `--user`.
+            Some("1000:1000"),
             &mounts,
             &ports,
             &devices,
@@ -898,6 +929,8 @@ mod tests {
 
         let joined = argv.join(" ");
         assert!(joined.starts_with("run -d --name mirage-s-node-0 --hostname mirage-s-node-0"));
+        // podman: the requested user is not applied.
+        assert!(!joined.contains("--user"), "{joined}");
         assert!(joined.contains("--security-opt seccomp=unconfined"));
         assert!(joined.contains("--group-add keep-groups"));
         assert!(joined.contains("--network mirage-s"));
@@ -931,6 +964,7 @@ mod tests {
             "img",
             None,
             true,
+            None,
             &[],
             &[],
             &[],
@@ -956,6 +990,7 @@ mod tests {
             "img",
             None,
             false,
+            None,
             &[],
             &[],
             &[],
@@ -978,6 +1013,7 @@ mod tests {
             "img",
             None,
             false,
+            None,
             &[],
             &[],
             &[],
@@ -991,6 +1027,50 @@ mod tests {
         assert!(argv.iter().any(|a| a == "--entrypoint"));
         let ep = argv.iter().position(|a| a == "--entrypoint").unwrap();
         assert_eq!(argv[ep + 1], "sleep");
+    }
+
+    #[test]
+    fn run_argv_applies_user_for_docker_only() {
+        // docker's daemon is root, so a container with no `--user` writes
+        // root-owned files into the bind-mounted session dir that the
+        // unprivileged orchestrator then cannot remove. Forcing the host
+        // uid:gid keeps that state cleanable.
+        let docker = Engine::run_argv(
+            "docker",
+            "n",
+            "img",
+            None,
+            false,
+            Some("1000:1000"),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        let docker = docker.join(" ");
+        assert!(docker.contains("--user 1000:1000"), "{docker}");
+
+        // Rootless podman already maps the container's root to the
+        // launching user, so it must NOT be given `--user` (that would
+        // remap into the user namespace and break file ownership).
+        let podman = Engine::run_argv(
+            "podman",
+            "n",
+            "img",
+            None,
+            false,
+            Some("1000:1000"),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        let podman = podman.join(" ");
+        assert!(!podman.contains("--user"), "{podman}");
     }
 
     #[test]
@@ -1092,6 +1172,7 @@ mod tests {
                 "img",
                 Some("mirage-s"),
                 false,
+                None,
                 &[],
                 &[],
                 &[],
@@ -1233,6 +1314,7 @@ mod tests {
                 &session,
                 &def,
                 false,
+                None,
                 2,
                 6000,
                 |rank| vec![("MIRAGE_RANK".to_string(), rank.to_string())],

@@ -627,6 +627,17 @@ fn maybe_bring_up_containers(session: &SessionId, layout: &SessionLayout) -> Res
     let head_addr = container_name(session, 0);
     let session_str = session.to_string();
 
+    // Run each node container's processes as this (the orchestrator's)
+    // host user so files they write into the bind-mounted, read-write
+    // session directory stay owned by us and can be torn down on
+    // `session destroy`. The engine applies this only to docker, whose
+    // root daemon would otherwise leave root-owned, unremovable state;
+    // rootless podman already maps container root to this user.
+    //
+    // SAFETY: `getuid`/`getgid` are always-successful syscalls with no
+    // preconditions.
+    let run_as_user = unsafe { format!("{}:{}", libc::getuid(), libc::getgid()) };
+
     // Track the most recent bring-up phase so that, if a step fails, the
     // error we surface names exactly what mirage was doing (e.g. "while
     // pulling image …") rather than a bare provider error.
@@ -638,6 +649,7 @@ fn maybe_bring_up_containers(session: &SessionId, layout: &SessionLayout) -> Res
             session,
             &def,
             host_gpus,
+            Some(&run_as_user),
             node_count,
             head_port,
             |rank| {
