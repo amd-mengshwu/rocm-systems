@@ -1285,11 +1285,12 @@ rocprofiler_set_api_table(const char* name,
                 [](const rocprofiler::context::context* ctx) {
                     return (ctx->dispatch_counter_collection != nullptr ||
                             ctx->dispatch_thread_trace != nullptr || ctx->pc_sampler != nullptr ||
-                            ctx->dispatch_spm != nullptr);
+                            ctx->dispatch_spm != nullptr ||
+                            ctx->is_tracing(ROCPROFILER_BUFFER_TRACING_GRAPH_LAUNCH));
                 });
 
             ROCP_INFO << fmt::format(
-                "[queue-interposition] counter/ATT/PC-sampling contexts found: {}. The presence of "
+                "[queue-interposition] non-inline contexts found: {}. The presence of "
                 "any of these contexts will prevent inline intercept (for the time being).",
                 non_queue_interposition_contexts.size());
 

@@ -1985,7 +1985,7 @@ spm_data_callback(const rocprofiler_spm_dispatch_counting_service_data_t* dispat
     if((flags & ROCPROFILER_SPM_RECORD_FLAG_DISPATCH_END) != 0)
     {
         auto dispatch_data_copy = *dispatch_data;
-        get_stream_id(&dispatch_data_copy);
+        common::consume_args(get_ext_attribution(&dispatch_data_copy));
         return;
     }
 
