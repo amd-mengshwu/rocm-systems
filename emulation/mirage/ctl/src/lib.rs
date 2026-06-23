@@ -1584,6 +1584,102 @@ async fn attach_cmd<C: MirageCtl + 'static>(
     follow_attach(ctl, &r).await
 }
 
+/// Switch the terminal `fd` into raw mode, returning its previous
+/// `termios` so the caller can restore it later. Returns `None` (a
+/// no-op) when `fd` is not a TTY (e.g. stdin is piped or redirected) or
+/// the termios calls fail.
+///
+/// Split out from [`RawModeGuard`] so the raw/restore round-trip can be
+/// exercised against an arbitrary fd (a PTY) in tests without touching
+/// the process's real terminal.
+fn enable_raw_mode(fd: i32) -> Option<libc::termios> {
+    // SAFETY: the termios calls only read and write a stack-allocated
+    // `termios` we own; `fd` is validated as a TTY first.
+    unsafe {
+        if libc::isatty(fd) != 1 {
+            return None;
+        }
+        let mut original: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(fd, &mut original) != 0 {
+            return None;
+        }
+        let mut raw = original;
+        libc::cfmakeraw(&mut raw);
+        if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
+            return None;
+        }
+        Some(original)
+    }
+}
+
+/// Restore `fd`'s terminal settings to `original` (the value returned by
+/// [`enable_raw_mode`]).
+fn restore_termios(fd: i32, original: &libc::termios) {
+    // SAFETY: restoring a previously captured termios on the same fd.
+    unsafe {
+        libc::tcsetattr(fd, libc::TCSANOW, original);
+    }
+}
+
+// The terminal state to restore if mirage is killed by a fatal signal
+// while in raw mode. `Drop` handles the normal path, but a signal
+// (SIGTERM/SIGHUP) bypasses destructors, which would otherwise leave the
+// user's shell with echo and line-editing disabled ("corrupted"). The
+// fatal-signal handler reads these to put the terminal back first.
+//
+// Only ever written before `RAW_READY`/`RAW_FD` are published and read
+// only while they say it is valid, so the signal handler — which may run
+// at any time — sees a fully initialised value via acquire/release
+// ordering. `tcsetattr`, `_exit`, and atomic loads are all
+// async-signal-safe.
+static RAW_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+static RAW_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static mut RAW_TERMIOS: std::mem::MaybeUninit<libc::termios> = std::mem::MaybeUninit::uninit();
+
+/// Fatal-signal handler: restore the terminal (if a raw attach is
+/// active) and terminate with the conventional `128 + signal` status.
+extern "C" fn restore_terminal_on_fatal_signal(sig: i32) {
+    if RAW_READY.load(std::sync::atomic::Ordering::Acquire) {
+        let fd = RAW_FD.load(std::sync::atomic::Ordering::Acquire);
+        if fd >= 0 {
+            // SAFETY: `RAW_TERMIOS` was fully written before `RAW_READY`
+            // was set, and `tcsetattr` is async-signal-safe. Use a raw
+            // pointer to avoid forming a reference to the `static mut`.
+            unsafe {
+                libc::tcsetattr(
+                    fd,
+                    libc::TCSANOW,
+                    std::ptr::addr_of!(RAW_TERMIOS).cast::<libc::termios>(),
+                );
+            }
+        }
+    }
+    // SAFETY: `_exit` is async-signal-safe and ends the process with the
+    // status a default-handled fatal signal would have produced.
+    unsafe { libc::_exit(128 + sig) }
+}
+
+/// Install the fatal-signal handler once for the process. SIGINT is
+/// deliberately excluded: during an attach it is forwarded to the
+/// workload (see [`follow_attach`]), and in raw mode it is delivered to
+/// the workload as a byte rather than raising a signal here.
+fn install_terminal_restore_handlers() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: installs a handler that only calls async-signal-safe
+        // functions; `sa` is a stack value we fully initialise.
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = restore_terminal_on_fatal_signal as *const () as usize;
+            libc::sigemptyset(&mut sa.sa_mask);
+            sa.sa_flags = 0;
+            for sig in [libc::SIGTERM, libc::SIGHUP] {
+                libc::sigaction(sig, &sa, std::ptr::null_mut());
+            }
+        }
+    });
+}
+
 /// Put the controlling terminal into raw mode for the duration of an
 /// interactive attach, restoring the original settings on drop.
 ///
@@ -1591,6 +1687,10 @@ async fn attach_cmd<C: MirageCtl + 'static>(
 /// PTY owns echo and line editing, so the local terminal must forward
 /// every keystroke verbatim instead of cooking/echoing it. Returns
 /// `None` (a no-op) when stdin isn't a TTY, e.g. piped or redirected.
+///
+/// In addition to restoring on drop, it records the original settings
+/// for the fatal-signal handler so the terminal is restored even if
+/// mirage is killed (SIGTERM/SIGHUP) before the destructor can run.
 struct RawModeGuard {
     fd: i32,
     original: libc::termios,
@@ -1600,32 +1700,34 @@ impl RawModeGuard {
     fn enable_if_tty() -> Option<Self> {
         use std::os::fd::AsRawFd as _;
         let fd = std::io::stdin().as_raw_fd();
-        // SAFETY: `fd` is the process stdin; the termios calls only read
-        // and write a stack-allocated `termios` we own.
+        let original = enable_raw_mode(fd)?;
+        // Publish the settings for the fatal-signal handler. Write the
+        // termios first, then mark it ready, so a signal arriving mid-way
+        // never restores from a half-written value.
+        //
+        // SAFETY: single writer; no reference to the `static mut` is
+        // formed (a raw pointer write is used), and the value is fully
+        // written before `RAW_READY` is set with release ordering.
         unsafe {
-            if libc::isatty(fd) != 1 {
-                return None;
-            }
-            let mut original: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(fd, &mut original) != 0 {
-                return None;
-            }
-            let mut raw = original;
-            libc::cfmakeraw(&mut raw);
-            if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
-                return None;
-            }
-            Some(RawModeGuard { fd, original })
+            std::ptr::addr_of_mut!(RAW_TERMIOS)
+                .cast::<libc::termios>()
+                .write(original);
         }
+        RAW_FD.store(fd, std::sync::atomic::Ordering::Release);
+        RAW_READY.store(true, std::sync::atomic::Ordering::Release);
+        install_terminal_restore_handlers();
+        Some(RawModeGuard { fd, original })
     }
 }
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
-        // SAFETY: restoring the saved termios on the same fd.
-        unsafe {
-            libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
-        }
+        // Tell the signal handler the saved state is no longer valid
+        // before restoring, so a signal racing with teardown won't touch
+        // a stale fd.
+        RAW_READY.store(false, std::sync::atomic::Ordering::Release);
+        RAW_FD.store(-1, std::sync::atomic::Ordering::Release);
+        restore_termios(self.fd, &self.original);
     }
 }
 
@@ -2128,5 +2230,75 @@ mod tests {
         // No explicit workdir resolves to a concrete path (cwd or "/"),
         // never an interactive prompt.
         assert!(!resolve_start_workdir(None).is_empty());
+    }
+
+    #[test]
+    fn raw_mode_round_trips_terminal_settings() {
+        // Apply raw mode to a PTY and then restore it, asserting the
+        // terminal ends up byte-for-byte as it started. This guards the
+        // fix for the "corrupted shell" left behind when an attach exits
+        // without restoring the terminal: restoration must be exact.
+        //
+        // SAFETY: standard libc PTY/termios FFI on fds this test owns.
+        unsafe {
+            let mut master: libc::c_int = 0;
+            let mut slave: libc::c_int = 0;
+            let r = libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            );
+            assert_eq!(r, 0, "openpty failed");
+
+            let mut before: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(slave, &mut before), 0);
+
+            // The slave end is a TTY, so raw mode applies and returns the
+            // prior settings.
+            let saved = enable_raw_mode(slave).expect("slave pty is a tty");
+
+            // Raw mode really took effect: echo and canonical input are
+            // cleared (this is what "cooks"/echoes keystrokes normally).
+            let mut during: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(slave, &mut during), 0);
+            assert_eq!(
+                during.c_lflag & (libc::ECHO | libc::ICANON),
+                0,
+                "raw mode should clear ECHO and ICANON"
+            );
+
+            restore_termios(slave, &saved);
+
+            let mut after: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(slave, &mut after), 0);
+            assert_eq!(after.c_iflag, before.c_iflag, "c_iflag not restored");
+            assert_eq!(after.c_oflag, before.c_oflag, "c_oflag not restored");
+            assert_eq!(after.c_cflag, before.c_cflag, "c_cflag not restored");
+            assert_eq!(after.c_lflag, before.c_lflag, "c_lflag not restored");
+
+            libc::close(master);
+            libc::close(slave);
+        }
+    }
+
+    #[test]
+    fn enable_raw_mode_is_noop_for_non_tty() {
+        // A pipe read end is not a TTY, so raw mode must decline rather
+        // than error — attaching with redirected/piped stdin must not try
+        // to manipulate a terminal that isn't there.
+        //
+        // SAFETY: standard libc pipe FFI on fds this test owns.
+        unsafe {
+            let mut fds = [0 as libc::c_int; 2];
+            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+            assert!(
+                enable_raw_mode(fds[0]).is_none(),
+                "raw mode should be a no-op on a non-tty fd"
+            );
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
     }
 }
