@@ -823,9 +823,10 @@ def showAllConcise(deviceList):
     import amdsmi
 
     if PRINT_JSON:
-        msg = "NOT_SUPPORTED: Cannot print JSON/CSV output for concise output"
+        error_code = 199
+        msg = f"NOT_SUPPORTED: Cannot print JSON/CSV output for concise output. Error code: {error_code}"
         print(msg, file=sys.stderr)
-        raise AmdSmiCommandNotSupportedException("--json", "json")
+        sys.exit(error_code)
 
     # CRITICAL: Cache BDF first to minimize GPU wake-up
     bdf_cache = {}
