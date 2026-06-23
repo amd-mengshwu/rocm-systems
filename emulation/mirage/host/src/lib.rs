@@ -161,7 +161,7 @@ pub async fn run(config: HostConfig, shutdown: Arc<Notify>) -> Result<()> {
     // execs are run by the per-node hosts inside the containers). A
     // per-node host always runs its own rank's execs.
     let containerized = layout.container_json().exists();
-    let run_execs_here = is_node_host || !containerized;
+    let run_execs_here = host_runs_execs(is_node_host, containerized);
     let host_rank = config.rank;
 
     // Host the emulator daemon for the node this host serves. A backend
@@ -269,8 +269,19 @@ pub async fn run(config: HostConfig, shutdown: Arc<Notify>) -> Result<()> {
             }
         }
 
-        // Handle pending signal requests across all execs.
-        process_signal_requests(&layout);
+        // Handle pending signal requests across all execs — but only on a
+        // host that actually runs them. The pids published in an exec's
+        // node dirs are valid in the namespace of whoever spawned them: the
+        // orchestrator of a non-containerised session, or a per-node host
+        // *inside* its container. The orchestrator of a containerised
+        // session shares those dirs (the state is bind-mounted) but lives
+        // in a different PID namespace, so killing those pids would miss
+        // the workload (or hit an unrelated host process) — and consuming
+        // the request file would also rob the in-container host that *can*
+        // deliver it. So a host only signals the execs it runs itself.
+        if run_execs_here {
+            process_signal_requests(&layout);
+        }
 
         // Re-stamp the heartbeat so readers know the host is still alive.
         if manages_session && last_heartbeat.elapsed() >= HEALTH_HEARTBEAT_INTERVAL {
@@ -296,7 +307,13 @@ pub async fn run(config: HostConfig, shutdown: Arc<Notify>) -> Result<()> {
     if manages_session && layout.def().exists() {
         publish_health(&layout, false, "stopping", None).ok();
     }
-    signal_all_execs(&layout, nix::sys::signal::Signal::SIGTERM);
+    // Only signal execs we actually run (and thus hold valid pids for); a
+    // containerised session's orchestrator tears the containers down
+    // below, which stops their workloads, instead of killing pids it
+    // cannot reach across the PID namespace boundary.
+    if run_execs_here {
+        signal_all_execs(&layout, nix::sys::signal::Signal::SIGTERM);
+    }
 
     // Give children a moment to exit, then cancel polling tasks.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -304,7 +321,9 @@ pub async fn run(config: HostConfig, shutdown: Arc<Notify>) -> Result<()> {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let _ = tokio::time::timeout(remaining.max(Duration::from_millis(10)), t).await;
     }
-    signal_all_execs(&layout, nix::sys::signal::Signal::SIGKILL);
+    if run_execs_here {
+        signal_all_execs(&layout, nix::sys::signal::Signal::SIGKILL);
+    }
     // Stop the emulator daemon after the workload children are gone, so
     // the simulated device outlives every process that talks to it.
     if let Some(daemon) = emulator_daemon.take() {
@@ -338,6 +357,19 @@ fn publish_health(
         message,
     };
     write_json(&layout.health(), &h)
+}
+
+/// Whether *this* host runs (and therefore owns the lifecycle of) the
+/// session's execs.
+///
+/// `true` for the orchestrator of a non-containerised session and for a
+/// per-node host running inside its container; `false` for the
+/// orchestrator of a containerised session, whose per-node hosts run the
+/// execs instead. Only a host that runs execs holds child pids valid in
+/// its own PID namespace, so this also decides which host may deliver
+/// workload signals.
+fn host_runs_execs(is_node_host: bool, containerized: bool) -> bool {
+    is_node_host || !containerized
 }
 
 fn signal_all_execs(layout: &SessionLayout, sig: nix::sys::signal::Signal) {
@@ -1455,6 +1487,23 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_host_running_execs_delivers_signals() {
+        // Non-containerised: the lone orchestrator runs execs and owns
+        // pids valid in its namespace, so it delivers signals.
+        assert!(host_runs_execs(false, false));
+        // Containerised per-node host: runs its rank inside the container,
+        // so it holds the workload's pid and delivers signals.
+        assert!(host_runs_execs(true, true));
+        // Containerised orchestrator: the per-node hosts run the execs in
+        // their own PID namespaces, so it must NOT try to signal — doing so
+        // would miss the workload (e.g. vllm keeps running) and steal the
+        // request file from the host that can deliver it.
+        assert!(!host_runs_execs(false, true));
+        // A per-node host is always a signal deliverer regardless.
+        assert!(host_runs_execs(true, false));
+    }
 
     #[test]
     fn head_node_env_uses_localhost_and_aliases_master() {
