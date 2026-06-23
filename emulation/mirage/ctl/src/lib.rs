@@ -1761,6 +1761,30 @@ where
     }
 }
 
+/// The human-facing lifecycle notice (if any) an attach prints to stderr
+/// for a control packet.
+///
+/// Workload `Output` bytes are written verbatim elsewhere; this surfaces
+/// node/exec lifecycle events that would otherwise be invisible — notably
+/// a container exiting, which used to leave the terminal with no
+/// indication anything had happened (the `NodeExit` packet was dropped).
+/// `\r\n` line endings keep the message aligned when the terminal is in
+/// raw mode (output post-processing is off).
+fn attach_notice(pkt: &StreamPacket) -> Option<String> {
+    match pkt {
+        StreamPacket::NodeExit { node, exit_code } => {
+            Some(format!("\r\n[mirage] node {node} exited (code {exit_code})\r\n"))
+        }
+        StreamPacket::ExecExit { exit_code } if *exit_code < 0 => {
+            // attach_stream reports a negative code when the exec's
+            // directory vanished (the container is gone) rather than the
+            // workload exiting cleanly; tell the user why the attach ended.
+            Some("\r\n[mirage] session ended (container gone)\r\n".to_string())
+        }
+        _ => None,
+    }
+}
+
 async fn follow_attach<C: MirageCtl + 'static>(
     ctl: Arc<C>,
     r: &ExecRef,
@@ -1833,6 +1857,12 @@ async fn follow_attach<C: MirageCtl + 'static>(
     let mut stderr = std::io::stderr().lock();
     let mut exit: i32 = 0;
     while let Some(pkt) = s.next().await {
+        // Surface lifecycle events (a node/container exiting, or the exec
+        // vanishing) so they aren't silently swallowed.
+        if let Some(notice) = attach_notice(&pkt) {
+            let _ = stderr.write_all(notice.as_bytes());
+            let _ = stderr.flush();
+        }
         match pkt {
             StreamPacket::Output { stream, data, .. } => match stream {
                 StdStream::Stdout => {
@@ -2380,5 +2410,36 @@ mod tests {
             .await;
             assert_eq!(forwarded.get(), 3);
         });
+    }
+
+    #[test]
+    fn attach_surfaces_node_and_container_exit() {
+        use mirage_core::ctl::StreamPacket;
+        // A node/container exiting must be shown to the user (this is the
+        // event that previously "didn't show up in the terminal").
+        let notice = attach_notice(&StreamPacket::NodeExit {
+            node: 2,
+            exit_code: 137,
+        })
+        .expect("node exit should produce a notice");
+        assert!(notice.contains("node 2 exited"), "{notice}");
+        assert!(notice.contains("137"), "{notice}");
+
+        // The exec vanishing (container gone) is also surfaced.
+        let gone = attach_notice(&StreamPacket::ExecExit { exit_code: -1 })
+            .expect("a lost container should produce a notice");
+        assert!(gone.contains("container gone"), "{gone}");
+
+        // A clean exit prints no extra lifecycle noise...
+        assert!(attach_notice(&StreamPacket::ExecExit { exit_code: 0 }).is_none());
+        // ...and ordinary workload output is not a lifecycle notice.
+        assert!(
+            attach_notice(&StreamPacket::Output {
+                node: 0,
+                stream: StdStream::Stdout,
+                data: vec![1, 2, 3],
+            })
+            .is_none()
+        );
     }
 }
