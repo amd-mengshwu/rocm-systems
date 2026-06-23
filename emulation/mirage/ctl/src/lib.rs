@@ -1731,6 +1731,36 @@ impl Drop for RawModeGuard {
     }
 }
 
+/// A source of interrupt (Ctrl-C / SIGINT) notifications.
+///
+/// Abstracted behind a trait so the forwarding loop in
+/// [`forward_interrupts_to_exec`] can be driven by a deterministic test
+/// source as well as by the real OS signal stream, without raising actual
+/// signals in the test process.
+trait InterruptSource {
+    /// Resolve to `true` when the next interrupt arrives, or `false` once
+    /// the source is exhausted (so the forwarding loop can stop).
+    fn next_interrupt(&mut self) -> impl std::future::Future<Output = bool> + Send;
+}
+
+impl InterruptSource for tokio::signal::unix::Signal {
+    async fn next_interrupt(&mut self) -> bool {
+        self.recv().await.is_some()
+    }
+}
+
+/// Relay each interrupt from `source` to the workload by invoking
+/// `forward` (which signals the exec). Returns when the source ends.
+async fn forward_interrupts_to_exec<S, F>(mut source: S, mut forward: F)
+where
+    S: InterruptSource,
+    F: FnMut(),
+{
+    while source.next_interrupt().await {
+        forward();
+    }
+}
+
 async fn follow_attach<C: MirageCtl + 'static>(
     ctl: Arc<C>,
     r: &ExecRef,
@@ -1778,6 +1808,26 @@ async fn follow_attach<C: MirageCtl + 'static>(
             }
         }
     });
+
+    // Forward Ctrl-C to the workload instead of killing the attach.
+    //
+    // With a TTY stdin the guard above puts the terminal in raw mode, so
+    // ISIG is off and Ctrl-C arrives as a 0x03 byte over the stdin bridge
+    // (the workload's own PTY turns it into SIGINT). But when stdin is
+    // not a TTY — a pipe, or `mirage run` driving an exec — Ctrl-C is
+    // delivered to this process as SIGINT, which would otherwise tear
+    // down only the attach and orphan the still-running workload. Relay
+    // each SIGINT to the exec so the workload is interrupted; the exec's
+    // own exit then ends the loop below.
+    if let Ok(sigint) =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+    {
+        let sig_ctl = ctl.clone();
+        let sig_ref = r.clone();
+        tokio::spawn(forward_interrupts_to_exec(sigint, move || {
+            let _ = sig_ctl.exec_signal(&sig_ref, libc::SIGINT);
+        }));
+    }
 
     let mut stdout = std::io::stdout().lock();
     let mut stderr = std::io::stderr().lock();
@@ -2300,5 +2350,35 @@ mod tests {
             libc::close(fds[0]);
             libc::close(fds[1]);
         }
+    }
+
+    #[test]
+    fn each_interrupt_is_forwarded_to_the_exec() {
+        // A deterministic interrupt source that fires `n` times then
+        // stops, standing in for the OS SIGINT stream so the forwarding
+        // loop can be tested without raising real signals.
+        struct TestInterrupts(u32);
+        impl InterruptSource for TestInterrupts {
+            async fn next_interrupt(&mut self) -> bool {
+                if self.0 > 0 {
+                    self.0 -= 1;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // Every Ctrl-C must produce exactly one signal to the exec —
+            // none dropped, none duplicated.
+            let forwarded = std::cell::Cell::new(0u32);
+            forward_interrupts_to_exec(TestInterrupts(3), || {
+                forwarded.set(forwarded.get() + 1);
+            })
+            .await;
+            assert_eq!(forwarded.get(), 3);
+        });
     }
 }
