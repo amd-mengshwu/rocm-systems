@@ -366,8 +366,14 @@ impl Engine {
     // ---- side-effecting operations --------------------------------
 
     /// Pull `image` so node launches don't race on an implicit pull.
+    ///
+    /// The provider's pull progress (which for a large image is the
+    /// slowest, most visible step of bring-up) is streamed line by line
+    /// to the log at INFO as it arrives, so the user sees live progress
+    /// instead of a silent hang. On failure the captured output is
+    /// surfaced in the error.
     pub fn pull(&self, image: &str) -> Result<()> {
-        self.checked(&["pull".to_string(), image.to_string()])
+        self.run_streaming(&["pull".to_string(), image.to_string()], None, image)
     }
 
     /// Build an image tagged `tag` from the given `dockerfile` contents,
@@ -388,61 +394,64 @@ impl Engine {
             tag.to_string(),
             "-".to_string(),
         ];
+        // Stream the Dockerfile to the build's stdin; `run_streaming`
+        // follows stdout+stderr live and surfaces captured output on
+        // failure.
+        self.run_streaming(&args, Some(dockerfile.as_bytes()), tag)
+    }
+
+    /// Run the provider with `args`, streaming its stdout and stderr to
+    /// the log at INFO line by line as they arrive, and (when
+    /// `stdin_data` is set) feeding that data to the child's stdin and
+    /// then closing it.
+    ///
+    /// Used for the long-running, user-visible provider operations —
+    /// image `pull` and image `build` — so progress is visible live
+    /// rather than buffered until the command finishes (or appears to
+    /// hang). The captured output is retained and, on a non-zero exit,
+    /// surfaced in the error so a failing step is actionable.
+    fn run_streaming(&self, args: &[String], stdin_data: Option<&[u8]>, label: &str) -> Result<()> {
+        use std::io::Write;
+        let want_stdin = stdin_data.is_some();
         let mut child = spawn_retrying_etxtbsy(|| {
             Command::new(&self.provider)
-                .args(&args)
-                .stdin(Stdio::piped())
+                .args(args)
+                .stdin(if want_stdin {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
         })
         .map_err(|source| ContainerError::Spawn {
             provider: self.provider.clone(),
-            args: args.clone(),
+            args: args.to_vec(),
             source,
         })?;
-        // Stream the Dockerfile to the build's stdin, then close it so the
-        // provider proceeds.
-        use std::io::{BufRead, BufReader, Write};
-        if let Some(mut stdin) = child.stdin.take() {
+
+        // Feed and close stdin before draining the output streams.
+        if let Some(data) = stdin_data
+            && let Some(mut stdin) = child.stdin.take()
+        {
             stdin
-                .write_all(dockerfile.as_bytes())
+                .write_all(data)
                 .map_err(|source| ContainerError::Spawn {
                     provider: self.provider.clone(),
-                    args: args.clone(),
+                    args: args.to_vec(),
                     source,
                 })?;
         }
 
-        // Drain stdout and stderr concurrently, logging each line at INFO
-        // as it arrives and retaining it so a failing build's output can
-        // be surfaced in the error. Build providers write most progress
-        // to stderr, so both streams are followed.
-        fn log_stream<R: std::io::Read + Send + 'static>(
-            reader: Option<R>,
-            tag: String,
-        ) -> (
-            std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-            Option<std::thread::JoinHandle<()>>,
-        ) {
-            let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-            let lines_for_thread = lines.clone();
-            let handle = reader.map(|r| {
-                std::thread::spawn(move || {
-                    for line in BufReader::new(r).lines().map_while(std::result::Result::ok) {
-                        tracing::info!(image = %tag, "{line}");
-                        lines_for_thread.lock().unwrap().push(line);
-                    }
-                })
-            });
-            (lines, handle)
-        }
-        let (out_lines, out_handle) = log_stream(child.stdout.take(), tag.to_string());
-        let (err_lines, err_handle) = log_stream(child.stderr.take(), tag.to_string());
+        // Drain stdout and stderr concurrently. Providers write most
+        // progress to stderr, so both streams are followed.
+        let (out_lines, out_handle) = log_stream(child.stdout.take(), label.to_string());
+        let (err_lines, err_handle) = log_stream(child.stderr.take(), label.to_string());
 
         let status = child.wait().map_err(|source| ContainerError::Spawn {
             provider: self.provider.clone(),
-            args: args.clone(),
+            args: args.to_vec(),
             source,
         })?;
         if let Some(h) = out_handle {
@@ -455,14 +464,14 @@ impl Engine {
         if status.success() {
             Ok(())
         } else {
-            // Prefer stderr (where build errors land); fall back to stdout.
+            // Prefer stderr (where errors land); fall back to stdout.
             let mut captured = err_lines.lock().unwrap().join("\n");
             if captured.trim().is_empty() {
                 captured = out_lines.lock().unwrap().join("\n");
             }
             Err(ContainerError::Command {
                 provider: self.provider.clone(),
-                args,
+                args: args.to_vec(),
                 code: status.code().unwrap_or(-1),
                 stderr: captured.trim().to_string(),
             })
@@ -769,6 +778,35 @@ impl Engine {
     }
 }
 
+/// Spawn a thread that reads `reader` line by line, logging each line at
+/// INFO (tagged with `label`) as it arrives and retaining it so the
+/// caller can surface the captured output (e.g. in an error). Returns the
+/// shared line buffer plus the join handle (both `None`-safe when the
+/// stream is absent).
+fn log_stream<R: std::io::Read + Send + 'static>(
+    reader: Option<R>,
+    label: String,
+) -> (
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    Option<std::thread::JoinHandle<()>>,
+) {
+    use std::io::BufRead as _;
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let lines_for_thread = lines.clone();
+    let handle = reader.map(|r| {
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(r)
+                .lines()
+                .map_while(std::result::Result::ok)
+            {
+                tracing::info!(image = %label, "{line}");
+                lines_for_thread.lock().unwrap().push(line);
+            }
+        })
+    });
+    (lines, handle)
+}
+
 /// Spawn a command, transparently retrying on `ETXTBSY`.
 ///
 /// In a multithreaded process a concurrent `fork` momentarily
@@ -1068,6 +1106,107 @@ mod tests {
             recorded.contains("run -d --name mirage-s-node-0"),
             "{recorded:?}"
         );
+    }
+
+    /// Mock provider that, on `pull`, emits several progress lines split
+    /// across stdout and stderr (mirroring how docker/podman report pull
+    /// progress) and then exits with `exit_code`.
+    fn pull_progress_provider(dir: &Path, exit_code: i32) -> std::path::PathBuf {
+        let provider = dir.join("pull-provider.sh");
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = pull ]; then\n\
+               echo 'Pulling from library/img'\n\
+               echo 'a1b2c3: Pulling fs layer' 1>&2\n\
+               echo 'a1b2c3: Download complete' 1>&2\n\
+               exit {exit_code}\n\
+             fi\n\
+             echo fake-cid-123\n"
+        );
+        std::fs::write(&provider, script).unwrap();
+        std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+        provider
+    }
+
+    /// A tracing writer that appends everything it is handed to a shared
+    /// buffer, so a test can assert on what was logged.
+    #[derive(Clone)]
+    struct BufWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // A single process-global buffer + subscriber. Streaming happens on
+    // worker threads (see `log_stream`), which inherit the *global*
+    // tracing subscriber — exactly as in production where the subscriber
+    // is installed globally — so capturing via a global subscriber is
+    // what actually exercises the streaming path.
+    static LOG_BUF_ARC: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> =
+        std::sync::OnceLock::new();
+
+    fn install_global_log_capture() -> std::sync::Arc<std::sync::Mutex<Vec<u8>>> {
+        use tracing_subscriber::fmt::MakeWriter;
+        let arc = LOG_BUF_ARC
+            .get_or_init(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+            .clone();
+        struct Mk(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl<'a> MakeWriter<'a> for Mk {
+            type Writer = BufWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                BufWriter(self.0.clone())
+            }
+        }
+        // Set once for the whole test process; ignore the error if some
+        // other test already installed it.
+        let _ = tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_writer(Mk(arc.clone()))
+                .with_max_level(tracing::Level::INFO)
+                .finish(),
+        );
+        arc
+    }
+
+    #[test]
+    fn pull_streams_progress_to_the_log() {
+        let buf = install_global_log_capture();
+        let start = buf.lock().unwrap().len();
+
+        let dir = tempfile::tempdir().unwrap();
+        let provider = pull_progress_provider(dir.path(), 0);
+        let engine = Engine::with_provider(provider.to_string_lossy().to_string());
+
+        engine.pull("img:latest").unwrap();
+
+        // Only inspect what was logged during this pull (the buffer is
+        // shared across the process).
+        let logged = String::from_utf8(buf.lock().unwrap()[start..].to_vec()).unwrap();
+        // Progress from both stdout and stderr is surfaced live to the
+        // log, tagged with the image, rather than being swallowed.
+        assert!(logged.contains("Pulling from library/img"), "{logged:?}");
+        assert!(logged.contains("a1b2c3: Pulling fs layer"), "{logged:?}");
+        assert!(logged.contains("a1b2c3: Download complete"), "{logged:?}");
+        assert!(logged.contains("img:latest"), "{logged:?}");
+    }
+
+    #[test]
+    fn pull_surfaces_captured_output_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = pull_progress_provider(dir.path(), 1);
+        let engine = Engine::with_provider(provider.to_string_lossy().to_string());
+
+        let err = engine.pull("img:latest").unwrap_err();
+        // A failed pull is actionable: the streamed output is retained and
+        // included in the error rather than discarded.
+        let msg = err.to_string();
+        assert!(msg.contains("pull img:latest"), "{msg}");
+        assert!(msg.contains("a1b2c3: Download complete"), "{msg}");
     }
 
     #[test]
