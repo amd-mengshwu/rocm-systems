@@ -327,7 +327,7 @@ __device__ void ROContext::broadcast(rocshmem_team_t team, T *dest,
 }
 
 template <typename T>
-__device__ void ROContext::alltoall(rocshmem_team_t team, T *dest,
+__device__ void ROContext::alltoall_wg(rocshmem_team_t team, T *dest,
                                     const T *source, int nelems) {
   if (!is_thread_zero_in_block()) {
     __syncthreads();

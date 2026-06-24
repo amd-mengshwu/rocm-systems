@@ -627,9 +627,9 @@ __device__ void GDAContext::internal_broadcast(T *dst, const T *src,
 }
 
 template <typename T>
-__device__ void GDAContext::alltoall(rocshmem_team_t team, T *dst,
+__device__ void GDAContext::alltoall_wg(rocshmem_team_t team, T *dst,
                                      const T *src, int nelems) {
-  alltoall_linear_thread_puts(team, dst, src, nelems);
+  alltoall_linear_thread_puts_wg(team, dst, src, nelems);
 }
 
 template <typename T>
@@ -789,7 +789,7 @@ __device__ void GDAContext::alltoallv_get(rocshmem_team_t team, T *dest,
 }
 
 template <typename T>
-__device__ void GDAContext::alltoall_linear(rocshmem_team_t team, T *dst,
+__device__ void GDAContext::alltoall_linear_wg(rocshmem_team_t team, T *dst,
                                             const T *src, int nelems) {
   GDATeam *team_obj = reinterpret_cast<GDATeam *>(team);
 
@@ -820,7 +820,7 @@ __device__ void GDAContext::alltoall_linear(rocshmem_team_t team, T *dst,
 }
 
 template <typename T>
-__device__ void GDAContext::alltoall_linear_thread_puts(rocshmem_team_t team,
+__device__ void GDAContext::alltoall_linear_thread_puts_wg(rocshmem_team_t team,
     T *dst, const T *src, int nelems) {
   GDATeam *team_obj = reinterpret_cast<GDATeam *>(team);
 
