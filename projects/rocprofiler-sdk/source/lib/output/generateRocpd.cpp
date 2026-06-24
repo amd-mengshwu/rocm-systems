@@ -1035,7 +1035,7 @@ write_rocpd(
     const generator<rocprofiler_buffer_tracing_rocdecode_api_ext_record_t>& rocdecode_api_gen,
     const generator<tool_counter_record_t>&                                 counter_collection_gen,
     const generator<tool_spm_counter_record_t>& /** spm_collection_gen*/,
-    const generator<rocprofiler_buffer_tracing_graph_launch_record_t>&      graph_launch_gen)
+    const generator<rocprofiler_buffer_tracing_graph_launch_record_t>& graph_launch_gen)
 {
     static auto get_simple_timer = [](std::string_view label) {
         return common::simple_timer{fmt::format("SQLite3 generation :: {:24}", label)};

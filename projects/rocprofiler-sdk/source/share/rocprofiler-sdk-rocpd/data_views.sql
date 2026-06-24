@@ -547,6 +547,7 @@ SELECT
     A.type AS agent_type,
     G.queue_id,
     Q.name AS queue,
+    'hipGraphLaunch' AS name,
     G.start,
     G.end,
     (G.end - G.start) AS duration,

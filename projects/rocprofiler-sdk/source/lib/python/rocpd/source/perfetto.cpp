@@ -656,9 +656,8 @@ write_perfetto(
                                   itr.graph_exec_id,
                                   "kernel_dispatch_count",
                                   itr.kernel_dispatch_count);
-                TRACE_EVENT_END(sdk::perfetto_category<sdk::category::hip_api>::name,
-                                track,
-                                itr.end);
+                TRACE_EVENT_END(
+                    sdk::perfetto_category<sdk::category::hip_api>::name, track, itr.end);
             }
             tracing_session->FlushBlocking();
         }
