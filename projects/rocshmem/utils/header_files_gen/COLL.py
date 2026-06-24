@@ -61,7 +61,7 @@ def generate_alltoall_api():
  * @param[in] dest         Destination address. Must be an address on the
  *                         symmetric heap.
  * @param[in] source       Source address. Must be an address on the symmetric
-                           heap.
+ *                         heap.
  * @param[in] nelems       Number of data blocks transferred per pair of PEs.
  *
  * @return void
@@ -91,7 +91,7 @@ def generate_alltoall_wave_api():
  * @param[in] dest         Destination address. Must be an address on the
  *                         symmetric heap.
  * @param[in] source       Source address. Must be an address on the symmetric
-                           heap.
+ *                         heap.
  * @param[in] nelems       Number of data blocks transferred per pair of PEs.
  *
  * @return int: zero on success, non-zero otherwise
@@ -129,15 +129,15 @@ def generate_broadcast_api():
  * @param[in] dest         Destination address. Must be an address on the
  *                         symmetric heap.
  * @param[in] source       Source address. Must be an address on the symmetric
-                           heap.
+ *                         heap.
  * @param[in] nelement     Size of the buffer to participate in the broadcast.
  * @param[in] PE_root      Zero-based ordinal of the PE, with respect to the
-                           active set, from which the data is copied
+ *                         active set, from which the data is copied
  * @param[in] PE_start     PE to start the reduction.
  * @param[in] logPE_stride Stride of PEs participating in the reduction.
  * @param[in] PE_size      Number PEs participating in the reduction.
  * @param[in] pSync        Temporary sync buffer provided to ROCSHMEM. Must
-                           be of size at least ROCSHMEM_REDUCE_SYNC_SIZE.
+ *                        be of size at least ROCSHMEM_REDUCE_SYNC_SIZE.
  *
  * @return void
  */\n"""
@@ -168,7 +168,7 @@ def generate_fcollect_api():
  * @param[in] dest         Destination address. Must be an address on the
  *                         symmetric heap.
  * @param[in] source       Source address. Must be an address on the symmetric
-                           heap.
+ *                         heap.
  * @param[in] nelems       Number of data blocks in source array.
  *
  * @return void
@@ -227,7 +227,7 @@ def generate_reduction_api():
  * @param[in] dest         Destination address. Must be an address on the
  *                         symmetric heap.
  * @param[in] source       Source address. Must be an address on the symmetric
-                           heap.
+ *                         heap.
  * @param[in] nreduce      Size of the buffer to participate in the reduction.
  *
  * @return int (Zero on successful local completion. Nonzero otherwise.)
@@ -260,14 +260,14 @@ def generate_reduce_on_stream_api():
 /**
  * @name ROCSHMEM_REDUCE_ON_STREAM
  * @brief Performs a reduction across all PEs in a team on the specified HIP
-  * stream.
+ *        stream.
  *
  * @param[in] ctx          The ROCSHMEM context associated with this operation.
  * @param[in] team         The team participating in the collective.
  * @param[in] dest         Destination address. Must be an address on the
  *                         symmetric heap.
  * @param[in] source       Source address. Must be an address on the symmetric
-                           heap.
+ *                         heap.
  * @param[in] nreduce      Size of the buffer to participate in the reduction.
  * @param[in] stream       HIP stream on which the reduction is issued.
  *
@@ -331,6 +331,3 @@ namespace rocshmem {
     )
 
     write_to_file(output_file, expanded_code)
-
-
-print(generate_alltoall_wave_api())
