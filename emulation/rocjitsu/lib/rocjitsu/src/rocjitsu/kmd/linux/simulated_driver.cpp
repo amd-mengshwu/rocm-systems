@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 #include "rocjitsu/kmd/linux/simulated_driver.h"
-#include "embedded_schema.h"
-#include "rocjitsu/config/config_loader.h"
+#include "rocjitsu/kmd/linux/amdgpu_properties.h"
+#include "rocjitsu/kmd/linux/kfd_ioctl_utils.h"
 #include "rocjitsu/vm/amdgpu/command_processor.h"
 
 #include "rocjitsu/base/rj_compiler.h"
@@ -51,6 +51,8 @@ bool vm_trace_enabled() {
 
 constexpr const char *const kDrmSysfsPrefix = "/sys/class/drm";
 constexpr const char *const kKfdSysfsPrefixAlt = "/sys/class/kfd/kfd/topology";
+constexpr uint32_t kTileConfigCount = 32;
+constexpr uint32_t kMacroTileConfigCount = 16;
 
 /// @brief Derive PTE MTYPE from KFD allocation flags (mirrors amdgpu driver).
 amdgpu::Mtype pte_mtype_for_flags(uint32_t flags) {
@@ -126,8 +128,10 @@ void SimulatedDriver::setup_topology(const config::KfdDeviceConfig &dev, uint32_
   gpu.device_id = dev.device_id;
   gpu.family_id = dev.family_id;
   gpu.unique_id = dev.unique_id;
-  gpu.marketing_name = dev.marketing_name.c_str();
+  gpu.marketing_name = dev.marketing_name;
   gpu.drm_render_minor = dev.drm_render_minor;
+  gpu.revision_id = dev.revision_id;
+  gpu.pci_revision_id = dev.pci_revision_id;
   gpu.simd_count = dev.simd_count;
   gpu.max_waves_per_simd = dev.max_waves_per_simd;
   gpu.num_shader_engines = dev.num_shader_engines;
@@ -137,6 +141,7 @@ void SimulatedDriver::setup_topology(const config::KfdDeviceConfig &dev, uint32_
   gpu.wave_front_size = dev.wave_front_size;
   gpu.max_slots_scratch_cu = dev.max_slots_scratch_cu;
   gpu.local_mem_size = dev.local_mem_size;
+  gpu.vram_type = dev.vram_type;
   gpu.lds_size_kb = dev.lds_size_kb;
   gpu.mem_width = dev.mem_width;
   gpu.mem_clk_max = dev.mem_clk_max;
@@ -173,14 +178,14 @@ SimulatedDriver::GpuDevice *SimulatedDriver::find_gpu(uint32_t gpu_id) {
   for (auto &g : gpus_)
     if (g.gpu_id == gpu_id)
       return &g;
-  return gpus_.empty() ? nullptr : &gpus_[0];
+  return nullptr;
 }
 
 const SimulatedDriver::GpuDevice *SimulatedDriver::find_gpu(uint32_t gpu_id) const {
   for (auto &g : gpus_)
     if (g.gpu_id == gpu_id)
       return &g;
-  return gpus_.empty() ? nullptr : &gpus_[0];
+  return nullptr;
 }
 
 SimulatedDriver::~SimulatedDriver() {
@@ -209,8 +214,10 @@ void SimulatedDriver::setup_topology(const std::vector<config::KfdDeviceConfig> 
     gpu.device_id = dev.device_id;
     gpu.family_id = dev.family_id;
     gpu.unique_id = dev.unique_id;
-    gpu.marketing_name = dev.marketing_name.c_str();
+    gpu.marketing_name = dev.marketing_name;
     gpu.drm_render_minor = dev.drm_render_minor;
+    gpu.revision_id = dev.revision_id;
+    gpu.pci_revision_id = dev.pci_revision_id;
     gpu.simd_count = dev.simd_count;
     gpu.max_waves_per_simd = dev.max_waves_per_simd;
     gpu.num_shader_engines = dev.num_shader_engines;
@@ -220,6 +227,7 @@ void SimulatedDriver::setup_topology(const std::vector<config::KfdDeviceConfig> 
     gpu.wave_front_size = dev.wave_front_size;
     gpu.max_slots_scratch_cu = dev.max_slots_scratch_cu;
     gpu.local_mem_size = dev.local_mem_size;
+    gpu.vram_type = dev.vram_type;
     gpu.lds_size_kb = dev.lds_size_kb;
     gpu.mem_width = dev.mem_width;
     gpu.mem_clk_max = dev.mem_clk_max;
@@ -262,6 +270,15 @@ bool SimulatedDriver::is_doorbell_range(const void *addr, size_t length) const {
 }
 
 int SimulatedDriver::open() {
+  static std::once_flag raise_nofile_flag;
+  std::call_once(raise_nofile_flag, [] {
+    struct rlimit rl {};
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < 8192) {
+      rl.rlim_cur = std::min<rlim_t>(rl.rlim_max, 65536);
+      setrlimit(RLIMIT_NOFILE, &rl);
+    }
+  });
+
   if (fd_ < 0) {
     fd_ = static_cast<int>(syscall(SYS_memfd_create, "rocjitsu_kfd", 0));
     if (fd_ < 0)
@@ -526,7 +543,7 @@ int SimulatedDriver::ioctl(uint32_t process_id, unsigned long request, void *arg
 }
 
 static const char *ioctl_name(unsigned long req) {
-  switch (req) {
+  switch (canonical_ioctl_request(req)) {
   case AMDKFD_IOC_GET_VERSION:
     return "GET_VERSION";
   case AMDKFD_IOC_GET_CLOCK_COUNTERS:
@@ -571,6 +588,10 @@ static const char *ioctl_name(unsigned long req) {
     return "SET_MEM_POLICY";
   case AMDKFD_IOC_AVAILABLE_MEMORY:
     return "AVAIL_MEMORY";
+  case AMDKFD_IOC_GET_TILE_CONFIG:
+    return "GET_TILE_CONFIG";
+  case AMDKFD_IOC_SVM:
+    return "SVM";
   default:
     return "UNKNOWN";
   }
@@ -578,7 +599,8 @@ static const char *ioctl_name(unsigned long req) {
 
 int SimulatedDriver::dispatch_ioctl(KfdProcess &proc, unsigned long request, void *arg) {
   util::Logger::cp("IOCTL pid=", proc.process_id(), " ", ioctl_name(request));
-  switch (request) {
+
+  switch (canonical_ioctl_request(request)) {
   case AMDKFD_IOC_GET_VERSION:
     return get_version_ioctl(arg);
   case AMDKFD_IOC_GET_CLOCK_COUNTERS:
@@ -646,6 +668,8 @@ int SimulatedDriver::dispatch_ioctl(KfdProcess &proc, unsigned long request, voi
     proc.gpu(ord).trap_tma_addr = a->tma_addr;
     return 0;
   }
+  case AMDKFD_IOC_GET_TILE_CONFIG:
+    return get_tile_config_ioctl(arg);
   case AMDKFD_IOC_GET_DMABUF_INFO:
     return get_dmabuf_info_ioctl(proc, arg);
   case AMDKFD_IOC_IMPORT_DMABUF:
@@ -657,6 +681,10 @@ int SimulatedDriver::dispatch_ioctl(KfdProcess &proc, unsigned long request, voi
   case AMDKFD_IOC_IPC_IMPORT_HANDLE:
     return ipc_import_handle_ioctl(proc, arg);
   case AMDKFD_IOC_SVM:
+    // SVM requests carry a trailing attribute array, so libhsakmt sets _IOC_SIZE
+    // to the actual buffer size. canonical_ioctl_request() lets this follow the
+    // normal switch-dispatch style while still accepting those runtime-sized
+    // request values.
     return svm_ioctl(proc, arg);
   default:
     util::Logger::debug_print("rocjitsu: unhandled ioctl 0x", std::hex, request);
@@ -759,20 +787,24 @@ void *SimulatedDriver::dispatch_mmap(KfdProcess &proc, void *addr, size_t length
 
   if (type == KFD_MMAP_TYPE_EVENTS) {
     if (proc.event_state_.memfd < 0) {
-      auto raw_events_fd =
-          static_cast<int>(syscall(SYS_memfd_create, "rocjitsu_events", MFD_ALLOW_SEALING));
+      auto raw_events_fd = static_cast<int>(
+          syscall(SYS_memfd_create, "rocjitsu_events", MFD_CLOEXEC | MFD_ALLOW_SEALING));
       if (raw_events_fd < 0)
         return MAP_FAILED;
       proc.event_state_.memfd = fcntl(raw_events_fd, F_DUPFD_CLOEXEC, 4096);
+      if (proc.event_state_.memfd < 0)
+        proc.event_state_.memfd = raw_events_fd;
+      else
+        syscall(SYS_close, raw_events_fd);
       {
         std::lock_guard<std::mutex> lk(owned_fds_mutex_);
-        if (proc.event_state_.memfd >= 0)
-          owned_fds_.insert(proc.event_state_.memfd);
+        owned_fds_.insert(proc.event_state_.memfd);
       }
-      syscall(SYS_close, raw_events_fd);
-      if (proc.event_state_.memfd < 0)
-        return MAP_FAILED;
       if (ftruncate(proc.event_state_.memfd, static_cast<off_t>(length)) != 0) {
+        {
+          std::lock_guard<std::mutex> lk(owned_fds_mutex_);
+          owned_fds_.erase(proc.event_state_.memfd);
+        }
         syscall(SYS_close, proc.event_state_.memfd);
         proc.event_state_.memfd = -1;
         return MAP_FAILED;
@@ -976,6 +1008,37 @@ int SimulatedDriver::get_apertures_ioctl(void *arg) {
   return 0;
 }
 
+int SimulatedDriver::get_tile_config_ioctl(void *arg) {
+  auto *args = static_cast<kfd_ioctl_get_tile_config_args *>(arg);
+  if (daemon_mode_)
+    return -ENOTSUP;
+
+  auto *gpu = find_gpu(args->gpu_id);
+  if (!gpu || !gpu->soc)
+    return -EINVAL;
+
+  uint32_t tile_write_count = std::min(args->num_tile_configs, kTileConfigCount);
+  uint32_t macro_write_count = std::min(args->num_macro_tile_configs, kMacroTileConfigCount);
+
+  // ROCr needs gb_addr_config for swizzled-address calculation. Tile-mode arrays are stubbed until
+  // a simulator consumer needs their packed register encodings.
+  if (args->tile_config_ptr && tile_write_count > 0) {
+    auto *tile_config = reinterpret_cast<uint32_t *>(args->tile_config_ptr);
+    std::fill_n(tile_config, tile_write_count, 0u);
+  }
+  if (args->macro_tile_config_ptr && macro_write_count > 0) {
+    auto *macro_tile_config = reinterpret_cast<uint32_t *>(args->macro_tile_config_ptr);
+    std::fill_n(macro_tile_config, macro_write_count, 0u);
+  }
+
+  args->num_tile_configs = tile_write_count;
+  args->num_macro_tile_configs = macro_write_count;
+  args->gb_addr_config = kmd::gb_addr_config_for_arch(gpu->soc->arch());
+  args->num_banks = 0;
+  args->num_ranks = 0;
+  return 0;
+}
+
 int SimulatedDriver::acquire_vm_ioctl([[maybe_unused]] void *arg) {
   (void)arg;
   return 0;
@@ -1011,12 +1074,14 @@ int SimulatedDriver::alloc_memory_ioctl(KfdProcess &proc, void *arg) {
         syscall(SYS_memfd_create, "rocjitsu_alloc", MFD_CLOEXEC | MFD_ALLOW_SEALING));
     if (raw_fd >= 0) {
       alloc.memfd = fcntl(raw_fd, F_DUPFD_CLOEXEC, 4096);
+      if (alloc.memfd < 0)
+        alloc.memfd = raw_fd;
+      else
+        syscall(SYS_close, raw_fd);
       {
         std::lock_guard<std::mutex> lk(owned_fds_mutex_);
-        if (alloc.memfd >= 0)
-          owned_fds_.insert(alloc.memfd);
+        owned_fds_.insert(alloc.memfd);
       }
-      syscall(SYS_close, raw_fd);
       if (alloc.memfd >= 0) {
         [[maybe_unused]] auto ft_rc = ftruncate(alloc.memfd, static_cast<off_t>(alloc.size));
         fallocate(alloc.memfd, 0, 0, static_cast<off_t>(alloc.size));
@@ -1077,25 +1142,50 @@ bool SimulatedDriver::allocate_scratch_backing(uint32_t process_id, uint64_t gpu
     return false;
 
   int memfd = fcntl(raw_fd, F_DUPFD_CLOEXEC, 4096);
-  syscall(SYS_close, raw_fd);
   if (memfd < 0)
-    return false;
+    memfd = raw_fd;
+  else
+    syscall(SYS_close, raw_fd);
   {
     std::lock_guard<std::mutex> lk(owned_fds_mutex_);
     owned_fds_.insert(memfd);
   }
 
   if (ftruncate(memfd, static_cast<off_t>(aligned_size)) != 0) {
+    {
+      std::lock_guard<std::mutex> lk(owned_fds_mutex_);
+      owned_fds_.erase(memfd);
+    }
     syscall(SYS_close, memfd);
     return false;
   }
   auto *host_ptr = safe_mmap(nullptr, aligned_size, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
   if (host_ptr == MAP_FAILED) {
+    {
+      std::lock_guard<std::mutex> lk(owned_fds_mutex_);
+      owned_fds_.erase(memfd);
+    }
     syscall(SYS_close, memfd);
     return false;
   }
+  {
+    std::lock_guard<std::mutex> lk(owned_fds_mutex_);
+    owned_fds_.erase(memfd);
+  }
+  syscall(SYS_close, memfd);
   std::memset(host_ptr, 0, aligned_size);
   proc->map_pages(gpu_va, host_ptr, aligned_size);
+
+  {
+    std::lock_guard<std::mutex> lk(proc->alloc_mutex_);
+    KfdProcess::GpuAllocation alloc{};
+    alloc.gpu_va = gpu_va;
+    alloc.size = aligned_size;
+    alloc.host_ptr = host_ptr;
+    alloc.handle = proc->next_handle_++;
+    alloc.memfd = -1;
+    proc->allocations_[alloc.handle] = alloc;
+  }
 
   util::Logger::vm([&](auto &os) {
     os << "SCRATCH_BACKING pid=" << process_id << " gpu_va=0x" << std::hex << gpu_va << " size=0x"
@@ -1170,8 +1260,18 @@ int SimulatedDriver::map_memory_ioctl(KfdProcess &proc, void *arg) {
   return 0;
 }
 
-int SimulatedDriver::unmap_memory_ioctl([[maybe_unused]] KfdProcess &proc, void *arg) {
+int SimulatedDriver::unmap_memory_ioctl(KfdProcess &proc, void *arg) {
   auto *args = static_cast<kfd_ioctl_unmap_memory_from_gpu_args *>(arg);
+  std::lock_guard<std::mutex> lock(proc.alloc_mutex_);
+  auto it = proc.allocations_.find(args->handle);
+  if (it != proc.allocations_.end()) {
+    // UNMAP only tears down GPU page-table mappings; the allocation record
+    // (and its backing memfd/dmabuf_fd) stays tracked until FREE_MEMORY_OF_GPU
+    // releases it. Erasing here would leak those fds and make a later FREE a
+    // no-op for this handle.
+    auto &alloc = it->second;
+    unmap_from_gpu(proc, alloc.gpu_va, alloc.size);
+  }
   args->n_success = args->n_devices;
   return 0;
 }

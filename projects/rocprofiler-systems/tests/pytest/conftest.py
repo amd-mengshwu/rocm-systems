@@ -10,12 +10,17 @@ This module provides shared fixtures and configuration for all test modules.
 from __future__ import annotations
 from pathlib import Path
 from functools import lru_cache
-from typing import Callable, Generator, Optional
+from typing import Any, Callable, Generator, Optional
 
 import re
 import os
 import sys
 import shutil
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    yaml = None  # type: ignore[assignment]
 
 # Add the pytest directory to Python path for rocprofsys package
 sys.path.insert(0, str(Path(__file__).parent))
@@ -228,6 +233,14 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
+        "amdsmi_min_version(version): mark test as requiring minimum AMD-SMI version",
+    )
+    config.addinivalue_line(
+        "markers",
+        "amdgpu_min_version(version): mark test as requiring minimum amdgpu driver version",
+    )
+    config.addinivalue_line(
+        "markers",
         "rocpd(env): mark test as using ROCpd and inject ROCpd env into given env",
     )
     # TODO: Deprecate once TheRock switches to CTest and CTest based filtering
@@ -290,6 +303,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "no_docker",
         "shmem",
         "nic",
+        "ainic",
     ]
 
     # Informational markers, only used for test labeling
@@ -344,6 +358,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "unit_tests",
         "hip_stream",
         "presets",
+        "cli_help",
         "hpc",
         "hip",
         "scratch_memory",
@@ -569,6 +584,10 @@ def pytest_collection_modifyitems(config, items) -> None:
             _msg = nic_unavailable_reason(rocprof_config)
             if _msg is not None:
                 item.add_marker(pytest.mark.skip(reason=_msg))
+        if "ainic" in item.keywords:
+            _msg = ainic_unavailable_reason(rocprof_config)
+            if _msg is not None:
+                item.add_marker(pytest.mark.skip(reason=_msg))
         if "kfd" in item.keywords or "unified_memory" in item.keywords:
             _msg = kfd_unavailable_reason(rocprof_config)
             if _msg is not None:
@@ -599,6 +618,34 @@ def pytest_collection_modifyitems(config, items) -> None:
                     item.add_marker(
                         pytest.mark.skip(
                             reason=f"oshrun version {'.'.join(map(str, system_version))} < required {req_version}"
+                        )
+                    )
+        if "amdsmi_min_version" in item.keywords:
+            req_version = item.get_closest_marker("amdsmi_min_version").args[0]
+            system_version = rocprof_config.capabilities.amdsmi_version
+            if system_version is None:
+                item.add_marker(pytest.mark.skip(reason="AMD-SMI version not found"))
+            else:
+                min_parts = req_version.split(".")
+                min_tuple = tuple(int(p) for p in (min_parts + ["0", "0"])[:2])
+                if system_version < min_tuple:
+                    item.add_marker(
+                        pytest.mark.skip(
+                            reason=f"AMD-SMI {'.'.join(map(str, system_version))} < required {req_version}"
+                        )
+                    )
+        if "amdgpu_min_version" in item.keywords:
+            req_version = item.get_closest_marker("amdgpu_min_version").args[0]
+            system_version = rocprof_config.capabilities.amdgpu_version
+            if system_version is None:
+                item.add_marker(pytest.mark.skip(reason="amdgpu version not found"))
+            else:
+                min_parts = req_version.split(".")
+                min_tuple = tuple(int(p) for p in (min_parts + ["0", "0", "0"])[:3])
+                if system_version < min_tuple:
+                    item.add_marker(
+                        pytest.mark.skip(
+                            reason=f"amdgpu {'.'.join(map(str, system_version))} < required {req_version}"
                         )
                     )
         if "run_if_gpu_category" in item.keywords:
@@ -761,10 +808,9 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 def overflow_unavailable_reason(rocprof_config: RocprofsysConfig) -> Optional[str]:
-    caps = rocprof_config.capabilities
-    if caps.perf_event_paranoid <= 3 or caps.cap_sys_admin or caps.cap_perfmon:
+    if rocprof_config.capabilities.perf_events_usable:
         return None
-    return "Requires either perf_event_paranoid <= 3, CAP_SYS_ADMIN, or CAP_PERFMON to be available"
+    return "Requires either perf_event_paranoid <= 2 or CAP_SYS_ADMIN to be available"
 
 
 def gpu_unavailable_reason() -> Optional[str]:
@@ -794,9 +840,19 @@ def attach_unavailable_reason(rocprof_config: RocprofsysConfig) -> Optional[str]
 
 def nic_unavailable_reason(rocprof_config: RocprofsysConfig) -> Optional[str]:
     caps = rocprof_config.capabilities
-    if caps.papi_nic_events is not None and caps.perf_event_paranoid <= 2:
+    if caps.papi_nic_events is not None and caps.perf_events_usable:
         return None
-    return "Requires PAPI network events and perf_event_paranoid <= 2 to be available"
+    return "Requires PAPI network events and perf_event_paranoid <= 2 (or CAP_SYS_ADMIN) to be available"
+
+
+def ainic_unavailable_reason(rocprof_config: RocprofsysConfig) -> Optional[str]:
+    """Check if AI NIC tracking is available.
+
+    Requires ``amd-smi static`` to report at least one NETDEV entry.
+    """
+    if not rocprof_config.capabilities.ai_nic_devices:
+        return "No AI NIC devices found (amd-smi static reports no NETDEV entries)"
+    return None
 
 
 def kfd_unavailable_reason(rocprof_config: RocprofsysConfig) -> Optional[str]:
@@ -861,6 +917,153 @@ def shmem_unavailable_reason(rocprof_config: RocprofsysConfig) -> Optional[str]:
     if rocprof_config.capabilities.oshrun_exec:
         return None
     return "SHMEM not available"
+
+
+# ----------------------------------------------------------------------------
+# Test-category (tier) label injection from test_categories.yaml
+# ----------------------------------------------------------------------------
+# Single source of truth for tier policy is tests/test_categories.yaml.
+# At CTest-generate time we read the YAML and append tier labels to each
+# test's emitted LABELS set, so `ctest -L <tier>` Just Works from the
+# installed share/rocprofiler-systems/tests directory.
+
+TIER_ORDER = ["quick", "standard", "comprehensive", "full"]
+
+
+@lru_cache(maxsize=1)
+def _load_test_categories() -> Optional[dict]:
+    """Load and compile test_categories.yaml from rocprofsys_tests_dir.
+
+    Reads the YAML that CMake installs/configures into
+    ``<build|install>/share/rocprofiler-systems/tests`` (resolved via
+    ``get_rocprof_config().rocprofsys_tests_dir``) rather than the
+    source-tree copy, so build-tree edits and the installed layout both
+    pick up the right file.
+
+    Returns ``None`` (with a single STDERR warning) when the YAML is missing or
+    PyYAML isn't importable - the conftest stays usable in sparse / standalone
+    checkouts that don't carry the test-filter standardisation files.
+
+    Pattern semantics intentionally mirror CTest ``--tests-regex`` (substring
+    regex via ``re.search``), so legacy patterns from
+    test_rocprofiler_systems.py port over unchanged.
+    """
+    if yaml is None:
+        print(
+            "[test_categories] PyYAML not available - skipping tier label injection.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        yaml_path = get_rocprof_config().rocprofsys_tests_dir / "test_categories.yaml"
+    except Exception as exc:
+        print(
+            f"[test_categories] Could not resolve tests dir - skipping tier label injection: {exc}",
+            file=sys.stderr,
+        )
+        return None
+    if not yaml_path.exists():
+        print(
+            f"[test_categories] {yaml_path} not found - skipping tier label injection.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        data = yaml.safe_load(yaml_path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        print(
+            f"[test_categories] Failed to load {yaml_path}: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    def _compile_list(patterns):
+        compiled = []
+        for p in patterns or []:
+            # A YAML alias of a sequence (e.g. `- *common_excludes`) substitutes
+            # the anchored list as a single element, producing a list-of-lists
+            # here. Flatten one level so callers can mix shared anchors with
+            # per-tier additions, mirroring the idiom at
+            # shared/ctest/parse_test_categories.py (`exclude_gpu.test_patterns`,
+            # see comment "test_patterns may be either a flat list or list-of-lists").
+            for pattern in p if isinstance(p, list) else [p]:
+                try:
+                    compiled.append(re.compile(pattern))
+                except re.error as exc:
+                    print(
+                        f"[test_categories] Skipping invalid regex {pattern!r}: {exc}",
+                        file=sys.stderr,
+                    )
+        return compiled
+
+    def _flatten_labels(values):
+        # Mirror _compile_list's one-level flattening for plain label lists
+        # (excluded_labels / labels). A YAML alias of a sequence (e.g.
+        # `- *heavy_labels`) substitutes the anchored list as a single element,
+        # so callers can mix a shared anchor with per-tier additions, e.g.
+        #   excluded_labels:
+        #     - *heavy_labels
+        #     - "openmp"
+        # Without flattening, set([[...], "openmp"]) raises TypeError on the
+        # unhashable inner list.
+        flat = []
+        for v in values or []:
+            flat.extend(v if isinstance(v, list) else [v])
+        return flat
+
+    tier_cfg: dict = {}
+    for tier in TIER_ORDER:
+        cfg = (data.get("test_categories", {}) or {}).get(tier) or {}
+        tier_cfg[tier] = {
+            "include": _compile_list(cfg.get("test_patterns")),
+            "exclude": _compile_list(cfg.get("exclude")),
+            "excluded_labels": set(_flatten_labels(cfg.get("excluded_labels"))),
+            # Supplementary CTest labels declared by the tier (e.g. quick's
+            # `pre-commit` / `smoke`, comprehensive's `nightly`). Emitted in
+            # addition to the tier name by _resolve_tier_labels().
+            "labels": _flatten_labels(cfg.get("labels")),
+        }
+
+    return {"tiers": tier_cfg}
+
+
+def _resolve_tier_labels(test_name: str, existing_labels: set[str]) -> set[str]:
+    """Return tier labels (subset of TIER_ORDER) for *test_name*.
+
+    Each tier is evaluated independently. A test is granted tier T iff:
+      * its name matches any of T's ``test_patterns``,
+      * its name does NOT match any of T's ``exclude`` patterns, AND
+      * none of its ``existing_labels`` (pytest-marker-derived) appear in
+        T's ``excluded_labels``.
+
+    The rocJenkins-style cascade ("matching quick also yields standard /
+    comprehensive / full") is achieved by having those higher tiers use
+    broad include patterns (typically ``test_patterns: [".*"]``). Per-tier
+    ``exclude`` punches a hole through the cascade for individual tests:
+    listing ``testA`` under ``standard.exclude`` drops ``standard`` from
+    its label set even if ``quick`` / ``comprehensive`` / ``full`` match.
+
+    In addition to the tier name, each matched tier contributes its
+    supplementary ``labels:`` (e.g. ``pre-commit`` / ``smoke`` for quick,
+    ``nightly`` for comprehensive), so ``ctest -L <alias>`` works for the
+    aliases declared in test_categories.yaml.
+    """
+    categories = _load_test_categories()
+    if not categories:
+        return set()
+    matched_indices: list[int] = []
+    extra_labels: set[str] = set()
+    for i, tier in enumerate(TIER_ORDER):
+        cfg = categories["tiers"].get(tier) or {}
+        if not any(p.search(test_name) for p in cfg.get("include", [])):
+            continue
+        if any(p.search(test_name) for p in cfg.get("exclude", [])):
+            continue
+        if existing_labels & cfg.get("excluded_labels", set()):
+            continue
+        matched_indices.append(i)
+        extra_labels.update(cfg.get("labels", []))
+    return {TIER_ORDER[i] for i in matched_indices} | extra_labels
 
 
 # ----------------------------------------------------------------------------
@@ -1072,6 +1275,8 @@ def _ctest_generate_tests(
         "no_docker",
         "oshrun_min_version",
         "rocm_min_version",
+        "amdsmi_min_version",
+        "amdgpu_min_version",
         "run_if_gpu_category",
         "preserve",
         # For CTests
@@ -1121,6 +1326,10 @@ def _ctest_generate_tests(
             else:
                 args_str = ", ".join(str(a) for a in marker.args)
                 labels.add(f"{marker.name}[{args_str}]")
+
+        # Inject tier (quick/standard/comprehensive/full) labels from
+        # test_categories.yaml
+        labels |= _resolve_tier_labels(test_name, labels)
 
         escaped_name = _cmake_escape(test_name)
 
@@ -1302,6 +1511,18 @@ def _generate_rocprofsys_config_header() -> list[str]:
     else:
         oshrun_version_str = "Not found"
 
+    if cap.amdsmi_version is not None:
+        amdsmi_version_str = f"{cap.amdsmi_version[0]}.{cap.amdsmi_version[1]}"
+    else:
+        amdsmi_version_str = "Not found"
+
+    if cap.amdgpu_version is not None:
+        amdgpu_version_str = (
+            f"{cap.amdgpu_version[0]}.{cap.amdgpu_version[1]}.{cap.amdgpu_version[2]}"
+        )
+    else:
+        amdgpu_version_str = "Not found"
+
     # Rocprofiler SDK version
     rocprofiler_sdk_version_str = (
         f"{cap.rocprofiler_sdk_version[0]}.{cap.rocprofiler_sdk_version[1]}.{cap.rocprofiler_sdk_version[2]}"
@@ -1324,6 +1545,8 @@ def _generate_rocprofsys_config_header() -> list[str]:
         "=" * 70,
         _row("ROCm version:", rocm_version),
         _row("ROCprof-SDK version:", rocprofiler_sdk_version_str),
+        _row("AMD-SMI version:", amdsmi_version_str),
+        _row("amdgpu version:", amdgpu_version_str),
         _row("ROCm path:", rocprof_config.rocm_path),
         _row("Is installed:", rocprof_config.is_installed),
         _row("Output dir:", rocprof_config.test_output_dir),
@@ -1353,16 +1576,17 @@ def _generate_rocprofsys_config_header() -> list[str]:
         _row("Perf event paranoid:", cap.perf_event_paranoid),
         _row("CAP_SYS_ADMIN:", cap.cap_sys_admin),
         _row("CAP_PERFMON:", cap.cap_perfmon),
+        _row("Perf events usable:", cap.perf_events_usable),
         _row("Ptrace scope:", cap.ptrace_scope),
         _row("Is inside docker:", rocprof_config.capabilities.is_inside_docker),
         _row("PAPI available:", cap.papi_availability),
+        _row("AI NIC devices:", cap.ai_nic_devices),
         _row("Default NIC:", cap.default_nic),
         *(
             lambda evts: (
-                [_subrow("PAPI NIC events:", evts[0])]
-                + [_subrow("", e) for e in evts[1:]]
+                [_row("PAPI NIC events:", evts[0])] + [_row("", e) for e in evts[1:]]
                 if evts
-                else [_subrow("PAPI NIC events:", "None")]
+                else [_row("PAPI NIC events:", "None")]
             )
         )(cap.papi_nic_events.split() if cap.papi_nic_events else []),
         "-" * 70,
@@ -1947,6 +2171,69 @@ def _is_assert_disabled(request: pytest.FixtureRequest, subtest_name: str) -> bo
     return False
 
 
+# Contains a set of kwargs accepted for a given (function, mode) pair.
+_FUNCTION_ALLOWED_KWARGS: dict[str, dict[str, set[str]]] = {
+    "run_test": {
+        "baseline": {"command"},
+        "sampling": {"sampling_args"},
+        "binary_rewrite": {"binary_rewrite_args", "cleanup_on_success"},
+        "runtime_instrument": {"runtime_instrument_args"},
+        "sys_run": {"sys_run_args"},
+        "causal": {"causal_args", "causal_mode"},
+        "python": {"python_version", "profile_args", "annotated", "standalone"},
+    },
+    "assert_regex": {
+        "baseline": {"baseline_pass_regex", "baseline_fail_regex"},
+        "sampling": {"sampling_pass_regex", "sampling_fail_regex"},
+        "binary_rewrite": {"binary_rewrite_pass_regex", "binary_rewrite_fail_regex"},
+        "runtime_instrument": {
+            "runtime_instrument_pass_regex",
+            "runtime_instrument_fail_regex",
+        },
+        "sys_run": {"sys_run_pass_regex", "sys_run_fail_regex"},
+        "causal": {"causal_pass_regex", "causal_fail_regex"},
+        "python": {"python_pass_regex", "python_fail_regex"},
+    },
+}
+
+
+def _filter_kwargs(function: str, mode: str, **kwargs: Any) -> dict[str, Any]:
+    """Filter ``kwargs`` to those accepted by ``function`` for ``mode``.
+
+    This also verifies that the kwargs passed are valid for the given function.
+    If a kwarg is not valid, pytest.fail is called.
+
+    Returns:
+        A new dict containing only kwargs valid for ``(function, mode)``.
+    """
+    allowed_per_mode = _FUNCTION_ALLOWED_KWARGS.get(function)
+    if allowed_per_mode is None:
+        pytest.fail(
+            f"_filter_kwargs called with unknown function '{function}'. "
+            f"Expected one of: {sorted(_FUNCTION_ALLOWED_KWARGS.keys())}."
+        )
+
+    mode_key = mode.replace("-", "_")
+    allowed_for_mode = allowed_per_mode.get(mode_key)
+    if allowed_for_mode is None:
+        pytest.fail(
+            f"Unknown mode '{mode}' for '{function}'. "
+            f"Expected one of: {sorted(allowed_per_mode.keys())}."
+        )
+
+    # Union of every kwarg accepted by any mode of this function. Anything
+    # outside this set is considered a typo and an error is raised.
+    all_known_for_function: set[str] = set().union(*allowed_per_mode.values())
+    unknown = set(kwargs) - all_known_for_function
+    if unknown:
+        pytest.fail(
+            f"{function}: unknown kwargs {sorted(unknown)}. "
+            f"Valid kwargs across all modes: {sorted(all_known_for_function)}."
+        )
+
+    return {k: v for k, v in kwargs.items() if k in allowed_for_mode}
+
+
 # ============================================================================
 # Base Test Class
 # ============================================================================
@@ -2017,7 +2304,7 @@ def run_test(
         fail_on_not_found: If True, pytest.fail when binary not found (default: False = skip)
         fail_message: Custom failure message (default: "{runner_type} test failed: {output}")
         no_base_env: If true, don't use the base environment (default: False)
-        **kwargs: Additional runner-specific arguments (sample_args, rewrite_args, etc.)
+        **kwargs: Additional runner-specific arguments (see _FUNCTION_ALLOWED_KWARGS for valid kwargs)
 
     Returns:
         TestResult for further assertions
@@ -2040,18 +2327,13 @@ def run_test(
         no_base_env: bool = False,
         **kwargs,
     ) -> TestResult:
-        # Filter kwargs to only pass runner-specific args that each runner accepts.
-        runner_specific_args = {
-            "baseline": {"command"},
-            "sampling": {"sample_args"},
-            "binary_rewrite": {"rewrite_args", "cleanup_on_success"},
-            "runtime_instrument": {"runtime_args"},
-            "sys_run": {"sysrun_args"},
-            "causal": {"causal_args", "causal_mode"},
-            "python": {"python_version", "profile_args", "annotated", "standalone"},
-        }
-        allowed_args = runner_specific_args.get(runner_type, set())
-        filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_args}
+        filtered_kwargs = _filter_kwargs("run_test", runner_type, **kwargs)
+
+        if num_procs > 0 and launcher is None:
+            pytest.fail(
+                f"num_procs={num_procs} was provided but no launcher was set. "
+                f"Pass launcher='<launcher_name>' alongside num_procs."
+            )
 
         if runner_type == "causal" and "causal_mode" not in filtered_kwargs:
             pytest.exit("causal_mode is required for causal tests", returncode=1)
@@ -2176,13 +2458,14 @@ def assert_regex(subtests, record_subtest_failure, request):
     Args:
         result: TestResult from run_test
         mode: Optional runner type (e.g., "binary_rewrite", "sys_run"). If provided, looks up
-              mode-specific regexes from kwargs (e.g., rewrite_pass_regex, sys_run_pass_regex)
+              mode-specific regexes from kwargs (see _FUNCTION_ALLOWED_KWARGS for valid kwargs)
         subtest_name: Name shown in subtest output (defaults to "Regex validation")
         pass_regex: Explicit list of pass regex patterns (used if mode is None or no mode-specific found)
         fail_regex: Explicit list of fail regex patterns (used if mode is None or no mode-specific found)
+        use_abort_fail_regex: Whether to validate against ROCPROFSYS_ABORT_FAIL_REGEX (default: True)
         skip_on_fail: If True, skip instead of fail when validation fails
         fail_message: Custom message for failure (defaults to validation message)
-        **kwargs: Mode-specific regexes like rewrite_pass_regex, sys_run_fail_regex, etc.
+        **kwargs: Mode-specific regexes (see _FUNCTION_ALLOWED_KWARGS for valid kwargs)
     """
     if _is_assert_disabled(request, "assert_regex"):
         return lambda *args, **kwargs: None
@@ -2198,12 +2481,23 @@ def assert_regex(subtests, record_subtest_failure, request):
         fail_message: Optional[str] = None,
         **kwargs,
     ) -> None:
-        # If mode is provided, look up mode-specific regexes from kwargs
+
+        if mode is None and kwargs:
+            pytest.fail(
+                f"assert_regex received mode-specific kwargs {sorted(kwargs)} but no "
+                f"'mode' was provided. Pass mode=... so they can be resolved, or use "
+                f"pass_regex/fail_regex directly."
+            )
+
         if mode is not None:
-            # Normalize mode name (hyphens to underscores)
+            filtered = _filter_kwargs("assert_regex", mode, **kwargs)
             mode_key = mode.replace("-", "_")
-            pass_regex = kwargs.get(f"{mode_key}_pass_regex") or pass_regex
-            fail_regex = kwargs.get(f"{mode_key}_fail_regex") or fail_regex
+            mode_pass_regex = filtered.get(f"{mode_key}_pass_regex")
+            if mode_pass_regex is not None:
+                pass_regex = mode_pass_regex
+            mode_fail_regex = filtered.get(f"{mode_key}_fail_regex")
+            if mode_fail_regex is not None:
+                fail_regex = mode_fail_regex
 
         with subtests.test(subtest_name):
             validation = validate_regex(
@@ -2366,6 +2660,8 @@ def assert_rocpd(subtests, tests_dir, record_subtest_failure, request):
         fail_regex: (Optional) Regex patterns that must NOT be found in validation.stdout
         skip_on_fail: If True, skip instead of fail when validation fails
         fail_message: Custom message for failure (defaults to validation message)
+        gpu_category_to_skip: GPU categories to skip tagged validation queries for
+            (instinct, radeon, apu). Omit or pass empty to run all queries
     """
     if _is_assert_disabled(request, "assert_rocpd"):
         return lambda *args, **kwargs: None
@@ -2379,6 +2675,7 @@ def assert_rocpd(subtests, tests_dir, record_subtest_failure, request):
         fail_regex: Optional[list[str]] = None,
         skip_on_fail: bool = False,
         fail_message: Optional[str] = None,
+        gpu_category_to_skip: Optional[list[str]] = None,
     ) -> None:
         with subtests.test(subtest_name):
             if not check_use_rocpd():
@@ -2400,6 +2697,7 @@ def assert_rocpd(subtests, tests_dir, record_subtest_failure, request):
                 tests_dir=tests_dir,
                 rules_files=existing_rules,
                 timeout=timeout,
+                gpu_category_to_skip=gpu_category_to_skip,
             )
             output = f"Command: {validation.command}\n\n{validation.message}"
             if not validation.is_valid:

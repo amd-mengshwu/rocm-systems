@@ -29,8 +29,10 @@ struct DispatchEntry {
   uint32_t sgprs_per_wf = 104;
   uint32_t vgprs_per_wf = 256;
   uint64_t kernarg_addr = 0;
+  uint32_t kernarg_size = 0;
   uint32_t num_user_sgprs = 2;
   uint32_t kernel_code_properties = 0;
+  uint16_t kernarg_preload = 0;
   uint64_t dispatch_ptr = 0;
   uint64_t queue_ptr = 0;
   uint32_t workgroup_id_offset = 0;
@@ -60,6 +62,30 @@ struct DispatchEntry {
   bool fully_completed() const { return completed_wgs >= total_wgs; }
   bool is_non_kernel() const { return total_wgs == 0; }
 };
+
+inline uint32_t dispatch_workgroup_size(const DispatchEntry &entry) {
+  auto dim = [](uint16_t value) -> uint32_t { return value == 0 ? 1u : value; };
+  return dim(entry.workgroup_size_x) * dim(entry.workgroup_size_y) * dim(entry.workgroup_size_z);
+}
+
+inline uint64_t wave_lane_mask(uint32_t wave_size) {
+  if (wave_size >= 64)
+    return ~0ULL;
+  if (wave_size == 0)
+    return 0;
+  return (1ULL << wave_size) - 1;
+}
+
+inline uint64_t initial_exec_mask_for_wave(const DispatchEntry &entry, uint32_t wf_index_in_wg,
+                                           uint32_t wave_size) {
+  uint32_t wg_size = dispatch_workgroup_size(entry);
+  uint32_t first_lane = wf_index_in_wg * wave_size;
+  if (first_lane >= wg_size)
+    return 0;
+  uint32_t remaining = wg_size - first_lane;
+  uint32_t active_lanes = remaining < wave_size ? remaining : wave_size;
+  return wave_lane_mask(active_lanes);
+}
 
 /// @brief Per-queue state for the command processor.
 ///

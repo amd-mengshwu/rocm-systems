@@ -5,6 +5,8 @@
 #include "rocjitsu/vm/amdgpu/gpu_memory.h"
 #include "util/log.h"
 
+#include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cassert>
 #include <cstring>
@@ -16,9 +18,10 @@ void L2Cache::send_backing(uint64_t addr, uint8_t *data, uint32_t size, simdojo:
                            uint32_t vmid) {
   if (backing_memory_) {
     if (op == simdojo::MessageOp::WRITE) {
-      static uint64_t wb_count = 0;
-      if (++wb_count <= 3)
-        util::Logger::vm("L2 writeback(backing) #", wb_count, " addr=0x", std::hex, addr,
+      static std::atomic<uint64_t> wb_count{0};
+      const uint64_t count = wb_count.fetch_add(1, std::memory_order_relaxed) + 1;
+      if (count <= 3)
+        util::Logger::vm("L2 writeback(backing) #", count, " addr=0x", std::hex, addr,
                          " size=", std::dec, size);
       for (uint32_t i = 0; i < size; ++i)
         backing_memory_->write8(addr + i, data[i], vmid);
@@ -74,11 +77,23 @@ void L2Cache::read(uint64_t addr, uint8_t *dst, uint32_t size, Mtype mtype, uint
     return;
   }
 
-  if (mtype == Mtype::CC)
-    flush_line(addr, vmid);
+  uint32_t copied = 0;
+  while (copied < size) {
+    const uint64_t ea = addr + copied;
+    const uint32_t line_offset = CacheStore::line_offset(ea);
+    const uint32_t chunk = std::min(size - copied, LINE_SIZE - line_offset);
 
-  ensure_line(addr, vmid);
-  cache_.read_line(addr, dst, CacheStore::line_offset(addr), size);
+    if (mtype == Mtype::CC) {
+      // Coherently Cacheable: invalidate L2 line before refetch, mirroring
+      // the L1 CC behavior. This ensures cross-XCD store visibility when
+      // different L2s share a backing store. Dirty data is flushed first.
+      flush_line(ea, vmid);
+    }
+
+    ensure_line(ea, vmid);
+    cache_.read_line(ea, dst + copied, line_offset, chunk);
+    copied += chunk;
+  }
 }
 
 void L2Cache::write(uint64_t addr, const uint8_t *src, uint32_t size, Mtype mtype, uint32_t vmid) {
@@ -87,23 +102,32 @@ void L2Cache::write(uint64_t addr, const uint8_t *src, uint32_t size, Mtype mtyp
     return;
   }
 
-  ensure_line(addr, vmid);
-  cache_.write_line(addr, src, CacheStore::line_offset(addr), size);
+  uint32_t copied = 0;
+  while (copied < size) {
+    const uint64_t ea = addr + copied;
+    const uint32_t line_offset = CacheStore::line_offset(ea);
+    const uint32_t chunk = std::min(size - copied, LINE_SIZE - line_offset);
 
-  simdojo::CacheTag *tag = nullptr;
-  cache_.lookup(addr, &tag);
-  assert(tag != nullptr && "ensure_line must guarantee hit");
+    ensure_line(ea, vmid);
+    cache_.write_line(ea, src + copied, line_offset, chunk);
 
-  // Write through to backing store. In the simulator, GPU virtual addresses
-  // are host-mapped (MAP_FIXED), so hipMemcpy reads from backing store
-  // directly. Without write-through, stores remain in L2 and never reach
-  // host-visible pages.
-  send_backing(addr, const_cast<uint8_t *>(src), size, simdojo::MessageOp::WRITE, vmid);
-  tag->coherence =
-      (mtype == Mtype::CC) ? simdojo::CoherenceState::SHARED : simdojo::CoherenceState::EXCLUSIVE;
-  tag->dirty = false;
+    simdojo::CacheTag *tag = nullptr;
+    cache_.lookup(ea, &tag);
+    assert(tag != nullptr && "ensure_line must guarantee hit");
 
-  ++write_count_;
+    // Write through to backing store for all mtypes. In the simulator, GPU
+    // virtual addresses are host-mapped (MAP_FIXED), so hipMemcpy reads from
+    // backing store directly. Without write-through, RW-mtype stores remain
+    // in L2 as dirty lines and never reach the host-visible pages, causing
+    // stale reads on D2H copy.
+    send_backing(ea, const_cast<uint8_t *>(src + copied), chunk, simdojo::MessageOp::WRITE, vmid);
+    tag->coherence =
+        (mtype == Mtype::CC) ? simdojo::CoherenceState::SHARED : simdojo::CoherenceState::EXCLUSIVE;
+    tag->dirty = false;
+
+    ++write_count_;
+    copied += chunk;
+  }
 }
 
 void L2Cache::fetch_line(uint64_t addr, uint8_t *line_buf, uint32_t vmid) {
