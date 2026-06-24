@@ -824,6 +824,308 @@ class AmdSmiEventReader:
         self.stop()
 
 
+def _apu_metrics_na_dict() -> dict:
+    """Return a dict of all APU metrics keys set to N/A."""
+    return {
+        "apu_metrics.temperature_gfx": "N/A",
+        "apu_metrics.temperature_soc": "N/A",
+        "apu_metrics.temperature_core": "N/A",
+        "apu_metrics.temperature_l3": "N/A",
+        "apu_metrics.temperature_skin": "N/A",
+        "apu_metrics.average_gfx_activity": "N/A",
+        "apu_metrics.average_mm_activity": "N/A",
+        "apu_metrics.average_vcn_activity": "N/A",
+        "apu_metrics.average_ipu_activity": "N/A",
+        "apu_metrics.average_core_c0_activity": "N/A",
+        "apu_metrics.average_dram_reads": "N/A",
+        "apu_metrics.average_dram_writes": "N/A",
+        "apu_metrics.average_ipu_reads": "N/A",
+        "apu_metrics.average_ipu_writes": "N/A",
+        "apu_metrics.average_socket_power": "N/A",
+        "apu_metrics.average_cpu_power": "N/A",
+        "apu_metrics.average_soc_power": "N/A",
+        "apu_metrics.average_gfx_power": "N/A",
+        "apu_metrics.average_core_power": "N/A",
+        "apu_metrics.average_ipu_power": "N/A",
+        "apu_metrics.average_apu_power": "N/A",
+        "apu_metrics.average_dgpu_power": "N/A",
+        "apu_metrics.average_all_core_power": "N/A",
+        "apu_metrics.average_sys_power": "N/A",
+        "apu_metrics.stapm_power_limit": "N/A",
+        "apu_metrics.current_stapm_power_limit": "N/A",
+        "apu_metrics.average_gfxclk_frequency": "N/A",
+        "apu_metrics.average_socclk_frequency": "N/A",
+        "apu_metrics.average_uclk_frequency": "N/A",
+        "apu_metrics.average_fclk_frequency": "N/A",
+        "apu_metrics.average_vclk_frequency": "N/A",
+        "apu_metrics.average_dclk_frequency": "N/A",
+        "apu_metrics.average_vpeclk_frequency": "N/A",
+        "apu_metrics.average_ipuclk_frequency": "N/A",
+        "apu_metrics.average_mpipu_frequency": "N/A",
+        "apu_metrics.current_gfxclk": "N/A",
+        "apu_metrics.current_socclk": "N/A",
+        "apu_metrics.current_uclk": "N/A",
+        "apu_metrics.current_fclk": "N/A",
+        "apu_metrics.current_vclk": "N/A",
+        "apu_metrics.current_dclk": "N/A",
+        "apu_metrics.current_coreclk": "N/A",
+        "apu_metrics.current_l3clk": "N/A",
+        "apu_metrics.current_core_maxfreq": "N/A",
+        "apu_metrics.current_gfx_maxfreq": "N/A",
+        "apu_metrics.throttle_status": "N/A",
+        "apu_metrics.indep_throttle_status": "N/A",
+        "apu_metrics.throttle_residency_prochot": "N/A",
+        "apu_metrics.throttle_residency_spl": "N/A",
+        "apu_metrics.throttle_residency_fppt": "N/A",
+        "apu_metrics.throttle_residency_sppt": "N/A",
+        "apu_metrics.throttle_residency_thm_core": "N/A",
+        "apu_metrics.throttle_residency_thm_gfx": "N/A",
+        "apu_metrics.throttle_residency_thm_soc": "N/A",
+        "apu_metrics.fan_pwm": "N/A",
+        "apu_metrics.average_temperature_gfx": "N/A",
+        "apu_metrics.average_temperature_soc": "N/A",
+        "apu_metrics.average_temperature_core": "N/A",
+        "apu_metrics.average_temperature_l3": "N/A",
+        "apu_metrics.average_cpu_voltage": "N/A",
+        "apu_metrics.average_soc_voltage": "N/A",
+        "apu_metrics.average_gfx_voltage": "N/A",
+        "apu_metrics.average_cpu_current": "N/A",
+        "apu_metrics.average_soc_current": "N/A",
+        "apu_metrics.average_gfx_current": "N/A",
+        "apu_metrics.time_filter_alphavalue": "N/A",
+    }
+
+
+def _convert_apu_unit(value, divisor):
+    """Convert a validated APU metrics value by the given divisor.
+
+    Handles scalars, lists, and "N/A" pass-through.
+    """
+    if value == "N/A":
+        return "N/A"
+    if isinstance(value, list):
+        return [round(v / divisor, 2) if v != "N/A" else "N/A" for v in value]
+    return round(value / divisor, 2)
+
+
+def _populate_apu_metrics(apu):
+    """Build the apu_metrics.* dict from an AmdSmiApuMetrics ctypes struct.
+
+    Unit conversions applied here:
+      - temperatures  : centidegrees -> degrees C  (/ 100)
+      - power         : milliwatts   -> watts      (/ 1000)
+      - clocks        : already MHz (no conversion)
+      - activity      : already %   (no conversion)
+    """
+    return {
+        # --- temperatures (centidegrees -> C) ---
+        "apu_metrics.temperature_gfx": _convert_apu_unit(
+            _validate_if_max_uint(apu.temperature_gfx, MaxUIntegerTypes.UINT16_T), 100
+        ),
+        "apu_metrics.temperature_soc": _convert_apu_unit(
+            _validate_if_max_uint(apu.temperature_soc, MaxUIntegerTypes.UINT16_T), 100
+        ),
+        "apu_metrics.temperature_core": _convert_apu_unit(
+            _validate_if_max_uint(list(apu.temperature_core), MaxUIntegerTypes.UINT16_T), 100
+        ),
+        "apu_metrics.temperature_l3": _convert_apu_unit(
+            _validate_if_max_uint(list(apu.temperature_l3), MaxUIntegerTypes.UINT16_T), 100
+        ),
+        "apu_metrics.temperature_skin": _convert_apu_unit(
+            _validate_if_max_uint(apu.temperature_skin, MaxUIntegerTypes.UINT16_T), 100
+        ),
+        "apu_metrics.average_temperature_gfx": _convert_apu_unit(
+            _validate_if_max_uint(apu.average_temperature_gfx, MaxUIntegerTypes.UINT16_T), 100
+        ),
+        "apu_metrics.average_temperature_soc": _convert_apu_unit(
+            _validate_if_max_uint(apu.average_temperature_soc, MaxUIntegerTypes.UINT16_T), 100
+        ),
+        "apu_metrics.average_temperature_core": _convert_apu_unit(
+            _validate_if_max_uint(list(apu.average_temperature_core), MaxUIntegerTypes.UINT16_T),
+            100,
+        ),
+        "apu_metrics.average_temperature_l3": _convert_apu_unit(
+            _validate_if_max_uint(list(apu.average_temperature_l3), MaxUIntegerTypes.UINT16_T), 100
+        ),
+        # --- activities (already %) ---
+        "apu_metrics.average_gfx_activity": _validate_if_max_uint(
+            apu.average_gfx_activity, MaxUIntegerTypes.UINT16_T, isActivity=True
+        ),
+        "apu_metrics.average_mm_activity": _validate_if_max_uint(
+            apu.average_mm_activity, MaxUIntegerTypes.UINT16_T, isActivity=True
+        ),
+        "apu_metrics.average_vcn_activity": _validate_if_max_uint(
+            apu.average_vcn_activity, MaxUIntegerTypes.UINT16_T, isActivity=True
+        ),
+        "apu_metrics.average_ipu_activity": _validate_if_max_uint(
+            list(apu.average_ipu_activity), MaxUIntegerTypes.UINT16_T, isActivity=True
+        ),
+        "apu_metrics.average_core_c0_activity": _validate_if_max_uint(
+            list(apu.average_core_c0_activity), MaxUIntegerTypes.UINT16_T, isActivity=True
+        ),
+        "apu_metrics.average_dram_reads": _validate_if_max_uint(
+            apu.average_dram_reads, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_dram_writes": _validate_if_max_uint(
+            apu.average_dram_writes, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_ipu_reads": _validate_if_max_uint(
+            apu.average_ipu_reads, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_ipu_writes": _validate_if_max_uint(
+            apu.average_ipu_writes, MaxUIntegerTypes.UINT16_T
+        ),
+        # --- power (mW -> W) ---
+        "apu_metrics.average_socket_power": _convert_apu_unit(
+            _validate_if_max_uint(apu.average_socket_power, MaxUIntegerTypes.UINT32_T), 1000
+        ),
+        "apu_metrics.average_cpu_power": _convert_apu_unit(
+            _validate_if_max_uint(apu.average_cpu_power, MaxUIntegerTypes.UINT16_T), 1000
+        ),
+        "apu_metrics.average_soc_power": _convert_apu_unit(
+            _validate_if_max_uint(apu.average_soc_power, MaxUIntegerTypes.UINT16_T), 1000
+        ),
+        "apu_metrics.average_gfx_power": _convert_apu_unit(
+            _validate_if_max_uint(apu.average_gfx_power, MaxUIntegerTypes.UINT32_T), 1000
+        ),
+        "apu_metrics.average_core_power": _convert_apu_unit(
+            _validate_if_max_uint(list(apu.average_core_power), MaxUIntegerTypes.UINT16_T), 1000
+        ),
+        "apu_metrics.average_ipu_power": _convert_apu_unit(
+            _validate_if_max_uint(apu.average_ipu_power, MaxUIntegerTypes.UINT16_T), 1000
+        ),
+        "apu_metrics.average_apu_power": _convert_apu_unit(
+            _validate_if_max_uint(apu.average_apu_power, MaxUIntegerTypes.UINT32_T), 1000
+        ),
+        "apu_metrics.average_dgpu_power": _convert_apu_unit(
+            _validate_if_max_uint(apu.average_dgpu_power, MaxUIntegerTypes.UINT32_T), 1000
+        ),
+        "apu_metrics.average_all_core_power": _convert_apu_unit(
+            _validate_if_max_uint(apu.average_all_core_power, MaxUIntegerTypes.UINT32_T), 1000
+        ),
+        "apu_metrics.average_sys_power": _convert_apu_unit(
+            _validate_if_max_uint(apu.average_sys_power, MaxUIntegerTypes.UINT16_T), 1000
+        ),
+        "apu_metrics.stapm_power_limit": _convert_apu_unit(
+            _validate_if_max_uint(apu.stapm_power_limit, MaxUIntegerTypes.UINT16_T), 1000
+        ),
+        "apu_metrics.current_stapm_power_limit": _convert_apu_unit(
+            _validate_if_max_uint(apu.current_stapm_power_limit, MaxUIntegerTypes.UINT16_T), 1000
+        ),
+        # --- clocks (already MHz) ---
+        "apu_metrics.average_gfxclk_frequency": _validate_if_max_uint(
+            apu.average_gfxclk_frequency, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_socclk_frequency": _validate_if_max_uint(
+            apu.average_socclk_frequency, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_uclk_frequency": _validate_if_max_uint(
+            apu.average_uclk_frequency, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_fclk_frequency": _validate_if_max_uint(
+            apu.average_fclk_frequency, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_vclk_frequency": _validate_if_max_uint(
+            apu.average_vclk_frequency, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_dclk_frequency": _validate_if_max_uint(
+            apu.average_dclk_frequency, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_vpeclk_frequency": _validate_if_max_uint(
+            apu.average_vpeclk_frequency, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_ipuclk_frequency": _validate_if_max_uint(
+            apu.average_ipuclk_frequency, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_mpipu_frequency": _validate_if_max_uint(
+            apu.average_mpipu_frequency, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.current_gfxclk": _validate_if_max_uint(
+            apu.current_gfxclk, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.current_socclk": _validate_if_max_uint(
+            apu.current_socclk, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.current_uclk": _validate_if_max_uint(
+            apu.current_uclk, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.current_fclk": _validate_if_max_uint(
+            apu.current_fclk, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.current_vclk": _validate_if_max_uint(
+            apu.current_vclk, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.current_dclk": _validate_if_max_uint(
+            apu.current_dclk, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.current_coreclk": _validate_if_max_uint(
+            list(apu.current_coreclk), MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.current_l3clk": _validate_if_max_uint(
+            list(apu.current_l3clk), MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.current_core_maxfreq": _validate_if_max_uint(
+            apu.current_core_maxfreq, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.current_gfx_maxfreq": _validate_if_max_uint(
+            apu.current_gfx_maxfreq, MaxUIntegerTypes.UINT16_T
+        ),
+        # --- voltages/currents (already mV/mA) ---
+        "apu_metrics.average_cpu_voltage": _validate_if_max_uint(
+            apu.average_cpu_voltage, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_soc_voltage": _validate_if_max_uint(
+            apu.average_soc_voltage, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_gfx_voltage": _validate_if_max_uint(
+            apu.average_gfx_voltage, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_cpu_current": _validate_if_max_uint(
+            apu.average_cpu_current, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_soc_current": _validate_if_max_uint(
+            apu.average_soc_current, MaxUIntegerTypes.UINT16_T
+        ),
+        "apu_metrics.average_gfx_current": _validate_if_max_uint(
+            apu.average_gfx_current, MaxUIntegerTypes.UINT16_T
+        ),
+        # --- throttle ---
+        "apu_metrics.throttle_status": _validate_if_max_uint(
+            apu.throttle_status, MaxUIntegerTypes.UINT32_T, isBool=True
+        ),
+        "apu_metrics.indep_throttle_status": _validate_if_max_uint(
+            apu.indep_throttle_status, MaxUIntegerTypes.UINT64_T, isBool=True
+        ),
+        "apu_metrics.throttle_residency_prochot": _validate_if_max_uint(
+            apu.throttle_residency_prochot, MaxUIntegerTypes.UINT32_T
+        ),
+        "apu_metrics.throttle_residency_spl": _validate_if_max_uint(
+            apu.throttle_residency_spl, MaxUIntegerTypes.UINT32_T
+        ),
+        "apu_metrics.throttle_residency_fppt": _validate_if_max_uint(
+            apu.throttle_residency_fppt, MaxUIntegerTypes.UINT32_T
+        ),
+        "apu_metrics.throttle_residency_sppt": _validate_if_max_uint(
+            apu.throttle_residency_sppt, MaxUIntegerTypes.UINT32_T
+        ),
+        "apu_metrics.throttle_residency_thm_core": _validate_if_max_uint(
+            apu.throttle_residency_thm_core, MaxUIntegerTypes.UINT32_T
+        ),
+        "apu_metrics.throttle_residency_thm_gfx": _validate_if_max_uint(
+            apu.throttle_residency_thm_gfx, MaxUIntegerTypes.UINT32_T
+        ),
+        "apu_metrics.throttle_residency_thm_soc": _validate_if_max_uint(
+            apu.throttle_residency_thm_soc, MaxUIntegerTypes.UINT32_T
+        ),
+        # --- fan ---
+        "apu_metrics.fan_pwm": _validate_if_max_uint(apu.fan_pwm, MaxUIntegerTypes.UINT16_T),
+        # --- other ---
+        "apu_metrics.time_filter_alphavalue": _validate_if_max_uint(
+            apu.time_filter_alphavalue, MaxUIntegerTypes.UINT32_T
+        ),
+    }
+
+
 def amdsmi_get_socket_handles() -> List[c_void_p]:
     """
     Function that gets socket handles. Wraps the same named function call.
@@ -3850,6 +4152,22 @@ def amdsmi_topo_get_numa_node_number(processor_handle: processor_handle_t):
 def amdsmi_topo_get_link_weight(
     processor_handle_src: processor_handle_t, processor_handle_dst: processor_handle_t
 ):
+    """Return the qualitative link weight between two GPUs.
+
+    The weight is a cost metric derived from the KFD io_link weight property
+    (lower = closer/faster), analogous to numactl NUMA distances:
+
+    - xGMI: 15 per physical hop (e.g. a single-hop xGMI link has weight 15).
+    - PCIe: segments are summed (GPU→CPU + CPU→CPU + CPU→GPU). Each
+      GPU-to-CPU segment is typically 20. The CPU-to-CPU segment uses the
+      actual io_link weight when available; if that weight cannot be read, a
+      fallback of 10 is used for that segment.
+
+    Both handles must be GPU processor handles.
+
+    Returns:
+        int: The link weight.
+    """
     if not isinstance(processor_handle_src, amdsmi_wrapper.amdsmi_processor_handle):
         raise AmdSmiParameterException(processor_handle_src, amdsmi_wrapper.amdsmi_processor_handle)
 
@@ -3920,6 +4238,25 @@ def amdsmi_get_link_metrics(processor_handle: processor_handle_t):
 def amdsmi_topo_get_link_type(
     processor_handle_src: processor_handle_t, processor_handle_dst: processor_handle_t
 ):
+    """Return the abstracted hop count and link type between two GPUs.
+
+    Both handles must be GPU processor handles. The hop count is an abstracted
+    topology step count, not the number of physical xGMI links traversed:
+
+    - 1: The two GPUs are reachable over xGMI, regardless of the number of
+         physical xGMI links on the route.
+    - 2: The two GPUs communicate over PCIe within the same CPU NUMA node.
+    - 3: The two GPUs communicate over PCIe across different CPU NUMA nodes.
+    - 4: Fallback when the inter-CPU io_link weight cannot be read.
+
+    Two GPUs on the same xGMI fabric always report 1 even when data physically
+    crosses multiple xGMI links. For the literal physical xGMI hop count, read
+    ``/sys/class/drm/card*/device/xgmi_num_hops`` from the amdgpu driver.
+
+    Returns:
+        dict: ``{"hops": int, "type": int}`` where ``type`` is a value of
+        :class:`amdsmi_link_type_t`.
+    """
     if not isinstance(processor_handle_src, amdsmi_wrapper.amdsmi_processor_handle):
         raise AmdSmiParameterException(processor_handle_src, amdsmi_wrapper.amdsmi_processor_handle)
 
@@ -5566,6 +5903,15 @@ def amdsmi_get_gpu_metrics_info(processor_handle: processor_handle_t) -> Dict[st
             for val in xcp_metrics.temperature_xcd:
                 xcp_detail.append(_validate_if_max_uint(val, MaxUIntegerTypes.UINT16_T))
             gpu_metrics_output["xcp_stats.temperature_xcd"][xcp_index] = xcp_detail
+
+    # APU metrics integration
+    gpu_metrics_output["is_apu"] = bool(gpu_metrics.apu_metrics)
+    if gpu_metrics.apu_metrics:
+        apu = gpu_metrics.apu_metrics.contents
+        gpu_metrics_output.update(_populate_apu_metrics(apu))
+    else:
+        gpu_metrics_output.update(_apu_metrics_na_dict())
+
     return gpu_metrics_output
 
 
@@ -5893,6 +6239,15 @@ def amdsmi_get_gpu_partition_metrics_info(processor_handle: processor_handle_t) 
             for val in xcp_metrics.temperature_xcd:
                 xcp_detail.append(_validate_if_max_uint(val, MaxUIntegerTypes.UINT16_T))
             gpu_metrics_output["xcp_stats.temperature_xcd"][xcp_index] = xcp_detail
+
+    # APU metrics integration
+    gpu_metrics_output["is_apu"] = bool(gpu_metrics.apu_metrics)
+    if gpu_metrics.apu_metrics:
+        apu = gpu_metrics.apu_metrics.contents
+        gpu_metrics_output.update(_populate_apu_metrics(apu))
+    else:
+        gpu_metrics_output.update(_apu_metrics_na_dict())
+
     return gpu_metrics_output
 
 
