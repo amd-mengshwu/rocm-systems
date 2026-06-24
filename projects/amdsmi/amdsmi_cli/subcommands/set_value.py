@@ -1757,9 +1757,13 @@ class SetValueCommands:
 
                 if lim_type == "min":
                     amdsmi_lim_type = amdsmi_interface.AmdSmiClkLimitType.MIN
-                    if val > clk_tuple["max_clk"]:
-                        error_msg = f"Cannot set {args.clk_limit.clk_type} min value greater than max ({clk_tuple['max_clk']}MHz)."
-                        self.logger.store_output(args.gpu, "clk_limit", error_msg)
+                    if isinstance(clk_tuple["max_clk"], int) and val > clk_tuple["max_clk"]:
+                        error_msg = f"Cannot set {args.clk_limit.clk_type} min value greater than max ({clk_tuple['max_clk']}MHz)"
+                        self.logger.store_output(
+                            args.gpu,
+                            "clk_limit",
+                            error_msg,
+                        )
                         self.logger.print_output()
                         self.logger.clear_multiple_devices_output()
                         output_format = self.helpers.get_output_format()
@@ -1771,9 +1775,13 @@ class SetValueCommands:
                         val_changed = False  # Clock limit value did not changed
                 elif lim_type == "max":
                     amdsmi_lim_type = amdsmi_interface.AmdSmiClkLimitType.MAX
-                    if val < clk_tuple["min_clk"]:
-                        error_msg = f"Cannot set {args.clk_limit.clk_type} max value less than min ({clk_tuple['min_clk']}MHz)."
-                        self.logger.store_output(args.gpu, "clk_limit", error_msg)
+                    if isinstance(clk_tuple["min_clk"], int) and val < clk_tuple["min_clk"]:
+                        error_msg = f"Cannot set {args.clk_limit.clk_type} max value less than min ({clk_tuple['min_clk']}MHz)"
+                        self.logger.store_output(
+                            args.gpu,
+                            "clk_limit",
+                            error_msg",
+                        )
                         self.logger.print_output()
                         self.logger.clear_multiple_devices_output()
                         output_format = self.helpers.get_output_format()
