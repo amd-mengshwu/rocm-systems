@@ -453,8 +453,7 @@ struct __hip_fp4x2_e2m1 {
       __amd_fp4x2_storage_t fp4x2[4];
     } u{0};
     u.fp4x2[0] = __x;
-    // Although its x8 but we still call it x2 since we will use it in common code.
-    __amd_floatx8_storage_t fp32x2 =
+    // Although it's x8 but we still call it x2 since we will use it in common code.
         __builtin_amdgcn_cvt_scale_pk8_f32_fp4(u.ui32, 0x7F7Fu, 0);
 #else
     using namespace fcbx;
@@ -473,8 +472,7 @@ struct __hip_fp4x2_e2m1 {
       __amd_fp4x2_storage_t fp4x2[4];
     } u{0};
     u.fp4x2[0] = __x;
-    // Although its x8 but we still call it x2 since we will use it in common code.
-    __amd_floatx8_storage_t fp32x2 =
+    // Although it's x8 but we still call it x2 since we will use it in common code.
         __builtin_amdgcn_cvt_scale_pk8_f32_fp4(u.ui32, 0x7F7Fu, 0);
 #else
     using namespace fcbx;
