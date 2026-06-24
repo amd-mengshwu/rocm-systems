@@ -23,6 +23,9 @@ import logging
 import sys
 
 from amdsmi_cli_exceptions import AmdSmiRequiredCommandException
+from amdsmi_cli_exceptions import AmdSmiLibraryErrorException
+from amdsmi_cli_exceptions import AmdSmiDeviceNotFoundException
+from amdsmi_cli_exceptions import AmdSmiInvalidParameterException
 from amdsmi_helpers import AMDSMIHelpers
 
 from amdsmi import amdsmi_exception, amdsmi_interface

@@ -52,6 +52,14 @@ Full documentation for amd_smi_lib is available at [https://rocm.docs.amd.com/pr
 
 ### Changed
 
+- **Reworked `amd-smi` CLI exit codes for failed commands**.
+  - Errors now exit with distinct positive codes (192-206, 255) instead of negative
+    values or a generic `sys.exit(1)`, and error messages are written to `stderr`.
+  - Library failures surface the underlying `AMDSMI_STATUS_*` code as the exit code.
+  - `set` and `reset` operations now report a non-zero exit code when any sub-operation
+    fails, instead of printing the error and exiting `0`.
+  - Scripts that checked for the previous negative exit codes must be updated.
+
 - **Fixed `amd-smi static --clock` csv and human_readable formatting to output frequency 
 levels as strings instead of dictionary objects**.  
 

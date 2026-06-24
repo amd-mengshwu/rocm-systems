@@ -217,7 +217,7 @@ class AmdSmiInvalidParameterValueException(AmdSmiException):
         else:
             common_message = ""
 
-        if hint is not None:
+        if hint:
             if hint[-1] == ".":
                 hint = hint[:-1]
             common_message = f"{common_message} {hint}."

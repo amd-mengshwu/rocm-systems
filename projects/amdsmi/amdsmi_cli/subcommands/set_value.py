@@ -27,6 +27,7 @@ import sys
 from amdsmi_cli_exceptions import AmdSmiLibraryErrorException
 from amdsmi_cli_exceptions import AmdSmiRequiredCommandException
 from amdsmi_cli_exceptions import AmdSmiInvalidFilePathException
+from amdsmi_cli_exceptions import AmdSmiInvalidParameterException
 from amdsmi_cli_exceptions import AmdSmiInvalidParameterValueException
 from amdsmi import amdsmi_exception, amdsmi_interface
 from amdsmi.amdsmi_interface import AMDSMI_MAX_PPT_LIMIT, AMDSMI_MAX_UTIL
