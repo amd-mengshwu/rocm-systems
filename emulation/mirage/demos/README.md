@@ -9,7 +9,10 @@ There are two flavours:
   runs a real `hipcc`-built `vector_add` kernel through the full ROCr
   stack; the debugger suspends the live `SimulationEngine`, single-steps
   to the dispatch, and prints the **actual** wavefronts and registers of
-  the running CDNA compute units. Nothing is mocked.
+  the running CDNA compute units. It then steps the engine across several
+  cycles (the real simulation clock advances each time) and writes a
+  scalar register straight into the running wave, reading it back changed.
+  Nothing is mocked.
 * **`01`–`06`** — UI showcases driven by the deterministic in-process
   fixture backend (`mirage debug --demo`). These exercise the exact same
   REPL/TUI renderer but with a reproducible mock GPU, so they need no
@@ -23,7 +26,7 @@ asciinema play demos/00-live-real-kernel.cast
 
 | Cast | Shows |
 | ---- | ----- |
-| `00-live-real-kernel.cast`   | **Real** kernel: live wavefronts + registers read straight from the engine |
+| `00-live-real-kernel.cast`   | **Real** kernel: live wavefronts + registers, the sim clock advancing across steps, and a live register write |
 | `01-attach-and-inspect.cast` | Attaching, listing wavefronts, selecting one, dumping its registers |
 | `02-stepping.cast`           | Single-stepping (`stepi`) and watching the PC / registers advance |
 | `03-breakpoints.cast`        | Setting a PC breakpoint and continuing to it |

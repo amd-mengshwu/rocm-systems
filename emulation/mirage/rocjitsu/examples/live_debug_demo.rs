@@ -140,22 +140,39 @@ fn main() {
         &mut out,
     );
 
-    // Now single-step the engine through several cycles so you can watch
-    // the program counter and registers of the live wave actually move.
+    // Step the engine through several cycles. This kernel is memory-bound
+    // at entry (the wave is stalled on a long-latency load), so the PC
+    // holds — but the real simulation clock visibly advances each cycle.
     let _ = writeln!(
         out,
-        "\n{C_DIM}# stepping the live engine — watch the PC and registers change{C_RESET}",
+        "\n{C_DIM}# stepping the live engine — watch the simulation clock advance{C_RESET}",
     );
-    const STEP_TICKS: u64 = 50_000_000;
+    const STEP_TICKS: u64 = 20_000_000;
     let mut cycle = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..5 {
         cycle.push(format!("stepi {STEP_TICKS}"));
-        cycle.push("info registers".to_string());
+        cycle.push("status".to_string());
     }
     let _ = repl.run_script(&cycle, &mut out);
 
-    // Finally, re-list the wavefronts: as the dispatch progresses, the set
-    // of live waves evolves too.
+    // The debugger can also *mutate* live state. Write a scalar register
+    // straight into the running wave and read it back changed.
+    let _ = writeln!(
+        out,
+        "\n{C_DIM}# the debugger can change live state too — write s4 and read it back{C_RESET}",
+    );
+    let _ = repl.run_script(
+        [
+            "print $s4",
+            "set $s4 = 0xdeadbeef",
+            "print $s4",
+            "set $s4 = 0x1234",
+            "print $s4",
+        ],
+        &mut out,
+    );
+
+    // Re-list the wavefronts and detach.
     let _ = repl.run_script(["info threads", "detach"], &mut out);
 
     let _ = writeln!(
