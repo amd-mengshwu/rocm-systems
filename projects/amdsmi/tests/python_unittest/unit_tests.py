@@ -1730,7 +1730,6 @@ class TestAmdSmiPython(unittest.TestCase):
             raise self.raise_exception
         return
 
-    # handle error_map list
     def test_status_code_to_string(self):
         self.common.print_func_name("")
 
@@ -1740,37 +1739,36 @@ class TestAmdSmiPython(unittest.TestCase):
         #     amdsmi_status_code_to_string() (e.g. TIMEOUT / MORE_DATA).
         #   * AMDSMI_STATUS_MAP_ERROR -> a lower-level rsmi/esmi/nic status has
         #     no amdsmi mapping.
-        # Either is a real gap and must fail the test so it cannot recur.
+        # Either of these two errors is a library bug, which test should catch & fail.
         sentinel_descs = ("AMDSMI_STATUS_UNKNOWN_ERROR", "AMDSMI_STATUS_MAP_ERROR")
         for status in amdsmi.AmdSmiStatus:
             error_name = f"AMDSMI_STATUS_{status.name}"
-            # The sentinels themselves legitimately resolve to their own
-            # description, so don't test them against the sentinel guard.
             if error_name in sentinel_descs:
                 continue
             msg = f"\t### amdsmi_status_code_to_string({error_name}={status.value}):"
+
+            ret = None
+            library_error = None
             try:
                 ret = amdsmi.amdsmi_status_code_to_string(ctypes.c_uint32(status.value))
-                self.common.print(msg, ret)
             except amdsmi.AmdSmiLibraryException as e:
-                # A valid status code must always resolve to a description.
-                self.fail(f"{msg} raised for valid status code {status.value}: {e}")
+                library_error = e
+
+            if library_error is not None:
+                self.fail(
+                    f"{msg} Missing status code string - please update amdsmi_status_code_to_string() "
+                    f"\n(Returned: "
+                    f"'{library_error.get_error_info(detailed=False)}')."
+                )
+
+            self.common.print(msg, ret)
 
             # string_cast may return bytes; normalize for comparison.
             ret_str = ret.decode("utf-8") if isinstance(ret, bytes) else str(ret)
 
-            # Regression guard: a valid code must not resolve to either sentinel
-            # description (UNKNOWN_ERROR -> missing case; MAP_ERROR -> missing
-            # lower-level status mapping).
-            for sentinel in sentinel_descs:
-                self.assertFalse(
-                    ret_str.startswith(sentinel),
-                    f"{msg} resolved to '{sentinel}'; a case is missing from "
-                    f"amdsmi_status_code_to_string() or a lower-level status has "
-                    f"no amdsmi mapping.",
-                )
-
             # Every code's description must begin with its own enum name.
+            # Eg. Some code fallbacks provide an RSMI_STATUS_* string,
+            # but that is not a valid AMDSMI_STATUS_* string.
             self.assertTrue(
                 ret_str.startswith(error_name),
                 f"{msg} expected description to start with '{error_name}', got '{ret_str}'.",
