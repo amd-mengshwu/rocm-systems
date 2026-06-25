@@ -1734,17 +1734,13 @@ class TestAmdSmiPython(unittest.TestCase):
     def test_status_code_to_string(self):
         self.common.print_func_name("")
 
-        # Exercise every amdsmi status code except the two sentinels below. A
-        # valid code must resolve to a description that starts with its own enum
-        # name and must never fall through to a sentinel description:
-        #   * AMDSMI_STATUS_UNKNOWN_ERROR — a `case` is missing from
-        #     amdsmi_status_code_to_string() (e.g. AMDSMI_STATUS_TIMEOUT /
-        #     AMDSMI_STATUS_MORE_DATA fell through to the default branch).
-        #   * AMDSMI_STATUS_MAP_ERROR — a lower-level status (rsmi / esmi / nic)
-        #     has no equivalent amdsmi mapping, so rsmi_to_amdsmi_status() /
-        #     esmi_to_amdsmi_status() / ainic_to_amdsmi_status() returned the
-        #     map-error sentinel.
-        # Either case is a real gap and must fail the test so it cannot recur.
+        # Every amdsmi status code (except the two sentinels) must resolve to a
+        # description starting with its own enum name, never to a sentinel:
+        #   * AMDSMI_STATUS_UNKNOWN_ERROR -> a `case` is missing from
+        #     amdsmi_status_code_to_string() (e.g. TIMEOUT / MORE_DATA).
+        #   * AMDSMI_STATUS_MAP_ERROR -> a lower-level rsmi/esmi/nic status has
+        #     no amdsmi mapping.
+        # Either is a real gap and must fail the test so it cannot recur.
         sentinel_descs = ("AMDSMI_STATUS_UNKNOWN_ERROR", "AMDSMI_STATUS_MAP_ERROR")
         for status in amdsmi.AmdSmiStatus:
             error_name = f"AMDSMI_STATUS_{status.name}"
