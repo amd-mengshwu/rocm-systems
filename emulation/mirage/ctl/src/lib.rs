@@ -11,6 +11,7 @@
 
 use std::io::IsTerminal;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -227,6 +228,14 @@ pub enum CtlCmd {
 
     /// Show or follow an exec's stdout.
     Logs(LogsArgs),
+
+    /// Attach the GPU wavefront debugger to a session (or run a demo).
+    ///
+    /// Speaks a gdb-style command language over the daemon's debug
+    /// socket: inspect wavefronts, single-step, set breakpoints, read and
+    /// write registers and memory. `--demo` runs a self-contained
+    /// walkthrough against an in-process mock GPU (no session required).
+    Debug(DebugArgs),
 
     /// Print where mirage stores its state on this machine.
     Paths,
@@ -615,6 +624,40 @@ pub struct LogsArgs {
     follow: bool,
 }
 
+// ----- debug -----------------------------------------------------------------
+
+#[derive(Args, Debug)]
+pub struct DebugArgs {
+    /// Session to attach to. Optional when exactly one session is
+    /// running, or with `--socket`/`--demo`.
+    session: Option<SessionId>,
+
+    /// Connect to an explicit debug socket path instead of deriving it
+    /// from a session id.
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
+
+    /// Run a self-contained debugger walkthrough against an in-process
+    /// mock GPU. No daemon or session is required, and the model is fully
+    /// deterministic (used for demos and tests).
+    #[arg(long)]
+    demo: bool,
+
+    /// Execute one debugger command, then continue. Repeatable; commands
+    /// run in order before the interactive prompt (or, with `--batch`,
+    /// instead of it).
+    #[arg(short = 'x', long = "exec", value_name = "CMD")]
+    commands: Vec<String>,
+
+    /// Run the `--exec` commands and exit without an interactive prompt.
+    #[arg(long)]
+    batch: bool,
+
+    /// Use the full-screen terminal UI (requires a `tui`-enabled build).
+    #[arg(long)]
+    tui: bool,
+}
+
 // =============================================================================
 // Dispatch
 // =============================================================================
@@ -646,6 +689,7 @@ pub async fn dispatch<C: MirageCtl + 'static>(
         CtlCmd::Run(a) => run_cmd(ctl.clone(), a).await,
         CtlCmd::Attach(a) => attach_cmd(ctl.clone(), a).await,
         CtlCmd::Logs(a) => logs_cmd(ctl.clone(), a).await,
+        CtlCmd::Debug(a) => debug_cmd(&*ctl, a),
         CtlCmd::Paths => {
             print_paths(json);
             Ok(ExitCode::from(0))
@@ -1922,6 +1966,117 @@ async fn logs_cmd<C: MirageCtl + 'static>(ctl: Arc<C>, a: LogsArgs) -> anyhow::R
     };
     follow_attach(ctl, &r).await?;
     Ok(ExitCode::from(0))
+}
+
+// ----- debug dispatch --------------------------------------------------------
+
+/// Filename of the rocjitsu daemon's debugger control socket, relative to
+/// the per-session runtime directory. Kept in sync with
+/// `mirage_rocjitsu::debug_socket_path` (we derive the path here rather
+/// than depend on the rocjitsu backend crate so the control plane stays
+/// backend-agnostic).
+const DEBUG_SOCKET_REL: &str = "rocjitsu/debug.sock";
+
+/// Resolve which debug socket to attach to from the CLI arguments.
+///
+/// Precedence: an explicit `--socket`, then an explicit session id, then
+/// auto-selection when exactly one session is running.
+fn resolve_debug_socket<C: MirageCtl>(
+    ctl: &C,
+    args: &DebugArgs,
+) -> anyhow::Result<PathBuf> {
+    if let Some(p) = &args.socket {
+        return Ok(p.clone());
+    }
+    let session = match &args.session {
+        Some(s) => s.clone(),
+        None => {
+            let ids = ctl.session_list().unwrap_or_default();
+            match ids.as_slice() {
+                [one] => one.clone(),
+                [] => anyhow::bail!(
+                    "no running sessions to debug; start one with `mirage session start`, \
+                     pass a session id, or use `--demo`"
+                ),
+                _ => anyhow::bail!(
+                    "multiple sessions are running; specify which to debug \
+                     (see `mirage session list`)"
+                ),
+            }
+        }
+    };
+    Ok(mirage_core::paths::session_dir(&session).join(DEBUG_SOCKET_REL))
+}
+
+/// Run the debugger front-end: connect (or stand up the in-process demo
+/// backend), then drive either the TUI, a batch of `--exec` commands, or
+/// the interactive REPL.
+fn debug_cmd<C: MirageCtl>(ctl: &C, args: DebugArgs) -> anyhow::Result<ExitCode> {
+    use mirage_debug::Client;
+
+    // `--demo` stands up a deterministic in-process mock GPU; everything
+    // else connects to a real daemon debug socket.
+    if args.demo {
+        let backend = std::sync::Arc::new(mirage_debug::mock::MockBackend::demo());
+        let (client, server) = mirage_debug::connect_in_process(backend)
+            .map_err(|e| anyhow::anyhow!("failed to start demo backend: {e}"))?;
+        let code = drive_debugger(client, &args)?;
+        // Drop the client (inside the repl, already dropped) before
+        // joining so the server thread observes EOF and exits.
+        server.join();
+        return Ok(code);
+    }
+
+    let socket = resolve_debug_socket(ctl, &args)?;
+    if !socket.exists() {
+        anyhow::bail!(
+            "debug socket not found at {}; is the session running with a \
+             debug-capable emulator?",
+            socket.display()
+        );
+    }
+    let client = Client::connect(&socket)
+        .map_err(|e| anyhow::anyhow!("cannot connect to {}: {e}", socket.display()))?;
+    drive_debugger(client, &args)
+}
+
+/// Hand a connected [`Client`] to the requested front-end (TUI, batch, or
+/// interactive REPL) and return the process exit code.
+fn drive_debugger(
+    client: mirage_debug::Client,
+    args: &DebugArgs,
+) -> anyhow::Result<ExitCode> {
+    if args.tui {
+        return run_debug_tui(client);
+    }
+
+    let mut repl = mirage_debug::Repl::new(client);
+    let mut stdout = std::io::stdout();
+
+    if !args.commands.is_empty() {
+        repl.run_script(args.commands.iter(), &mut stdout)?;
+        if args.batch {
+            return Ok(ExitCode::from(0));
+        }
+    }
+    if !args.batch {
+        repl.run()?;
+    }
+    Ok(ExitCode::from(0))
+}
+
+#[cfg(feature = "tui")]
+fn run_debug_tui(client: mirage_debug::Client) -> anyhow::Result<ExitCode> {
+    mirage_debug::tui::run(client).map_err(|e| anyhow::anyhow!("debugger TUI failed: {e}"))?;
+    Ok(ExitCode::from(0))
+}
+
+#[cfg(not(feature = "tui"))]
+fn run_debug_tui(_client: mirage_debug::Client) -> anyhow::Result<ExitCode> {
+    anyhow::bail!(
+        "this build of mirage was compiled without the debugger TUI; \
+         rebuild with `--features tui` or omit `--tui`"
+    )
 }
 
 async fn run_cmd<C: MirageCtl + 'static>(ctl: Arc<C>, a: RunArgs) -> anyhow::Result<ExitCode> {

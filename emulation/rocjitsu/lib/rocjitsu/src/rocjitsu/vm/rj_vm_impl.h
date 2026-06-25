@@ -9,6 +9,8 @@
 
 #include "rocjitsu/config/config_loader.h"
 #include "rocjitsu/refcount.h"
+#include "rocjitsu/vm/debug_controller.h"
+#include "rocjitsu/vm/rj_vm.h"
 #include "rocjitsu/vm/virtual_machine.h"
 
 #include "simdojo/sim/simulation.h"
@@ -21,6 +23,11 @@ struct rj_vm_t : rocjitsu::RefCounted {
   rocjitsu::config::LoadedConfig loaded;
   rocjitsu::SoC *soc = nullptr;
   rocjitsu::VirtualMachine *vm = nullptr;
+  /// VM creation mode; selects free-running vs. debug-driven execution.
+  rj_vm_mode_t mode = RJ_VM_MODE_DEFAULT;
+  /// Debug control surface. Present (and bound) only for single-threaded
+  /// serving-mode VMs; see @ref rj_vm_debug.h. Null otherwise.
+  std::unique_ptr<rocjitsu::DebugController> debug;
 };
 
 #endif // ROCJITSU_VM_RJ_VM_IMPL_H_

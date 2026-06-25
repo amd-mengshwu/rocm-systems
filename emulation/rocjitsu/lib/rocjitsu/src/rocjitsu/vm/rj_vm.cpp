@@ -92,6 +92,16 @@ rj_status_t create_from_loaded(config::LoadedConfig &loaded, rj_vm_mode_t mode, 
     s->vm->driver()->open();
   }
 
+  s->mode = mode;
+  // Enable debugger control for single-threaded serving-mode VMs. The
+  // controller drives the engine a tick at a time so a debugger can stop,
+  // step, and inspect it; see rj_vm_debug.h. Multi-threaded engines keep the
+  // free-running run() path and report debug as unsupported.
+  if (serve && s->engine_config.num_threads <= 1) {
+    s->debug = std::make_unique<DebugController>();
+    s->debug->bind(s->engine.get(), s->soc);
+  }
+
   s->loaded = std::move(loaded);
   *handle = s.release();
   return ROCJITSU_STATUS_SUCCESS;
@@ -184,6 +194,17 @@ rj_status_t rj_vm_run(rj_vm_t *vm, uint64_t *ticks_executed) {
   if (!vm->soc)
     return ROCJITSU_STATUS_ERROR;
 
+  // Debug-driven serving mode: the controller owns the per-tick stepping loop
+  // so a debugger can stop/step/inspect the engine. Behaviourally equivalent
+  // to run() when no debugger ever suspends it.
+  if (vm->debug && vm->debug->bound()) {
+    vm->debug->run_engine_loop();
+    if (ticks_executed)
+      *ticks_executed = vm->engine->global_time();
+    vm->engine->shutdown();
+    return ROCJITSU_STATUS_SUCCESS;
+  }
+
   auto exit = vm->engine->run();
 
   if (ticks_executed)
@@ -196,6 +217,9 @@ rj_status_t rj_vm_run(rj_vm_t *vm, uint64_t *ticks_executed) {
 void rj_vm_request_exit(rj_vm_t *vm, const char *reason) {
   if (!vm || !vm->engine)
     return;
+  // Wake the debug stepping loop (if any) so it returns from run_engine_loop.
+  if (vm->debug)
+    vm->debug->request_exit();
   vm->engine->request_exit(reason ? reason : "shutdown");
 }
 

@@ -30,7 +30,8 @@
 
 use std::ffi::CString;
 use std::os::raw::c_void;
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -38,7 +39,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use mirage_core::emulator::EmulatorDaemon;
-use rocjitsu_sys::{Lib, RjVm, RjVmCmd, RjVmGpuInfo, RjVmMap, RjVmMode, RjVmUnmap};
+use mirage_debug::DebugBackend;
+use mirage_debug::protocol::WaveInfo as DbgWaveInfo;
+use rocjitsu_sys::{
+    Lib, RjVm, RjVmCmd, RjVmGpuInfo, RjVmMap, RjVmMode, RjVmUnmap, ROCJITSU_STATUS_SUCCESS,
+    RjStatus,
+};
 
 /// RPC opcodes (must match `enum RpcOpcode` in `rpc.h`).
 const RPC_HANDSHAKE: u16 = 0;
@@ -81,6 +87,173 @@ struct Shared {
 unsafe impl Send for Shared {}
 unsafe impl Sync for Shared {}
 
+/// Live debugger backend: forwards [`mirage_debug`] operations to the
+/// rocjitsu C debug API (`rj_vm_debug_*`) for the daemon's shared VM.
+///
+/// Because the debug API parks the engine thread before any inspecting
+/// call returns (see `rj_vm_debug.h`), reads and writes observe a
+/// consistent, stop-the-world snapshot. The same `Arc<Shared>` is shared
+/// with the engine and KMD client threads; rocjitsu serialises access
+/// internally.
+struct DebugTarget {
+    shared: Arc<Shared>,
+}
+
+impl DebugTarget {
+    fn new(shared: Arc<Shared>) -> Self {
+        Self { shared }
+    }
+
+    fn lib(&self) -> &Lib {
+        &self.shared.lib
+    }
+
+    fn vm(&self) -> *mut RjVm {
+        self.shared.vm
+    }
+}
+
+/// Convert an FFI wave snapshot into the protocol's transport struct.
+fn to_wave_info(w: &rocjitsu_sys::RjDbgWaveInfo) -> DbgWaveInfo {
+    DbgWaveInfo {
+        id: w.id,
+        xcc: w.xcc,
+        se: w.se,
+        cu: w.cu,
+        slot: w.slot,
+        state: w.state,
+        pc: w.pc,
+        exec: w.exec,
+        vcc: w.vcc,
+        status: w.status,
+        mode: w.mode,
+        m0: w.m0,
+        wave_size: w.wave_size,
+        num_sgprs: w.num_sgprs,
+        num_vgprs: w.num_vgprs,
+        wg_id: w.wg_id,
+        dispatch_id: w.dispatch_id,
+        process_id: w.process_id,
+    }
+}
+
+/// Map an `RjStatus` into `Result<(), String>` for the debug backend.
+fn dbg_ok(status: RjStatus, what: &str) -> Result<(), String> {
+    if status == ROCJITSU_STATUS_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!("{what} failed (status {status})"))
+    }
+}
+
+impl DebugBackend for DebugTarget {
+    fn supported(&self) -> bool {
+        unsafe { self.lib().dbg_supported(self.vm()) }
+    }
+
+    fn status(&self) -> Result<(bool, u32, u64), String> {
+        unsafe { self.lib().dbg_status(self.vm()) }.ok_or_else(|| "debug status failed".into())
+    }
+
+    fn suspend(&self) -> Result<(), String> {
+        dbg_ok(unsafe { self.lib().dbg_suspend(self.vm()) }, "suspend")
+    }
+
+    fn resume(&self) -> Result<(), String> {
+        dbg_ok(unsafe { self.lib().dbg_resume(self.vm()) }, "resume")
+    }
+
+    fn step(&self, ticks: u64) -> Result<(), String> {
+        dbg_ok(unsafe { self.lib().dbg_step(self.vm(), ticks) }, "step")
+    }
+
+    fn wait_stop(&self, timeout_ms: u64) -> Result<(bool, u32), String> {
+        unsafe { self.lib().dbg_wait_stop(self.vm(), timeout_ms) }
+            .ok_or_else(|| "wait_stop failed".into())
+    }
+
+    fn wave_list(&self) -> Result<Vec<DbgWaveInfo>, String> {
+        let waves =
+            unsafe { self.lib().dbg_wave_list(self.vm()) }.ok_or_else(|| "wave_list failed".to_string())?;
+        Ok(waves.iter().map(to_wave_info).collect())
+    }
+
+    fn wave_info(&self, wave: u64) -> Result<DbgWaveInfo, String> {
+        let w = unsafe { self.lib().dbg_wave_info(self.vm(), wave) }
+            .ok_or_else(|| format!("no such wave: {wave:#x}"))?;
+        Ok(to_wave_info(&w))
+    }
+
+    fn read_sgpr(&self, wave: u64, first: u32, count: u32) -> Result<Vec<u32>, String> {
+        unsafe { self.lib().dbg_read_sgpr(self.vm(), wave, first, count) }
+            .ok_or_else(|| "read_sgpr failed".into())
+    }
+
+    fn write_sgpr(&self, wave: u64, index: u32, value: u32) -> Result<(), String> {
+        dbg_ok(
+            unsafe { self.lib().dbg_write_sgpr(self.vm(), wave, index, value) },
+            "write_sgpr",
+        )
+    }
+
+    fn read_vgpr(
+        &self,
+        wave: u64,
+        reg: u32,
+        first_lane: u32,
+        lane_count: u32,
+    ) -> Result<Vec<u32>, String> {
+        unsafe {
+            self.lib()
+                .dbg_read_vgpr(self.vm(), wave, reg, first_lane, lane_count)
+        }
+        .ok_or_else(|| "read_vgpr failed".into())
+    }
+
+    fn write_vgpr(&self, wave: u64, reg: u32, lane: u32, value: u32) -> Result<(), String> {
+        dbg_ok(
+            unsafe { self.lib().dbg_write_vgpr(self.vm(), wave, reg, lane, value) },
+            "write_vgpr",
+        )
+    }
+
+    fn read_special(&self, wave: u64, which: u32) -> Result<u64, String> {
+        unsafe { self.lib().dbg_read_special(self.vm(), wave, which) }
+            .ok_or_else(|| "read_special failed".into())
+    }
+
+    fn write_special(&self, wave: u64, which: u32, value: u64) -> Result<(), String> {
+        dbg_ok(
+            unsafe { self.lib().dbg_write_special(self.vm(), wave, which, value) },
+            "write_special",
+        )
+    }
+
+    fn read_memory(&self, vmid: u32, addr: u64, size: u64) -> Result<Vec<u8>, String> {
+        unsafe { self.lib().dbg_read_memory(self.vm(), vmid, addr, size) }
+            .ok_or_else(|| "read_memory failed".into())
+    }
+
+    fn write_memory(&self, vmid: u32, addr: u64, data: &[u8]) -> Result<(), String> {
+        dbg_ok(
+            unsafe { self.lib().dbg_write_memory(self.vm(), vmid, addr, data) },
+            "write_memory",
+        )
+    }
+
+    fn break_set(&self, pc: u64) -> Result<u32, String> {
+        unsafe { self.lib().dbg_break_set(self.vm(), pc) }.ok_or_else(|| "break_set failed".into())
+    }
+
+    fn break_clear(&self, id: u32) -> Result<(), String> {
+        dbg_ok(unsafe { self.lib().dbg_break_clear(self.vm(), id) }, "break_clear")
+    }
+
+    fn break_list(&self) -> Result<Vec<u64>, String> {
+        unsafe { self.lib().dbg_break_list(self.vm()) }.ok_or_else(|| "break_list failed".into())
+    }
+}
+
 /// A running rocjitsu daemon. Dropping it (or calling
 /// [`EmulatorDaemon::stop`]) tears the server down cleanly: it stops
 /// accepting, unblocks and joins all client threads, stops the engine,
@@ -94,12 +267,24 @@ pub struct Daemon {
     clients: Arc<Mutex<Vec<RawFd>>>,
     accept_thread: Option<JoinHandle<()>>,
     engine_thread: Option<JoinHandle<()>>,
+    /// Debugger control socket (`debug.sock`). Best-effort: `None` when the
+    /// loaded library lacks the debug API or the socket could not be bound.
+    debug_socket_path: PathBuf,
+    debug_listen_fd: Option<RawFd>,
+    debug_clients: Arc<Mutex<Vec<RawFd>>>,
+    debug_thread: Option<JoinHandle<()>>,
 }
 
 impl Daemon {
     /// Path of the Unix socket this daemon listens on.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// Path of the debugger control socket, if one was bound. `None` when
+    /// the loaded library lacks the debug API or the socket failed to bind.
+    pub fn debug_socket_path(&self) -> Option<&Path> {
+        self.debug_listen_fd.map(|_| self.debug_socket_path.as_path())
     }
 
     /// Load `lib_path`, create a daemon-mode VM from `config_path`, and
@@ -170,6 +355,46 @@ impl Daemon {
             "rocjitsu daemon started"
         );
 
+        // Best-effort debugger control socket alongside daemon.sock. A
+        // failure here (e.g. an older library without the debug API, or a
+        // bind error) leaves the daemon fully functional, just not
+        // debuggable.
+        let debug_socket_path = runtime_dir.join("debug.sock");
+        let debug_clients: Arc<Mutex<Vec<RawFd>>> = Arc::new(Mutex::new(Vec::new()));
+        let (debug_listen_fd, debug_thread) = if shared.lib.has_debug() {
+            match bind_listen(&debug_socket_path) {
+                Ok(fd) => {
+                    let backend = Arc::new(DebugTarget::new(shared.clone()));
+                    let dbg_stop = stop.clone();
+                    let dbg_clients = debug_clients.clone();
+                    match std::thread::Builder::new()
+                        .name("rocjitsu-debug".to_string())
+                        .spawn(move || debug_accept_loop(fd, backend, dbg_stop, dbg_clients))
+                    {
+                        Ok(t) => {
+                            tracing::info!(
+                                socket = %debug_socket_path.display(),
+                                "rocjitsu debug server started"
+                            );
+                            (Some(fd), Some(t))
+                        }
+                        Err(e) => {
+                            tracing::warn!("rocjitsu debug server: cannot spawn thread: {e}");
+                            unsafe { libc::close(fd) };
+                            (None, None)
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("rocjitsu debug server: {e}");
+                    (None, None)
+                }
+            }
+        } else {
+            tracing::info!("rocjitsu library has no debug API; debugger disabled");
+            (None, None)
+        };
+
         Ok(Self {
             shared,
             listen_fd,
@@ -178,6 +403,10 @@ impl Daemon {
             clients,
             accept_thread: Some(accept_thread),
             engine_thread: Some(engine_thread),
+            debug_socket_path,
+            debug_listen_fd,
+            debug_clients,
+            debug_thread,
         })
     }
 
@@ -202,6 +431,24 @@ impl Daemon {
         }
         unsafe { libc::close(self.listen_fd) };
         let _ = std::fs::remove_file(&self.socket_path);
+
+        // Tear down the debug server the same way: unblock its accept and
+        // any connected debug clients, then join.
+        if let Some(fd) = self.debug_listen_fd {
+            unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
+        }
+        if let Ok(fds) = self.debug_clients.lock() {
+            for &fd in fds.iter() {
+                unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
+            }
+        }
+        if let Some(t) = self.debug_thread.take() {
+            let _ = t.join();
+        }
+        if let Some(fd) = self.debug_listen_fd {
+            unsafe { libc::close(fd) };
+        }
+        let _ = std::fs::remove_file(&self.debug_socket_path);
 
         // Stop the engine and reclaim the VM.
         unsafe {
@@ -281,6 +528,54 @@ fn bind_listen(path: &Path) -> std::result::Result<RawFd, String> {
         return Err(format!("rocjitsu daemon: listen() failed: {err}"));
     }
     Ok(fd)
+}
+
+/// Accept debugger connections on `listen_fd` until `stop` is set,
+/// serving each over the [`mirage_debug`] protocol against `backend`.
+///
+/// Mirrors [`accept_loop`]: connected client fds are tracked in `clients`
+/// so teardown can `shutdown()` them to unblock a parked `read`, letting
+/// each connection thread (and then this loop) exit cleanly.
+fn debug_accept_loop(
+    listen_fd: RawFd,
+    backend: Arc<DebugTarget>,
+    stop: Arc<AtomicBool>,
+    clients: Arc<Mutex<Vec<RawFd>>>,
+) {
+    let mut handles: Vec<JoinHandle<()>> = Vec::new();
+    loop {
+        let client = unsafe { libc::accept(listen_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        if client < 0 {
+            break;
+        }
+        if stop.load(Ordering::SeqCst) {
+            unsafe { libc::close(client) };
+            break;
+        }
+        if let Ok(mut fds) = clients.lock() {
+            fds.push(client);
+        }
+        let backend = backend.clone();
+        let client_list = clients.clone();
+        match std::thread::Builder::new()
+            .name("rocjitsu-debug-client".to_string())
+            .spawn(move || {
+                // The stream owns `client` and closes it on drop.
+                let stream = unsafe { UnixStream::from_raw_fd(client) };
+                let _ = mirage_debug::server::serve_connection(stream, backend.as_ref());
+                if let Ok(mut fds) = client_list.lock() {
+                    fds.retain(|&f| f != client);
+                }
+            }) {
+            Ok(h) => handles.push(h),
+            Err(_) => unsafe {
+                libc::close(client);
+            },
+        }
+    }
+    for h in handles {
+        let _ = h.join();
+    }
 }
 
 /// Accept connections until `stop` is set (signalled by shutting the

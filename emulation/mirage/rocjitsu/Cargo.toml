@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 mirage_core = { workspace = true }
+mirage_debug = { workspace = true }
 rocjitsu_sys = { workspace = true }
 inventory = { workspace = true }
 chrono = { workspace = true }

@@ -37,3 +37,22 @@ fn loads_and_resolves_symbols() {
         lib.err()
     );
 }
+
+/// The rocjitsu we build in-tree (`emulation/rocjitsu/build`) must export
+/// the full `rj_vm_debug_*` surface so the mirage debugger can attach.
+/// Skips when that build output is absent (e.g. CI that only installed a
+/// prebuilt wheel).
+#[test]
+fn built_lib_exposes_debug_surface() {
+    let built = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../rocjitsu/build/librocjitsu.so");
+    if !built.is_file() {
+        eprintln!("no in-tree rocjitsu build at {built:?}; skipping debug-surface test");
+        return;
+    }
+    let lib = unsafe { Lib::open(&built) }.expect("load in-tree librocjitsu.so");
+    assert!(
+        lib.has_debug(),
+        "in-tree librocjitsu.so is missing the rj_vm_debug_* symbols"
+    );
+}

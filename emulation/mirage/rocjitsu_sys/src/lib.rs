@@ -180,6 +180,96 @@ impl RjVmGpuInfo {
     }
 }
 
+/// Opaque, ABI-stable wavefront identifier (`rj_dbg_wave_id_t`).
+///
+/// Encodes the physical slot location `(xcc<<48)|(se<<32)|(cu<<16)|slot`.
+/// Treat it as opaque; use [`RjDbgWaveInfo`] to decode the coordinates.
+pub type RjDbgWaveId = u64;
+
+/// Sentinel wave id that never names a valid wavefront (`RJ_DBG_WAVE_NONE`).
+pub const RJ_DBG_WAVE_NONE: RjDbgWaveId = 0xFFFF_FFFF_FFFF_FFFF;
+
+/// Wavefront execution state (`rj_dbg_wave_state_t`).
+pub const RJ_DBG_WAVE_HALTED: u32 = 0;
+/// Wavefront eligible for scheduling.
+pub const RJ_DBG_WAVE_RUNNING: u32 = 1;
+/// Wavefront stalled on `s_waitcnt`.
+pub const RJ_DBG_WAVE_WAITCNT: u32 = 2;
+/// Wavefront stalled at a workgroup barrier.
+pub const RJ_DBG_WAVE_BARRIER: u32 = 3;
+/// Wavefront has seen `s_endpgm`; memory ops draining.
+pub const RJ_DBG_WAVE_ENDING: u32 = 4;
+
+/// Stop reason (`rj_dbg_stop_reason_t`): engine running.
+pub const RJ_DBG_STOP_NONE: u32 = 0;
+/// Stopped by an explicit suspend request.
+pub const RJ_DBG_STOP_USER: u32 = 1;
+/// A wavefront reached a PC breakpoint.
+pub const RJ_DBG_STOP_BREAKPOINT: u32 = 2;
+/// A requested single-step completed.
+pub const RJ_DBG_STOP_STEP: u32 = 3;
+/// Stopped before the first tick (attach-on-entry).
+pub const RJ_DBG_STOP_ENTRY: u32 = 4;
+/// Simulation finished; no more work.
+pub const RJ_DBG_STOP_EXITED: u32 = 5;
+
+/// Special-register selector (`rj_dbg_special_reg_t`).
+pub const RJ_DBG_SPECIAL_PC: u32 = 0;
+/// EXEC mask special register.
+pub const RJ_DBG_SPECIAL_EXEC: u32 = 1;
+/// VCC special register.
+pub const RJ_DBG_SPECIAL_VCC: u32 = 2;
+/// STATUS special register.
+pub const RJ_DBG_SPECIAL_STATUS: u32 = 3;
+/// MODE special register.
+pub const RJ_DBG_SPECIAL_MODE: u32 = 4;
+/// M0 special register.
+pub const RJ_DBG_SPECIAL_M0: u32 = 5;
+
+/// Snapshot of a single wavefront's architected control state
+/// (`rj_dbg_wave_info_t`, 96 bytes). Layout must match the C struct in
+/// `rocjitsu/vm/rj_vm_debug.h` byte-for-byte.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RjDbgWaveInfo {
+    /// Opaque wave id (see [`RjDbgWaveId`]).
+    pub id: RjDbgWaveId,
+    /// XCC / XCD index.
+    pub xcc: u32,
+    /// Shader-engine index within the XCD.
+    pub se: u32,
+    /// Compute-unit index within the shader engine.
+    pub cu: u32,
+    /// Wavefront slot index within the compute unit.
+    pub slot: u32,
+    /// Execution state ([`RJ_DBG_WAVE_RUNNING`] etc.).
+    pub state: u32,
+    /// Program counter (byte address).
+    pub pc: u64,
+    /// EXEC mask.
+    pub exec: u64,
+    /// VCC value.
+    pub vcc: u64,
+    /// STATUS register.
+    pub status: u32,
+    /// MODE register.
+    pub mode: u32,
+    /// M0 register.
+    pub m0: u32,
+    /// Lanes per wavefront (32 or 64).
+    pub wave_size: u32,
+    /// Allocated scalar registers.
+    pub num_sgprs: u32,
+    /// Allocated vector registers.
+    pub num_vgprs: u32,
+    /// Owning workgroup id.
+    pub wg_id: u32,
+    /// Owning dispatch id.
+    pub dispatch_id: u32,
+    /// Owning KFD process id (PASID analog).
+    pub process_id: u32,
+}
+
 // Raw C function-pointer signatures for the symbols we resolve.
 type FnVmCreate = unsafe extern "C" fn(*const c_char, RjVmMode, *mut *mut RjVm) -> RjStatus;
 type FnVmCreateFromString =
@@ -197,6 +287,62 @@ type FnVmGpuInfo = unsafe extern "C" fn(*mut RjVm, *mut RjVmGpuInfo) -> RjStatus
 type FnVmTopologyPath = unsafe extern "C" fn(*mut RjVm, *mut *const c_char) -> RjStatus;
 type FnVmDrmPath = unsafe extern "C" fn(*mut RjVm, *mut *const c_char) -> RjStatus;
 type FnVmGetSharedMemAs = unsafe extern "C" fn(*mut RjVm, u32, i64, *mut RjHandle) -> RjStatus;
+
+// Debug control surface (`rj_vm_debug.h`). Optional: only present in
+// rocjitsu libraries built with the debug API. Resolved as a bundle so the
+// debugger is either fully available or entirely absent.
+type FnDbgSupported = unsafe extern "C" fn(*mut RjVm, *mut c_int) -> RjStatus;
+type FnDbgSuspend = unsafe extern "C" fn(*mut RjVm) -> RjStatus;
+type FnDbgResume = unsafe extern "C" fn(*mut RjVm) -> RjStatus;
+type FnDbgStep = unsafe extern "C" fn(*mut RjVm, u64) -> RjStatus;
+type FnDbgStatus = unsafe extern "C" fn(*mut RjVm, *mut c_int, *mut u32, *mut u64) -> RjStatus;
+type FnDbgWaitStop = unsafe extern "C" fn(*mut RjVm, u64, *mut c_int, *mut u32) -> RjStatus;
+type FnDbgWaveCount = unsafe extern "C" fn(*mut RjVm, *mut u32) -> RjStatus;
+type FnDbgWaveList =
+    unsafe extern "C" fn(*mut RjVm, *mut RjDbgWaveInfo, u32, *mut u32) -> RjStatus;
+type FnDbgWaveInfo = unsafe extern "C" fn(*mut RjVm, RjDbgWaveId, *mut RjDbgWaveInfo) -> RjStatus;
+type FnDbgReadSgpr =
+    unsafe extern "C" fn(*mut RjVm, RjDbgWaveId, u32, u32, *mut u32) -> RjStatus;
+type FnDbgWriteSgpr = unsafe extern "C" fn(*mut RjVm, RjDbgWaveId, u32, u32) -> RjStatus;
+type FnDbgReadVgpr =
+    unsafe extern "C" fn(*mut RjVm, RjDbgWaveId, u32, u32, u32, *mut u32) -> RjStatus;
+type FnDbgWriteVgpr = unsafe extern "C" fn(*mut RjVm, RjDbgWaveId, u32, u32, u32) -> RjStatus;
+type FnDbgReadSpecial = unsafe extern "C" fn(*mut RjVm, RjDbgWaveId, u32, *mut u64) -> RjStatus;
+type FnDbgWriteSpecial = unsafe extern "C" fn(*mut RjVm, RjDbgWaveId, u32, u64) -> RjStatus;
+type FnDbgReadMemory =
+    unsafe extern "C" fn(*mut RjVm, u32, u64, *mut c_void, u64) -> RjStatus;
+type FnDbgWriteMemory =
+    unsafe extern "C" fn(*mut RjVm, u32, u64, *const c_void, u64) -> RjStatus;
+type FnDbgBreakSet = unsafe extern "C" fn(*mut RjVm, u64, *mut u32) -> RjStatus;
+type FnDbgBreakClear = unsafe extern "C" fn(*mut RjVm, u32) -> RjStatus;
+type FnDbgBreakList = unsafe extern "C" fn(*mut RjVm, *mut u64, u32, *mut u32) -> RjStatus;
+
+/// The resolved `rj_vm_debug_*` entry points, present as a unit when the
+/// loaded library exports the debug API.
+#[derive(Clone, Copy)]
+struct DebugFns {
+    supported: FnDbgSupported,
+    suspend: FnDbgSuspend,
+    resume: FnDbgResume,
+    step: FnDbgStep,
+    status: FnDbgStatus,
+    wait_stop: FnDbgWaitStop,
+    wave_count: FnDbgWaveCount,
+    wave_list: FnDbgWaveList,
+    wave_info: FnDbgWaveInfo,
+    read_sgpr: FnDbgReadSgpr,
+    write_sgpr: FnDbgWriteSgpr,
+    read_vgpr: FnDbgReadVgpr,
+    write_vgpr: FnDbgWriteVgpr,
+    read_special: FnDbgReadSpecial,
+    write_special: FnDbgWriteSpecial,
+    read_memory: FnDbgReadMemory,
+    write_memory: FnDbgWriteMemory,
+    break_set: FnDbgBreakSet,
+    break_clear: FnDbgBreakClear,
+    break_list: FnDbgBreakList,
+}
+
 
 /// A loaded rocjitsu shared library with its `rj_vm_*` entry points
 /// resolved.
@@ -225,6 +371,9 @@ pub struct Lib {
     vm_topology_path: FnVmTopologyPath,
     vm_drm_path: FnVmDrmPath,
     vm_get_shared_mem_as: FnVmGetSharedMemAs,
+    // Optional: present only when the library exports the debug API
+    // (`rj_vm_debug.h`). Resolved all-or-nothing.
+    debug: Option<DebugFns>,
     _lib: libloading::Library,
 }
 
@@ -266,6 +415,43 @@ impl Lib {
             let vm_drm_path = *lib.get::<FnVmDrmPath>(b"rj_vm_drm_path\0")?;
             let vm_get_shared_mem_as =
                 *lib.get::<FnVmGetSharedMemAs>(b"rj_vm_get_shared_mem_as\0")?;
+            // Resolve the optional debug surface all-or-nothing: a closure
+            // that returns None the moment any symbol is missing, so older
+            // libraries simply report the debugger as unavailable.
+            let debug = (|| {
+                Some(DebugFns {
+                    supported: *lib.get::<FnDbgSupported>(b"rj_vm_debug_supported\0").ok()?,
+                    suspend: *lib.get::<FnDbgSuspend>(b"rj_vm_debug_suspend\0").ok()?,
+                    resume: *lib.get::<FnDbgResume>(b"rj_vm_debug_resume\0").ok()?,
+                    step: *lib.get::<FnDbgStep>(b"rj_vm_debug_step\0").ok()?,
+                    status: *lib.get::<FnDbgStatus>(b"rj_vm_debug_status\0").ok()?,
+                    wait_stop: *lib.get::<FnDbgWaitStop>(b"rj_vm_debug_wait_stop\0").ok()?,
+                    wave_count: *lib.get::<FnDbgWaveCount>(b"rj_vm_debug_wave_count\0").ok()?,
+                    wave_list: *lib.get::<FnDbgWaveList>(b"rj_vm_debug_wave_list\0").ok()?,
+                    wave_info: *lib.get::<FnDbgWaveInfo>(b"rj_vm_debug_wave_info\0").ok()?,
+                    read_sgpr: *lib.get::<FnDbgReadSgpr>(b"rj_vm_debug_read_sgpr\0").ok()?,
+                    write_sgpr: *lib.get::<FnDbgWriteSgpr>(b"rj_vm_debug_write_sgpr\0").ok()?,
+                    read_vgpr: *lib.get::<FnDbgReadVgpr>(b"rj_vm_debug_read_vgpr\0").ok()?,
+                    write_vgpr: *lib.get::<FnDbgWriteVgpr>(b"rj_vm_debug_write_vgpr\0").ok()?,
+                    read_special: *lib
+                        .get::<FnDbgReadSpecial>(b"rj_vm_debug_read_special\0")
+                        .ok()?,
+                    write_special: *lib
+                        .get::<FnDbgWriteSpecial>(b"rj_vm_debug_write_special\0")
+                        .ok()?,
+                    read_memory: *lib
+                        .get::<FnDbgReadMemory>(b"rj_vm_debug_read_memory\0")
+                        .ok()?,
+                    write_memory: *lib
+                        .get::<FnDbgWriteMemory>(b"rj_vm_debug_write_memory\0")
+                        .ok()?,
+                    break_set: *lib.get::<FnDbgBreakSet>(b"rj_vm_debug_break_set\0").ok()?,
+                    break_clear: *lib
+                        .get::<FnDbgBreakClear>(b"rj_vm_debug_break_clear\0")
+                        .ok()?,
+                    break_list: *lib.get::<FnDbgBreakList>(b"rj_vm_debug_break_list\0").ok()?,
+                })
+            })();
             Ok(Self {
                 vm_create,
                 vm_create_from_string,
@@ -282,6 +468,7 @@ impl Lib {
                 vm_topology_path,
                 vm_drm_path,
                 vm_get_shared_mem_as,
+                debug,
                 _lib: lib,
             })
         }
@@ -468,6 +655,320 @@ impl Lib {
         }
         Some(handle)
     }
+
+    // ---- Debug control surface (`rj_vm_debug.h`) -----------------------
+    //
+    // Every method here forwards to the optional debug entry points. When
+    // the loaded library predates the debug API they return
+    // `ROCJITSU_STATUS_OUT_OF_RESOURCES`, matching the C contract for a VM
+    // that cannot be debugged.
+
+    /// Whether the loaded library exports the debug API at all.
+    pub fn has_debug(&self) -> bool {
+        self.debug.is_some()
+    }
+
+    /// Report whether debug control is available for `vm`.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_supported(&self, vm: *mut RjVm) -> bool {
+        let Some(d) = self.debug.as_ref() else {
+            return false;
+        };
+        let mut supported: c_int = 0;
+        let status = unsafe { (d.supported)(vm, &mut supported) };
+        status == ROCJITSU_STATUS_SUCCESS && supported != 0
+    }
+
+    /// Suspend the engine and block until it is quiescent.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_suspend(&self, vm: *mut RjVm) -> RjStatus {
+        match self.debug.as_ref() {
+            Some(d) => unsafe { (d.suspend)(vm) },
+            None => ROCJITSU_STATUS_OUT_OF_RESOURCES,
+        }
+    }
+
+    /// Resume free-running execution.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_resume(&self, vm: *mut RjVm) -> RjStatus {
+        match self.debug.as_ref() {
+            Some(d) => unsafe { (d.resume)(vm) },
+            None => ROCJITSU_STATUS_OUT_OF_RESOURCES,
+        }
+    }
+
+    /// Single-step the engine by `ticks` ticks, then suspend.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_step(&self, vm: *mut RjVm, ticks: u64) -> RjStatus {
+        match self.debug.as_ref() {
+            Some(d) => unsafe { (d.step)(vm, ticks) },
+            None => ROCJITSU_STATUS_OUT_OF_RESOURCES,
+        }
+    }
+
+    /// Query run/stop status: `(stopped, stop_reason, tick)`.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_status(&self, vm: *mut RjVm) -> Option<(bool, u32, u64)> {
+        let d = self.debug.as_ref()?;
+        let (mut stopped, mut reason, mut tick): (c_int, u32, u64) = (0, 0, 0);
+        let status = unsafe { (d.status)(vm, &mut stopped, &mut reason, &mut tick) };
+        (status == ROCJITSU_STATUS_SUCCESS).then_some((stopped != 0, reason, tick))
+    }
+
+    /// Block up to `timeout_ms` for the engine to stop: `(stopped, reason)`.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_wait_stop(&self, vm: *mut RjVm, timeout_ms: u64) -> Option<(bool, u32)> {
+        let d = self.debug.as_ref()?;
+        let (mut stopped, mut reason): (c_int, u32) = (0, 0);
+        let status = unsafe { (d.wait_stop)(vm, timeout_ms, &mut stopped, &mut reason) };
+        (status == ROCJITSU_STATUS_SUCCESS).then_some((stopped != 0, reason))
+    }
+
+    /// Count live wavefronts (state != HALTED).
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_wave_count(&self, vm: *mut RjVm) -> Option<u32> {
+        let d = self.debug.as_ref()?;
+        let mut count: u32 = 0;
+        let status = unsafe { (d.wave_count)(vm, &mut count) };
+        (status == ROCJITSU_STATUS_SUCCESS).then_some(count)
+    }
+
+    /// Enumerate live wavefronts. The engine must be suspended.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_wave_list(&self, vm: *mut RjVm) -> Option<Vec<RjDbgWaveInfo>> {
+        let d = self.debug.as_ref()?;
+        // First query the total, then fetch in one shot.
+        let mut total: u32 = 0;
+        let status = unsafe { (d.wave_list)(vm, std::ptr::null_mut(), 0, &mut total) };
+        if status != ROCJITSU_STATUS_SUCCESS {
+            return None;
+        }
+        let mut out = vec![RjDbgWaveInfo::default(); total as usize];
+        let mut got: u32 = 0;
+        let status = unsafe { (d.wave_list)(vm, out.as_mut_ptr(), total, &mut got) };
+        if status != ROCJITSU_STATUS_SUCCESS {
+            return None;
+        }
+        out.truncate(got.min(total) as usize);
+        Some(out)
+    }
+
+    /// Fetch one wavefront's control state by id.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_wave_info(&self, vm: *mut RjVm, wave: RjDbgWaveId) -> Option<RjDbgWaveInfo> {
+        let d = self.debug.as_ref()?;
+        let mut info = RjDbgWaveInfo::default();
+        let status = unsafe { (d.wave_info)(vm, wave, &mut info) };
+        (status == ROCJITSU_STATUS_SUCCESS).then_some(info)
+    }
+
+    /// Read `count` scalar registers starting at `first` from `wave`.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_read_sgpr(
+        &self,
+        vm: *mut RjVm,
+        wave: RjDbgWaveId,
+        first: u32,
+        count: u32,
+    ) -> Option<Vec<u32>> {
+        let d = self.debug.as_ref()?;
+        let mut out = vec![0u32; count as usize];
+        let status = unsafe { (d.read_sgpr)(vm, wave, first, count, out.as_mut_ptr()) };
+        (status == ROCJITSU_STATUS_SUCCESS).then_some(out)
+    }
+
+    /// Write a single scalar register.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_write_sgpr(
+        &self,
+        vm: *mut RjVm,
+        wave: RjDbgWaveId,
+        index: u32,
+        value: u32,
+    ) -> RjStatus {
+        match self.debug.as_ref() {
+            Some(d) => unsafe { (d.write_sgpr)(vm, wave, index, value) },
+            None => ROCJITSU_STATUS_OUT_OF_RESOURCES,
+        }
+    }
+
+    /// Read one vector register across `lane_count` lanes from `first_lane`.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_read_vgpr(
+        &self,
+        vm: *mut RjVm,
+        wave: RjDbgWaveId,
+        reg: u32,
+        first_lane: u32,
+        lane_count: u32,
+    ) -> Option<Vec<u32>> {
+        let d = self.debug.as_ref()?;
+        let mut out = vec![0u32; lane_count as usize];
+        let status =
+            unsafe { (d.read_vgpr)(vm, wave, reg, first_lane, lane_count, out.as_mut_ptr()) };
+        (status == ROCJITSU_STATUS_SUCCESS).then_some(out)
+    }
+
+    /// Write one lane of a vector register.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_write_vgpr(
+        &self,
+        vm: *mut RjVm,
+        wave: RjDbgWaveId,
+        reg: u32,
+        lane: u32,
+        value: u32,
+    ) -> RjStatus {
+        match self.debug.as_ref() {
+            Some(d) => unsafe { (d.write_vgpr)(vm, wave, reg, lane, value) },
+            None => ROCJITSU_STATUS_OUT_OF_RESOURCES,
+        }
+    }
+
+    /// Read a special register (see `RJ_DBG_SPECIAL_*`).
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_read_special(
+        &self,
+        vm: *mut RjVm,
+        wave: RjDbgWaveId,
+        which: u32,
+    ) -> Option<u64> {
+        let d = self.debug.as_ref()?;
+        let mut value: u64 = 0;
+        let status = unsafe { (d.read_special)(vm, wave, which, &mut value) };
+        (status == ROCJITSU_STATUS_SUCCESS).then_some(value)
+    }
+
+    /// Write a special register (see `RJ_DBG_SPECIAL_*`).
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_write_special(
+        &self,
+        vm: *mut RjVm,
+        wave: RjDbgWaveId,
+        which: u32,
+        value: u64,
+    ) -> RjStatus {
+        match self.debug.as_ref() {
+            Some(d) => unsafe { (d.write_special)(vm, wave, which, value) },
+            None => ROCJITSU_STATUS_OUT_OF_RESOURCES,
+        }
+    }
+
+    /// Read `size` bytes of device memory at `addr` in address space `vmid`.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_read_memory(
+        &self,
+        vm: *mut RjVm,
+        vmid: u32,
+        addr: u64,
+        size: u64,
+    ) -> Option<Vec<u8>> {
+        let d = self.debug.as_ref()?;
+        let mut out = vec![0u8; size as usize];
+        let status =
+            unsafe { (d.read_memory)(vm, vmid, addr, out.as_mut_ptr() as *mut c_void, size) };
+        (status == ROCJITSU_STATUS_SUCCESS).then_some(out)
+    }
+
+    /// Write `data` to device memory at `addr` in address space `vmid`.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_write_memory(
+        &self,
+        vm: *mut RjVm,
+        vmid: u32,
+        addr: u64,
+        data: &[u8],
+    ) -> RjStatus {
+        match self.debug.as_ref() {
+            Some(d) => unsafe {
+                (d.write_memory)(
+                    vm,
+                    vmid,
+                    addr,
+                    data.as_ptr() as *const c_void,
+                    data.len() as u64,
+                )
+            },
+            None => ROCJITSU_STATUS_OUT_OF_RESOURCES,
+        }
+    }
+
+    /// Set a PC breakpoint; returns its id.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_break_set(&self, vm: *mut RjVm, pc: u64) -> Option<u32> {
+        let d = self.debug.as_ref()?;
+        let mut id: u32 = 0;
+        let status = unsafe { (d.break_set)(vm, pc, &mut id) };
+        (status == ROCJITSU_STATUS_SUCCESS).then_some(id)
+    }
+
+    /// Clear a breakpoint by id.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_break_clear(&self, vm: *mut RjVm, id: u32) -> RjStatus {
+        match self.debug.as_ref() {
+            Some(d) => unsafe { (d.break_clear)(vm, id) },
+            None => ROCJITSU_STATUS_OUT_OF_RESOURCES,
+        }
+    }
+
+    /// List active breakpoint addresses.
+    ///
+    /// # Safety
+    /// `vm` must be a live handle.
+    pub unsafe fn dbg_break_list(&self, vm: *mut RjVm) -> Option<Vec<u64>> {
+        let d = self.debug.as_ref()?;
+        let mut total: u32 = 0;
+        let status = unsafe { (d.break_list)(vm, std::ptr::null_mut(), 0, &mut total) };
+        if status != ROCJITSU_STATUS_SUCCESS {
+            return None;
+        }
+        let mut out = vec![0u64; total as usize];
+        let mut got: u32 = 0;
+        let status = unsafe { (d.break_list)(vm, out.as_mut_ptr(), total, &mut got) };
+        if status != ROCJITSU_STATUS_SUCCESS {
+            return None;
+        }
+        out.truncate(got.min(total) as usize);
+        Some(out)
+    }
 }
 
 #[cfg(test)]
@@ -487,5 +988,9 @@ mod tests {
         // rj_vm_gpu_info_t — must match the 312-byte RpcGpuInfo the
         // daemon handshake embeds (static_assert in rpc.h).
         assert_eq!(std::mem::size_of::<RjVmGpuInfo>(), 312);
+        // rj_dbg_wave_info_t — must match rj_vm_debug.h byte-for-byte
+        // (u64 id, then the coordinate/state words, with 4 bytes of pad
+        // before the first u64 field `pc`).
+        assert_eq!(std::mem::size_of::<RjDbgWaveInfo>(), 96);
     }
 }

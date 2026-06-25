@@ -277,6 +277,18 @@ pub fn rj_config_path(session: &SessionId) -> PathBuf {
     mirage_core::paths::session_dir(session).join(RJ_CONFIG_NAME)
 }
 
+/// On-disk path of the debugger control socket for `session`
+/// (`<MIRAGE_RUNTIME>/session/<id>/rocjitsu/debug.sock`).
+///
+/// The daemon binds this alongside `daemon.sock`; `mirage debug` connects
+/// here to attach to a running session. Side-effect free and deterministic
+/// so the client can derive it from a session id without touching the VM.
+pub fn debug_socket_path(session: &SessionId) -> PathBuf {
+    mirage_core::paths::session_dir(session)
+        .join(RUNTIME_SUBDIR)
+        .join("debug.sock")
+}
+
 /// Point the KMD interposer at `config` by writing the `config_path`
 /// discovery file it reads from `$ROCJITSU_RUNTIME_DIR`, and return that
 /// runtime directory (to export as `ROCJITSU_RUNTIME_DIR`).

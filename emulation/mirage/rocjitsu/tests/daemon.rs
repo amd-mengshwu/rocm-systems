@@ -14,7 +14,6 @@ use mirage_core::common::MaybeRef;
 use mirage_core::emulator::{EmulatorDaemon, EmulatorDef, ExecMode};
 use mirage_rocjitsu::daemon::Daemon;
 use mirage_rocjitsu::{kmd_config, kmd_preload};
-
 /// Build the 16-byte RPC header the wire protocol uses.
 fn header(opcode: u16, request_id: u32, payload_bytes: u32, result: i32) -> [u8; 16] {
     let mut h = [0u8; 16];
@@ -161,3 +160,276 @@ fn daemon_serves_multiple_clients() {
         read_exact(&mut stream, &mut close_resp);
     }
 }
+
+/// The daemon binds a **real** debugger control socket next to
+/// `daemon.sock`, and the debug protocol drives the actual rocjitsu
+/// engine through the FFI — there is no mock anywhere on this path. This
+/// exercises the full live stack: `mirage_debug::Client` ->
+/// `debug.sock` -> `DebugTarget` -> `rocjitsu_sys` FFI -> the C++
+/// `DebugController` -> the running `SimulationEngine`.
+#[test]
+fn debug_socket_controls_the_live_engine() {
+    use mirage_debug::Client;
+
+    let _g = mirage_core::paths::test_env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    mirage_core::paths::set_test_root(tmp.path());
+
+    let Some(lib) = kmd_preload() else {
+        eprintln!("rocjitsu KMD library not found; skipping live debug test");
+        return;
+    };
+
+    let agent_report = mirage_builtin::ensure_agents(false).unwrap();
+    let agent_name = agent_report.iter().map(|(n, _)| n.clone()).next().unwrap();
+    let def = EmulatorDef {
+        emulator: "rocjitsu".to_string(),
+        plugins: Default::default(),
+        exec_mode: ExecMode::Functional,
+        options: Default::default(),
+        topology: MaybeRef::Owned(mirage_core::topology::TopologyDef {
+            num_nodes: 1,
+            gpus_per_node: 1,
+            agent: MaybeRef::Ref(agent_name),
+        }),
+    };
+    let config = kmd_config(&def, None).unwrap();
+    let runtime_dir = tmp.path().join("rt");
+    let daemon = Daemon::start(&lib, &config, &runtime_dir).expect("daemon should start");
+
+    // The debug API only exists in a library built with the debug surface;
+    // skip cleanly on an older library that bound no debug socket.
+    let Some(debug_sock) = daemon.debug_socket_path().map(|p| p.to_path_buf()) else {
+        eprintln!("rocjitsu library has no debug API; skipping live debug test");
+        let socket_path = daemon.socket_path().to_path_buf();
+        Box::new(daemon).stop();
+        assert!(!socket_path.exists());
+        return;
+    };
+    assert!(debug_sock.exists(), "debug socket should be on disk");
+
+    let mut client = Client::connect(&debug_sock).expect("connect to debug socket");
+
+    // The live engine reports debug support (the controller is bound).
+    assert!(
+        client.supported(),
+        "the running daemon engine must report debug support"
+    );
+
+    // The engine is free-running after start; suspending it must drive it
+    // to a real quiescent stop the engine acknowledges.
+    client.suspend().expect("suspend the live engine");
+    let (stopped, _reason, tick0) = client.status().expect("status after suspend");
+    assert!(stopped, "engine should be stopped after suspend");
+
+    // Single-stepping advances the *real* simulation clock.
+    client.step(1).expect("step the live engine");
+    let (_done, _r) = client.wait_stop(5_000).expect("wait for the step to settle");
+    let (_stopped, _reason, tick1) = client.status().expect("status after step");
+    assert!(
+        tick1 >= tick0,
+        "simulation tick should not go backwards across a step (was {tick0}, now {tick1})"
+    );
+
+    // Enumerating waves succeeds against the real engine. With no workload
+    // attached there is no dispatch in flight, so the live wave set is
+    // legitimately empty — the point is that the call round-trips through
+    // the FFI and returns the engine's true state.
+    let waves = client.wave_list().expect("wave_list round-trips to the engine");
+    assert!(
+        waves.is_empty(),
+        "no workload is attached, so the engine should report zero live waves"
+    );
+
+    // Resume so teardown does not race a suspended engine.
+    client.resume().expect("resume the live engine");
+    drop(client);
+
+    let socket_path = daemon.socket_path().to_path_buf();
+    Box::new(daemon).stop();
+    assert!(!socket_path.exists(), "daemon socket removed on shutdown");
+    assert!(!debug_sock.exists(), "debug socket removed on shutdown");
+}
+
+/// The acid test: a **real HIP kernel** (`vector_add`, 16 workgroups)
+/// runs through the full ROCr stack against the daemon, and the debugger
+/// catches its wavefronts in flight by single-stepping the live engine.
+/// Every wave, PC and register read in this test comes from the actual
+/// `SimulationEngine` executing real GCN/CDNA instructions — nothing is
+/// mocked.
+///
+/// Requires a `hipcc`-built workload and the matching `librocjitsu.so`
+/// preload, supplied via env (the rocjitsu CMake build exports both):
+///   * `RJ_HIP_VECTOR_ADD_BIN` — path to the `hip_vector_add_test` binary
+///   * `RJ_PRELOAD_LIB`        — path to `librocjitsu.so` for `LD_PRELOAD`
+/// The test skips cleanly when either is absent.
+#[test]
+fn debug_observes_live_kernel_waves() {
+    use mirage_debug::Client;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let Some(workload) = std::env::var_os("RJ_HIP_VECTOR_ADD_BIN") else {
+        eprintln!("RJ_HIP_VECTOR_ADD_BIN not set; skipping live kernel wave test");
+        return;
+    };
+    let Some(preload) = std::env::var_os("RJ_PRELOAD_LIB") else {
+        eprintln!("RJ_PRELOAD_LIB not set; skipping live kernel wave test");
+        return;
+    };
+    if !std::path::Path::new(&workload).is_file() {
+        eprintln!("workload binary missing; skipping live kernel wave test");
+        return;
+    }
+
+    let _g = mirage_core::paths::test_env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    mirage_core::paths::set_test_root(tmp.path());
+
+    let Some(lib) = kmd_preload() else {
+        eprintln!("rocjitsu KMD library not found; skipping live kernel wave test");
+        return;
+    };
+
+    let agent_report = mirage_builtin::ensure_agents(false).unwrap();
+    let agent_name = agent_report.iter().map(|(n, _)| n.clone()).next().unwrap();
+    let def = EmulatorDef {
+        emulator: "rocjitsu".to_string(),
+        plugins: Default::default(),
+        exec_mode: ExecMode::Clocked,
+        options: Default::default(),
+        topology: MaybeRef::Owned(mirage_core::topology::TopologyDef {
+            num_nodes: 1,
+            gpus_per_node: 1,
+            agent: MaybeRef::Ref(agent_name),
+        }),
+    };
+    let config = kmd_config(&def, None).unwrap();
+    let runtime_dir = tmp.path().join("rt");
+    let daemon = Daemon::start(&lib, &config, &runtime_dir).expect("daemon should start");
+
+    let Some(debug_sock) = daemon.debug_socket_path().map(|p| p.to_path_buf()) else {
+        eprintln!("rocjitsu library has no debug API; skipping live kernel wave test");
+        let socket_path = daemon.socket_path().to_path_buf();
+        Box::new(daemon).stop();
+        assert!(!socket_path.exists());
+        return;
+    };
+
+    let mut client = Client::connect(&debug_sock).expect("connect to debug socket");
+    assert!(client.supported(), "engine must report debug support");
+
+    // Stop the world before the workload submits anything, so we control
+    // every tick of the kernel's execution by hand.
+    client.suspend().expect("suspend the live engine");
+
+    // Launch the real HIP workload. With the engine parked, its first
+    // engine-dependent operation (the H2D copies) blocks until we step.
+    let mut child = Command::new(&workload)
+        .env("ROCJITSU_RUNTIME_DIR", &runtime_dir)
+        .env("LD_PRELOAD", &preload)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the HIP workload");
+
+    // Single-step the engine in small batches, polling the live wave set,
+    // until the kernel's wavefronts appear. Everything observed here is
+    // produced by the real engine running real instructions.
+    const BATCH: u64 = 500;
+    const DEADLINE: Duration = Duration::from_secs(90);
+    let start = Instant::now();
+    let mut peak_waves: Vec<mirage_debug::WaveInfo> = Vec::new();
+    let mut saw_waves = false;
+
+    while start.elapsed() < DEADLINE {
+        client.step(BATCH).expect("step the live engine");
+        let _ = client.wait_stop(5_000);
+        let waves = client.wave_list().expect("wave_list round-trips");
+        if !waves.is_empty() {
+            saw_waves = true;
+            if waves.len() > peak_waves.len() {
+                peak_waves = waves;
+            }
+            // Keep stepping a little past the first sighting to let the
+            // peak number of concurrent waves materialise, then stop.
+            if peak_waves.len() >= 2 {
+                break;
+            }
+        } else if saw_waves {
+            // The dispatch has fully drained; we already captured it.
+            break;
+        }
+    }
+
+    assert!(
+        saw_waves,
+        "expected to catch at least one live wavefront from the kernel within the deadline"
+    );
+
+    // Inspect a real wavefront: it must carry a plausible live PC and let
+    // us read its registers straight from the engine. Everything below is
+    // read out of the actual CDNA compute unit executing the kernel.
+    let wave = peak_waves[0].clone();
+    eprintln!(
+        "caught {} live wave(s); first @ {} pc={:#x} state={}",
+        peak_waves.len(),
+        wave.coord(),
+        wave.pc,
+        wave.state
+    );
+    assert_ne!(wave.pc, 0, "a live wave should have a non-zero program counter");
+
+    // The PC reported in the wave summary must agree with a direct read of
+    // the special PC register through the inspection plane.
+    const SPECIAL_PC: u32 = 0; // special_reg::PC
+    let pc_special = client
+        .read_special(wave.id, SPECIAL_PC)
+        .expect("read the live PC special register");
+    assert_eq!(
+        pc_special, wave.pc,
+        "the special PC register must match the wave summary PC"
+    );
+
+    // Scalar and vector register files are readable from the live wave.
+    let sgprs = client
+        .read_sgpr(wave.id, 0, 8)
+        .expect("read live SGPRs from the wave");
+    assert_eq!(sgprs.len(), 8, "should read eight SGPRs back");
+
+    let vgpr0 = client
+        .read_vgpr(wave.id, 0, 0, wave.wave_size.max(1))
+        .expect("read live VGPR lanes from the wave");
+    assert_eq!(
+        vgpr0.len(),
+        wave.wave_size.max(1) as usize,
+        "should read one value per active lane of v0"
+    );
+
+    // Re-enumerate to prove the wave set is stable and queryable while the
+    // engine is parked under our control.
+    let again = client.wave_list().expect("re-list live waves");
+    assert!(
+        again.iter().any(|w| w.id == wave.id),
+        "the inspected wave should still be present on a re-list"
+    );
+
+    // Resume the engine and detach. A full cycle-accurate run of this
+    // kernel to completion takes billions of ticks (the engine advances at
+    // tens of millions of ticks/sec but the 16-wave dispatch is long), so
+    // we do not block the test on the workload finishing — the debugger's
+    // job (observing and inspecting the live waves) is already proven. We
+    // tear the workload down cleanly instead.
+    client.resume().expect("resume the live engine");
+    client.detach().ok();
+    drop(client);
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let socket_path = daemon.socket_path().to_path_buf();
+    Box::new(daemon).stop();
+    assert!(!socket_path.exists(), "daemon socket removed on shutdown");
+}
+
+
+
