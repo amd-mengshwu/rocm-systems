@@ -7,12 +7,13 @@ There are two flavours:
 
 * **`00-live-real-kernel.cast`** — the real deal. A real rocjitsu daemon
   runs a real `hipcc`-built `vector_add` kernel through the full ROCr
-  stack; the debugger suspends the live `SimulationEngine`, single-steps
-  to the dispatch, and prints the **actual** wavefronts and registers of
-  the running CDNA compute units. It then steps the engine across several
-  cycles (the real simulation clock advances each time) and writes a
-  scalar register straight into the running wave, reading it back changed.
-  Nothing is mocked.
+  stack in **functional** mode; the debugger suspends the live
+  `SimulationEngine`, single-steps to the dispatch, and prints the
+  **actual** wavefronts and registers of the running CDNA compute units.
+  It writes a scalar register into the running wave (then restores it),
+  single-steps the wave so you can watch its **PC advance through the
+  kernel**, and finally continues to completion — the emulator verifies
+  the kernel computed the correct result. Nothing is mocked.
 * **`01`–`06`** — UI showcases driven by the deterministic in-process
   fixture backend (`mirage debug --demo`). These exercise the exact same
   REPL/TUI renderer but with a reproducible mock GPU, so they need no
@@ -26,7 +27,7 @@ asciinema play demos/00-live-real-kernel.cast
 
 | Cast | Shows |
 | ---- | ----- |
-| `00-live-real-kernel.cast`   | **Real** kernel: live wavefronts + registers, the sim clock advancing across steps, and a live register write |
+| `00-live-real-kernel.cast`   | **Real** kernel: live wavefronts + registers, the PC single-stepping through the kernel, a live register write, and a verified-correct result |
 | `01-attach-and-inspect.cast` | Attaching, listing wavefronts, selecting one, dumping its registers |
 | `02-stepping.cast`           | Single-stepping (`stepi`) and watching the PC / registers advance |
 | `03-breakpoints.cast`        | Setting a PC breakpoint and continuing to it |
@@ -48,11 +49,13 @@ demos/record-live.sh        # writes demos/00-live-real-kernel.cast
 
 The same live path is covered by an integration test
 (`debug_observes_live_kernel_waves` in `rocjitsu/tests/daemon.rs`), which
-catches the real wavefronts and reads their PC/SGPR/VGPR state. Run it
-with:
+catches the real wavefronts, reads their PC/SGPR/VGPR state, proves the PC
+advances under single-stepping, and — with a full-path sim config — checks
+the kernel result is correct. Run it with:
 
 ```sh
 ROCM_HOME=<dir-with-lib> \
+RJ_DAEMON_CONFIG=<rocjitsu>/configs/amdgpu_cdna4_kmd.json \
 RJ_HIP_VECTOR_ADD_BIN=<build>/tests/hip_vector_add_test \
 RJ_PRELOAD_LIB=<build>/librocjitsu.so \
   cargo test -p mirage_rocjitsu --test daemon debug_observes_live_kernel_waves

@@ -15,6 +15,7 @@ rj_build="$(cd "$mirage_dir/../rocjitsu/build" && pwd)"
 
 lib="$rj_build/librocjitsu.so"
 workload="$rj_build/tests/hip_vector_add_test"
+config="$mirage_dir/../rocjitsu/configs/amdgpu_cdna4_kmd.json"
 cast="$here/00-live-real-kernel.cast"
 
 if [[ ! -f "$lib" ]]; then
@@ -23,6 +24,10 @@ if [[ ! -f "$lib" ]]; then
 fi
 if [[ ! -f "$workload" ]]; then
   echo "missing $workload — build the rocjitsu tests first" >&2
+  exit 1
+fi
+if [[ ! -f "$config" ]]; then
+  echo "missing $config" >&2
   exit 1
 fi
 if ! command -v asciinema >/dev/null; then
@@ -44,6 +49,7 @@ echo "building the live demo example…" >&2
 asciinema rec --overwrite \
   --title "mirage debug — live vector_add kernel (real, no mock)" \
   --command "cd '$mirage_dir' && ROCM_HOME='$rocm_home' \
+    RJ_DAEMON_CONFIG='$config' \
     RJ_HIP_VECTOR_ADD_BIN='$workload' RJ_PRELOAD_LIB='$lib' \
     cargo run -q -p mirage_rocjitsu --example live_debug_demo 2>/dev/null" \
   "$cast"

@@ -91,6 +91,9 @@ void DebugController::suspend() {
     cv_.notify_all();
   }
   cv_.wait(lk, [&] { return exit_requested_ || parked_; });
+  // Engine is parked: arm fine-grained (one instruction/tick) execution so a
+  // subsequent step or breakpoint can observe and stop wavefronts mid-kernel.
+  apply_exec_granularity_locked();
 }
 
 void DebugController::resume() {
@@ -100,6 +103,9 @@ void DebugController::resume() {
   pause_requested_ = false;
   step_budget_ = 0;
   stop_reason_ = RJ_DBG_STOP_NONE;
+  // Restore full-speed execution unless a breakpoint is still armed (in which
+  // case we keep stepping one instruction at a time so the engine can catch it).
+  apply_exec_granularity_locked();
   cv_.notify_all();
 }
 
@@ -112,6 +118,8 @@ void DebugController::step(uint64_t ticks) {
   step_budget_ = ticks;
   pause_requested_ = true;
   stop_reason_ = RJ_DBG_STOP_STEP;
+  // A step retires one instruction per wavefront per tick (fine granularity).
+  apply_exec_granularity_locked();
   cv_.notify_all();
   cv_.wait(lk, [&] { return exit_requested_ || exited_ || (parked_ && step_budget_ == 0); });
 }
@@ -139,16 +147,30 @@ bool DebugController::wait_stop(uint64_t timeout_ms, bool *stopped, rj_dbg_stop_
 
 uint32_t DebugController::break_set(uint64_t pc) {
   std::lock_guard<std::mutex> lk(mu_);
+  uint32_t id;
+  bool placed = false;
   for (size_t i = 0; i < breakpoints_.size(); ++i)
-    if (breakpoints_[i] == pc)
-      return static_cast<uint32_t>(i + 1);
-  for (size_t i = 0; i < breakpoints_.size(); ++i)
-    if (breakpoints_[i] == 0) {
-      breakpoints_[i] = pc;
-      return static_cast<uint32_t>(i + 1);
+    if (breakpoints_[i] == pc) {
+      id = static_cast<uint32_t>(i + 1);
+      placed = true;
+      break;
     }
-  breakpoints_.push_back(pc);
-  return static_cast<uint32_t>(breakpoints_.size());
+  if (!placed) {
+    for (size_t i = 0; i < breakpoints_.size() && !placed; ++i)
+      if (breakpoints_[i] == 0) {
+        breakpoints_[i] = pc;
+        id = static_cast<uint32_t>(i + 1);
+        placed = true;
+      }
+  }
+  if (!placed) {
+    breakpoints_.push_back(pc);
+    id = static_cast<uint32_t>(breakpoints_.size());
+  }
+  // Arming a breakpoint switches the engine to fine-grained execution so the
+  // wave can be stopped exactly at the breakpoint PC.
+  apply_exec_granularity_locked();
+  return id;
 }
 
 bool DebugController::break_clear(uint32_t id) {
@@ -156,6 +178,7 @@ bool DebugController::break_clear(uint32_t id) {
   if (id == 0 || id > breakpoints_.size() || breakpoints_[id - 1] == 0)
     return false;
   breakpoints_[id - 1] = 0;
+  apply_exec_granularity_locked();
   return true;
 }
 
@@ -240,6 +263,29 @@ bool DebugController::any_wave_at_breakpoint() {
     }
   }
   return false;
+}
+
+void DebugController::apply_exec_granularity_locked() {
+  if (!soc_)
+    return;
+  // Fine-grained (one instruction per tick) while a breakpoint is armed or the
+  // engine is stopped/stepping; otherwise full speed.
+  bool any_bp = false;
+  for (uint64_t bp : breakpoints_)
+    if (bp != 0) {
+      any_bp = true;
+      break;
+    }
+  const bool fine = any_bp || pause_requested_ || step_budget_ > 0;
+  const uint32_t quantum = fine ? 1u : amdgpu::ComputeUnitCore::kFunctionalQuantum;
+  for (uint32_t x = 0; x < soc_->num_xcds(); ++x) {
+    auto *xcd = soc_->xcd(x);
+    for (uint32_t s = 0; s < xcd->num_shader_engines(); ++s) {
+      auto *se = xcd->shader_engine(s);
+      for (uint32_t c = 0; c < se->num_compute_units(); ++c)
+        se->compute_unit(c)->set_functional_quantum(quantum);
+    }
+  }
 }
 
 // ===========================================================================

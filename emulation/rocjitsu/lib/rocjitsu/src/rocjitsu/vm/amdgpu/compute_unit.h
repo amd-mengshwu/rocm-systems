@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <functional>
@@ -175,6 +176,23 @@ public:
   /// @brief Return the total number of wavefront slots.
   /// @returns Total hardware wavefront slot count.
   uint32_t num_wf_slots() const { return config_.num_wf_slots; }
+
+  /// @brief Set the FUNCTIONAL-mode instruction quantum (instructions per
+  /// advance() before yielding to the event loop).
+  ///
+  /// @details Defaults to @c kFunctionalQuantum for full-speed execution.
+  /// A debugger sets this to 1 so each engine tick retires a single
+  /// instruction per wavefront, which keeps wavefronts observable between
+  /// ticks and lets PC breakpoints stop a wave mid-kernel. Clamped to a
+  /// minimum of 1.
+  void set_functional_quantum(uint32_t q) {
+    functional_quantum_.store(q ? q : 1, std::memory_order_relaxed);
+  }
+
+  /// @brief Return the current FUNCTIONAL-mode instruction quantum.
+  uint32_t functional_quantum() const {
+    return functional_quantum_.load(std::memory_order_relaxed);
+  }
 
   /// @brief Access a wavefront slot by index (always non-null).
   /// @param idx Zero-based wavefront slot index.
@@ -501,6 +519,9 @@ protected:
   simdojo::Port *cpl_ = nullptr; ///< Completer port: dispatch activation from CP.
   simdojo::Port *req_ = nullptr; ///< Requester port: L2 cache request (structural).
   uint64_t step_count_ = 0;
+  /// Instructions per advance() in FUNCTIONAL mode (a debugger sets this to 1).
+  /// Atomic: written by the debug-controller thread, read by the engine thread.
+  std::atomic<uint32_t> functional_quantum_{kFunctionalQuantum};
 };
 
 /// @brief Execution-mode-aware compute unit shell.
@@ -520,7 +541,8 @@ public:
   /// @brief Execute work up to the quantum limit, then yield.
   bool advance() override {
     if constexpr (Mode == simdojo::ExecMode::FUNCTIONAL) {
-      for (uint32_t i = 0; i < kFunctionalQuantum && step(); ++i) {
+      const uint32_t quantum = this->functional_quantum_.load(std::memory_order_relaxed);
+      for (uint32_t i = 0; i < quantum && step(); ++i) {
       }
     } else {
       /// @todo: Support CLOCKED pipeline cycle.

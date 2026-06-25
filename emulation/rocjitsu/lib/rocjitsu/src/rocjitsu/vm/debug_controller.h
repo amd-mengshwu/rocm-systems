@@ -112,6 +112,16 @@ private:
   /// @brief True if any live wave's PC matches a breakpoint (no locking).
   bool any_wave_at_breakpoint();
 
+  /// @brief Push the FUNCTIONAL-mode instruction quantum to every CU based on
+  /// the current debug state (no locking; engine must be parked).
+  ///
+  /// @details While a breakpoint is armed or a step is in flight, each CU
+  /// retires a single instruction per engine tick so wavefronts stay visible
+  /// and PC breakpoints can stop a wave mid-kernel. Otherwise the CUs run at
+  /// full speed (the default quantum) so an un-instrumented @c continue is
+  /// not slowed down.
+  void apply_exec_granularity_locked();
+
   simdojo::SimulationEngine *engine_ = nullptr;
   SoC *soc_ = nullptr;
 

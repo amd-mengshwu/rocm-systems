@@ -262,7 +262,10 @@ fn debug_socket_controls_the_live_engine() {
 /// preload, supplied via env (the rocjitsu CMake build exports both):
 ///   * `RJ_HIP_VECTOR_ADD_BIN` — path to the `hip_vector_add_test` binary
 ///   * `RJ_PRELOAD_LIB`        — path to `librocjitsu.so` for `LD_PRELOAD`
-/// The test skips cleanly when either is absent.
+/// Optionally set `RJ_DAEMON_CONFIG` to a hand-written sim config (e.g. the
+/// rocjitsu CMake `configs/amdgpu_cdna4_kmd.json`); when present the test
+/// additionally asserts the kernel computes the correct result end-to-end.
+/// The test skips cleanly when the binary/library are absent.
 #[test]
 fn debug_observes_live_kernel_waves() {
     use mirage_debug::Client;
@@ -296,7 +299,7 @@ fn debug_observes_live_kernel_waves() {
     let def = EmulatorDef {
         emulator: "rocjitsu".to_string(),
         plugins: Default::default(),
-        exec_mode: ExecMode::Clocked,
+        exec_mode: ExecMode::Functional,
         options: Default::default(),
         topology: MaybeRef::Owned(mirage_core::topology::TopologyDef {
             num_nodes: 1,
@@ -305,6 +308,11 @@ fn debug_observes_live_kernel_waves() {
         }),
     };
     let config = kmd_config(&def, None).unwrap();
+    // A hand-written sim config that exercises the full memory/SDMA path is
+    // required for the kernel to compute correct results (the builtin-agent
+    // config does not). When supplied we additionally assert correctness.
+    let external_config = std::env::var_os("RJ_DAEMON_CONFIG").map(std::path::PathBuf::from);
+    let config = external_config.clone().unwrap_or(config);
     let runtime_dir = tmp.path().join("rt");
     let daemon = Daemon::start(&lib, &config, &runtime_dir).expect("daemon should start");
 
@@ -334,46 +342,37 @@ fn debug_observes_live_kernel_waves() {
         .expect("spawn the HIP workload");
 
     // Single-step the engine in small batches, polling the live wave set,
-    // until the kernel's wavefronts appear. Everything observed here is
-    // produced by the real engine running real instructions.
-    const BATCH: u64 = 500;
+    // until the kernel's wavefronts appear. In FUNCTIONAL mode the debugger
+    // forces one-instruction-per-tick execution, so the waves are observable
+    // and their PCs advance under single-stepping. A small batch catches them
+    // near the kernel entry.
+    const BATCH: u64 = 4;
     const DEADLINE: Duration = Duration::from_secs(90);
     let start = Instant::now();
-    let mut peak_waves: Vec<mirage_debug::WaveInfo> = Vec::new();
-    let mut saw_waves = false;
+    let mut caught: Vec<mirage_debug::WaveInfo> = Vec::new();
 
     while start.elapsed() < DEADLINE {
         client.step(BATCH).expect("step the live engine");
         let _ = client.wait_stop(5_000);
         let waves = client.wave_list().expect("wave_list round-trips");
         if !waves.is_empty() {
-            saw_waves = true;
-            if waves.len() > peak_waves.len() {
-                peak_waves = waves;
-            }
-            // Keep stepping a little past the first sighting to let the
-            // peak number of concurrent waves materialise, then stop.
-            if peak_waves.len() >= 2 {
-                break;
-            }
-        } else if saw_waves {
-            // The dispatch has fully drained; we already captured it.
+            caught = waves;
             break;
         }
     }
 
     assert!(
-        saw_waves,
+        !caught.is_empty(),
         "expected to catch at least one live wavefront from the kernel within the deadline"
     );
 
     // Inspect a real wavefront: it must carry a plausible live PC and let
     // us read its registers straight from the engine. Everything below is
     // read out of the actual CDNA compute unit executing the kernel.
-    let wave = peak_waves[0].clone();
+    let wave = caught[0].clone();
     eprintln!(
         "caught {} live wave(s); first @ {} pc={:#x} state={}",
-        peak_waves.len(),
+        caught.len(),
         wave.coord(),
         wave.pc,
         wave.state
@@ -406,29 +405,95 @@ fn debug_observes_live_kernel_waves() {
         "should read one value per active lane of v0"
     );
 
-    // Re-enumerate to prove the wave set is stable and queryable while the
-    // engine is parked under our control.
-    let again = client.wave_list().expect("re-list live waves");
+    // Single-step the wave and prove its PC actually advances through the
+    // kernel — real instructions are retiring on the live compute unit.
+    let pc_before = wave.pc;
+    let mut advanced = false;
+    for _ in 0..8 {
+        client.step(8).expect("single-step the live wave");
+        let _ = client.wait_stop(5_000);
+        match client.wave_info(wave.id) {
+            Ok(info) if info.pc != pc_before => {
+                eprintln!("PC advanced {:#x} -> {:#x}", pc_before, info.pc);
+                advanced = true;
+                break;
+            }
+            // The wave retired (kernel finished) — that is also forward
+            // progress, just past where we can compare PCs.
+            Err(_) => {
+                advanced = true;
+                break;
+            }
+            _ => {}
+        }
+    }
     assert!(
-        again.iter().any(|w| w.id == wave.id),
-        "the inspected wave should still be present on a re-list"
+        advanced,
+        "single-stepping should advance the live wave's PC (was {pc_before:#x})"
     );
 
-    // Resume the engine and detach. A full cycle-accurate run of this
-    // kernel to completion takes billions of ticks (the engine advances at
-    // tens of millions of ticks/sec but the 16-wave dispatch is long), so
-    // we do not block the test on the workload finishing — the debugger's
-    // job (observing and inspecting the live waves) is already proven. We
-    // tear the workload down cleanly instead.
+    // Resume and let the real workload run to completion. With a sim config
+    // that models the full memory/SDMA path, the kernel must compute the
+    // correct result end-to-end through the emulator.
     client.resume().expect("resume the live engine");
     client.detach().ok();
     drop(client);
-    let _ = child.kill();
-    let _ = child.wait();
+
+    let output = wait_with_timeout(&mut child, Duration::from_secs(120));
+    if external_config.is_some() {
+        let output = output.expect("HIP workload should finish after resume");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "HIP workload should pass through the emulator; stdout=\n{stdout}\nstderr=\n{stderr}"
+        );
+    } else {
+        // Without the full-path config the builtin-agent config does not
+        // compute correct results; we only proved the debugger observed and
+        // stepped real wavefronts. Tear the workload down.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 
     let socket_path = daemon.socket_path().to_path_buf();
     Box::new(daemon).stop();
     assert!(!socket_path.exists(), "daemon socket removed on shutdown");
+}
+
+/// Wait for `child` to exit within `timeout`, returning its captured output.
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    use std::time::Instant;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+                if let Some(mut s) = child.stdout.take() {
+                    let _ = std::io::Read::read_to_end(&mut s, &mut out);
+                }
+                if let Some(mut s) = child.stderr.take() {
+                    let _ = std::io::Read::read_to_end(&mut s, &mut err);
+                }
+                let status = child.wait().ok()?;
+                return Some(std::process::Output {
+                    status,
+                    stdout: out,
+                    stderr: err,
+                });
+            }
+            Ok(None) if start.elapsed() > timeout => {
+                let _ = child.kill();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    }
 }
 
 
