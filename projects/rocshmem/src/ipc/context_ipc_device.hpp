@@ -156,9 +156,15 @@ class IPCContext : public Context {
                             const size_t source_displs[]);
 
   template <typename T>
-  __device__ void fcollect(rocshmem_team_t team, T *dest, const T *source,
+  __device__ void fcollect_wg(rocshmem_team_t team, T *dest, const T *source,
                            int nelems);
 
+  template <typename T>
+  __device__ int fcollect_wave(rocshmem_team_t team, T *dest, const T *source,
+                           int nelems);
+
+  __device__ int fcollectmem_wave(rocshmem_team_t team, void *dest, const void *source,
+                           int nelems);
 
   // Block/wave functions
   __device__ void putmem_wg(void *dest, const void *source, size_t nelems,
@@ -370,8 +376,11 @@ class IPCContext : public Context {
                                          int pe_root);  // NOLINT(runtime/int)
 
   template <typename T>
-  __device__ void fcollect_linear(rocshmem_team_t team, T *dest,
+  __device__ void fcollect_linear_wg(rocshmem_team_t team, T *dest,
                                   const T *source, int nelems);
+
+  __device__ void fcollectmem_linear_wave(rocshmem_team_t team, void *dest,
+                                  const void *source, int nelems);
 
   template <typename T>
   __device__ void alltoall_linear(rocshmem_team_t team, T *dest,

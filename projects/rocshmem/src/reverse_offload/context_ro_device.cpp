@@ -781,4 +781,12 @@ __device__ int ROContext::tile_collective_wait([[maybe_unused]] rocshmem_team_t 
   return ROCSHMEM_ERROR;
 }
 
+__device__ int ROContext::fcollectmem_wave([[maybe_unused]] rocshmem_team_t team,
+                                            [[maybe_unused]] void *dest,
+                                            [[maybe_unused]] const void *source,
+                                            [[maybe_unused]] int nelems) {
+  LOGD_WARN("fcollectmem_wave is not available on reverse offload backend");
+  return ROCSHMEM_ERROR;
+}
+
 }  // namespace rocshmem
