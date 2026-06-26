@@ -2326,8 +2326,8 @@ write_rocpd(
                     if(!_comm.empty()) inst_comment = std::move(_comm);
                 }
 
-                auto wave_issued       = std::optional<int64_t>{};
-                auto wave_count        = std::optional<int64_t>{};
+                auto wave_issued  = std::optional<int64_t>{};
+                auto wave_count   = std::optional<int64_t>{};
                 auto inst_type    = std::optional<int64_t>{};
                 auto stall_reason = std::optional<int64_t>{};
 
@@ -2355,11 +2355,10 @@ write_rocpd(
                                  common::mpl::unqualified_type_t<decltype(pc_sampling_gen)>,
                                  generator<rocprofiler_tool_pc_sampling_stochastic_record_t>>)
                 {
-                    wave_issued    = static_cast<int64_t>(record.wave_issued);
-                    wave_count     = static_cast<int64_t>(record.wave_count);
-                    inst_type      = static_cast<int64_t>(record.inst_type);
-                    stall_reason   = static_cast<int64_t>(record.snapshot.reason_not_issued);
-
+                    wave_issued  = static_cast<int64_t>(record.wave_issued);
+                    wave_count   = static_cast<int64_t>(record.wave_count);
+                    inst_type    = static_cast<int64_t>(record.inst_type);
+                    stall_reason = static_cast<int64_t>(record.snapshot.reason_not_issued);
 
 #define SET_ARB_FIELD(FIELD)                                                                       \
     extdata.FIELD = static_cast<uint8_t>(static_cast<bool>(record.snapshot.FIELD) ? 1 : 0)
