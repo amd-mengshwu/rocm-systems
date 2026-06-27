@@ -446,29 +446,14 @@ __device__ __forceinline__ void copy_remainder(uint8_t* dst,
                                                int remainder) {
   if (remainder == 0) return;
 
-  if (remainder & 1) {
-    auto val = AsmAccess<1, LP, SP>::load(src);
+  if (remainder & 8) {
+    auto val = AsmAccess<8, LP, SP>::load(src);
     if constexpr (LP != CachePolicy::Standard) {
       wait_on_vmem_and_lds(0);
     }
-    AsmAccess<1, LP, SP>::store(dst, val);
-    if (remainder == 1) {
-      return;
-    }
-    dst += 1;
-    src += 1;
-  }
-  if (remainder & 2) {
-    auto val = AsmAccess<2, LP, SP>::load(src);
-    if constexpr (LP != CachePolicy::Standard) {
-      wait_on_vmem_and_lds(0);
-    }
-    AsmAccess<2, LP, SP>::store(dst, val);
-    if (remainder == 2) {
-      return;
-    }
-    dst += 2;
-    src += 2;
+    AsmAccess<8, LP, SP>::store(dst, val);
+    dst += 8;
+    src += 8;
   }
   if (remainder & 4) {
     auto val = AsmAccess<4, LP, SP>::load(src);
@@ -476,18 +461,60 @@ __device__ __forceinline__ void copy_remainder(uint8_t* dst,
       wait_on_vmem_and_lds(0);
     }
     AsmAccess<4, LP, SP>::store(dst, val);
-    if (remainder == 4) {
-      return;
-    }
     dst += 4;
     src += 4;
   }
-  if (remainder & 8) {
-    auto val = AsmAccess<8, LP, SP>::load(src);
+  if (remainder & 2) {
+    auto val = AsmAccess<2, LP, SP>::load(src);
     if constexpr (LP != CachePolicy::Standard) {
       wait_on_vmem_and_lds(0);
     }
-    AsmAccess<8, LP, SP>::store(dst, val);
+    AsmAccess<2, LP, SP>::store(dst, val);
+    dst += 2;
+    src += 2;
+  }
+  if (remainder & 1) {
+    auto val = AsmAccess<1, LP, SP>::load(src);
+    if constexpr (LP != CachePolicy::Standard) {
+      wait_on_vmem_and_lds(0);
+    }
+    AsmAccess<1, LP, SP>::store(dst, val);
+  }
+}
+
+template <int ChunkSize, MemcpyKind Kind, CachePolicy LP, CachePolicy SP>
+__device__ __forceinline__ void execute_copy(void* dst, void* src, size_t size, 
+                                             int tid, int stride) {
+  constexpr int Unroll = 16;
+  int n_chunks = static_cast<int>(size / ChunkSize);
+  int remainder = static_cast<int>(size % ChunkSize);
+  
+  if (n_chunks > 0) {
+    copy_bulk<ChunkSize, LP, SP, Unroll>(dst, src, n_chunks, tid, stride);
+  }
+
+  if (tid == 0 && remainder > 0) {
+    copy_remainder<LP, SP>(static_cast<uint8_t*>(dst) + n_chunks * ChunkSize,
+                           static_cast<uint8_t*>(src) + n_chunks * ChunkSize, 
+                           remainder);
+  }
+}
+
+template <MemcpyKind Kind, CachePolicy LP, CachePolicy SP>
+__device__ __forceinline__ void dispatch_aligned_copy(void* dst, void* src, size_t size, 
+                                                      int tid, int stride) {
+  uintptr_t d_ptr = reinterpret_cast<uintptr_t>(dst);
+  uintptr_t s_ptr = reinterpret_cast<uintptr_t>(src);
+  uintptr_t align = d_ptr | s_ptr;  // Joint alignment
+
+  if ((align % 16) == 0 && size >= 16) {
+    execute_copy<16, Kind, LP, SP>(dst, src, size, tid, stride);
+  } else if ((align % 8) == 0 && size >= 8) {
+    execute_copy<8, Kind, LP, SP>(dst, src, size, tid, stride);
+  } else if ((align % 4) == 0 && size >= 4) {
+    execute_copy<4, Kind, LP, SP>(dst, src, size, tid, stride);
+  } else {
+    execute_copy<1, Kind, LP, SP>(dst, src, size, tid, stride);
   }
 }
 
@@ -501,30 +528,17 @@ template <MemcpyKind Kind = MemcpyKind::Put>
                                                              size_t size) {
   if (size == 0) return;
 
-  constexpr int ChunkSize = 16;
-  constexpr int Unroll    = 16;
-  // Compile-time bypass policy: cache-bypass in the direction of the remote side.
   constexpr CachePolicy LP = is_put(Kind) ? CachePolicy::Standard    : CachePolicy::SystemScope;
   constexpr CachePolicy SP = is_put(Kind) ? CachePolicy::SystemScope : CachePolicy::Standard;
 
-  int n_chunks  = static_cast<int>(size / ChunkSize);
-  int remainder = static_cast<int>(size % ChunkSize);
-
   if (size >= 16 && get_flat_block_size() > 4) {
-    // Many threads, large transfer: use cached Standard policy.
-    // Fences are direction-specific to maintain system-scope coherence.
+    // Many threads, large transfer: use cached Standard policy with system fences.
     if constexpr (!is_put(Kind)) {
       detail::atomic::threadfence<detail::atomic::memory_scope_system,
                                   detail::atomic::memory_order_acquire>();
     }
 
-    if (n_chunks > 0) {
-      copy_bulk<ChunkSize, CachePolicy::Standard, CachePolicy::Standard, 8>(
-          dst, src, n_chunks, 0, 1);
-    }
-    copy_remainder<CachePolicy::Standard, CachePolicy::Standard>(
-        static_cast<uint8_t*>(dst) + n_chunks * ChunkSize,
-        static_cast<uint8_t*>(src) + n_chunks * ChunkSize, remainder);
+    dispatch_aligned_copy<Kind, CachePolicy::Standard, CachePolicy::Standard>(dst, src, size, 0, 1);
 
     if constexpr (is_put(Kind)) {
       detail::atomic::threadfence<detail::atomic::memory_scope_system,
@@ -533,12 +547,7 @@ template <MemcpyKind Kind = MemcpyKind::Put>
   } else {
     // Small transfer or single-lane: cache-bypass policy provides direct
     // remote visibility without explicit fences.
-    if (n_chunks > 0) {
-      copy_bulk<ChunkSize, LP, SP, Unroll>(dst, src, n_chunks, 0, 1);
-    }
-    copy_remainder<LP, SP>(
-        static_cast<uint8_t*>(dst) + n_chunks * ChunkSize,
-        static_cast<uint8_t*>(src) + n_chunks * ChunkSize, remainder);
+    dispatch_aligned_copy<Kind, LP, SP>(dst, src, size, 0, 1);
   }
 }
 
@@ -547,9 +556,6 @@ template <MemcpyKind Kind = MemcpyKind::Put>
                                                              size_t size) {
   if (size == 0) return;
 
-  constexpr int ChunkSize = 16;
-  constexpr int Unroll    = 16;
-
   constexpr CachePolicy LP =
       is_put(Kind) ? CachePolicy::Standard : CachePolicy::SystemScope;
   constexpr CachePolicy SP =
@@ -557,28 +563,14 @@ template <MemcpyKind Kind = MemcpyKind::Put>
 
   int wave_tid = get_flat_block_id() % WF_SIZE;
   int wave_size{wave_SZ()};
-  int n_chunks = size / ChunkSize;
-  int remainder = size % ChunkSize;
 
-  if (n_chunks > 0) {
-    copy_bulk<ChunkSize, LP, SP, Unroll>(dst, src, n_chunks, wave_tid, wave_size);
-  }
-
-  // Remainder handled uniquely by the first thread in the wave
-  if (wave_tid == 0) {
-    copy_remainder<LP, SP>(static_cast<uint8_t*>(dst) + n_chunks * ChunkSize,
-                           static_cast<uint8_t*>(src) + n_chunks * ChunkSize, 
-                           remainder);
-  }
+  dispatch_aligned_copy<Kind, LP, SP>(dst, src, size, wave_tid, wave_size);
 }
 
 template <MemcpyKind Kind = MemcpyKind::Put>
 [[maybe_unused]] __device__ __forceinline__ void memcpy_wg(void* dst, void* src,
                                                            size_t size) {
   if (size == 0) return;
-
-  constexpr int ChunkSize = 16;
-  constexpr int Unroll    = 16;
 
   constexpr CachePolicy LP =
       is_put(Kind) ? CachePolicy::Standard : CachePolicy::SystemScope;
@@ -587,19 +579,8 @@ template <MemcpyKind Kind = MemcpyKind::Put>
 
   int thread_id = get_flat_block_id();
   int block_size = get_flat_block_size();
-  int n_chunks = size / ChunkSize;
-  int remainder = size % ChunkSize;
 
-  if (n_chunks > 0) {
-    copy_bulk<ChunkSize, LP, SP, Unroll>(dst, src, n_chunks, thread_id, block_size);
-  }
-
-  // Remainder handled uniquely by the first thread in the workgroup
-  if (thread_id == 0) {
-    copy_remainder<LP, SP>(static_cast<uint8_t*>(dst) + n_chunks * ChunkSize,
-                           static_cast<uint8_t*>(src) + n_chunks * ChunkSize,
-                           remainder);
-  }
+  dispatch_aligned_copy<Kind, LP, SP>(dst, src, size, thread_id, block_size);
 }
 
 /* Is ptr_b in range [ptr_a, ptr_a + len_a) */
