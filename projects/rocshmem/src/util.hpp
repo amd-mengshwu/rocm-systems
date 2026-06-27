@@ -441,77 +441,35 @@ __device__ __forceinline__ void copy_bulk(void* dst, void* src,
 // REMAINDER COPY (< 16 Bytes Fast Path)
 // ==============================================================================
 template <CachePolicy LP, CachePolicy SP>
-__device__ __forceinline__ void copy_remainder(uint8_t* dst,
-                                               uint8_t* src,
-                                               int remainder) {
-  if (remainder == 0) return;
+__device__ __forceinline__ void copy_remainder(uint8_t* dst, uint8_t* src, int size) {
+  while (size > 0) {
+    // Dynamically check alignment at the current pointer position
+    uintptr_t align = reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src);
 
-  if (remainder & 8) {
-    auto val = AsmAccess<8, LP, SP>::load(src);
-    if constexpr (LP != CachePolicy::Standard) {
-      wait_on_vmem_and_lds(0);
+    if (size >= 8 && (align & 7) == 0) {
+      auto val = AsmAccess<8, LP, SP>::load(src);
+      if constexpr (LP != CachePolicy::Standard) wait_on_vmem_and_lds(0);
+      AsmAccess<8, LP, SP>::store(dst, val);
+      dst += 8; src += 8; size -= 8;
+    } 
+    else if (size >= 4 && (align & 3) == 0) {
+      auto val = AsmAccess<4, LP, SP>::load(src);
+      if constexpr (LP != CachePolicy::Standard) wait_on_vmem_and_lds(0);
+      AsmAccess<4, LP, SP>::store(dst, val);
+      dst += 4; src += 4; size -= 4;
+    } 
+    else if (size >= 2 && (align & 1) == 0) {
+      auto val = AsmAccess<2, LP, SP>::load(src);
+      if constexpr (LP != CachePolicy::Standard) wait_on_vmem_and_lds(0);
+      AsmAccess<2, LP, SP>::store(dst, val);
+      dst += 2; src += 2; size -= 2;
+    } 
+    else {
+      auto val = AsmAccess<1, LP, SP>::load(src);
+      if constexpr (LP != CachePolicy::Standard) wait_on_vmem_and_lds(0);
+      AsmAccess<1, LP, SP>::store(dst, val);
+      dst += 1; src += 1; size -= 1;
     }
-    AsmAccess<8, LP, SP>::store(dst, val);
-    dst += 8;
-    src += 8;
-  }
-  if (remainder & 4) {
-    auto val = AsmAccess<4, LP, SP>::load(src);
-    if constexpr (LP != CachePolicy::Standard) {
-      wait_on_vmem_and_lds(0);
-    }
-    AsmAccess<4, LP, SP>::store(dst, val);
-    dst += 4;
-    src += 4;
-  }
-  if (remainder & 2) {
-    auto val = AsmAccess<2, LP, SP>::load(src);
-    if constexpr (LP != CachePolicy::Standard) {
-      wait_on_vmem_and_lds(0);
-    }
-    AsmAccess<2, LP, SP>::store(dst, val);
-    dst += 2;
-    src += 2;
-  }
-  if (remainder & 1) {
-    auto val = AsmAccess<1, LP, SP>::load(src);
-    if constexpr (LP != CachePolicy::Standard) {
-      wait_on_vmem_and_lds(0);
-    }
-    AsmAccess<1, LP, SP>::store(dst, val);
-  }
-}
-
-template <int ChunkSize, MemcpyKind Kind, CachePolicy LP, CachePolicy SP>
-__device__ __forceinline__ void execute_copy(void* dst, void* src, size_t size, 
-                                             int tid, int stride) {
-  constexpr int Unroll = 16;
-  int n_chunks = static_cast<int>(size / ChunkSize);
-  int remainder = static_cast<int>(size % ChunkSize);
-  
-  if (n_chunks > 0) {
-    copy_bulk<ChunkSize, LP, SP, Unroll>(dst, src, n_chunks, tid, stride);
-  }
-
-  if (tid == 0 && remainder > 0) {
-    copy_remainder<LP, SP>(static_cast<uint8_t*>(dst) + n_chunks * ChunkSize,
-                           static_cast<uint8_t*>(src) + n_chunks * ChunkSize, 
-                           remainder);
-  }
-}
-
-template <MemcpyKind Kind, CachePolicy LP, CachePolicy SP>
-__device__ __forceinline__ void dispatch_aligned_copy(void* dst, void* src, size_t size,
-                                                      int tid, int stride) {
-  uintptr_t d_ptr = reinterpret_cast<uintptr_t>(dst);
-  uintptr_t s_ptr = reinterpret_cast<uintptr_t>(src);
-  uintptr_t align = d_ptr | s_ptr;  // Joint alignment
-
-  // __builtin_expect forces the 16-byte path to be the primary instruction stream
-  if (__builtin_expect((align & 15) == 0, 1)) [[likely]] {
-    execute_copy<16, Kind, LP, SP>(dst, src, size, tid, stride);
-  } else {
-    execute_copy<1, Kind, LP, SP>(dst, src, size, tid, stride);
   }
 }
 
@@ -521,63 +479,139 @@ __device__ __forceinline__ void dispatch_aligned_copy(void* dst, void* src, size
 
 // Blocking variants additionally drain all in-flight VMEM ops before returning.
 template <MemcpyKind Kind = MemcpyKind::Put>
-[[maybe_unused]] __device__ __forceinline__ void memcpy_lane(void* dst, void* src,
-                                                             size_t size) {
+[[maybe_unused]] __device__ __forceinline__ void memcpy_lane(void* dst, void* src, size_t size) {
   if (size == 0) return;
 
-  constexpr CachePolicy LP = is_put(Kind) ? CachePolicy::Standard    : CachePolicy::SystemScope;
+  constexpr CachePolicy LP = is_put(Kind) ? CachePolicy::Standard : CachePolicy::SystemScope;
   constexpr CachePolicy SP = is_put(Kind) ? CachePolicy::SystemScope : CachePolicy::Standard;
+  
+  uintptr_t align = reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src);
 
+  // Heuristic: Many threads, large transfer: use cached Standard policy + system fences
   if (size >= 16 && get_flat_block_size() > 4) {
-    // Many threads, large transfer: use cached Standard policy with system fences.
     if constexpr (!is_put(Kind)) {
       detail::atomic::threadfence<detail::atomic::memory_scope_system,
                                   detail::atomic::memory_order_acquire>();
     }
 
-    dispatch_aligned_copy<Kind, CachePolicy::Standard, CachePolicy::Standard>(dst, src, size, 0, 1);
+    if (__builtin_expect((align & 15) == 0, 1)) {
+      int n_chunks = size / 16;
+      int remainder = size % 16;
+
+      copy_bulk<16, CachePolicy::Standard, CachePolicy::Standard, 16>(
+          dst, src, n_chunks, 0, 1);
+          
+      copy_remainder<CachePolicy::Standard, CachePolicy::Standard>(
+          static_cast<uint8_t*>(dst) + n_chunks * 16,
+          static_cast<uint8_t*>(src) + n_chunks * 16, 
+          remainder);
+    } else {
+      copy_bulk<1, CachePolicy::Standard, CachePolicy::Standard, 4>(
+          dst, src, size, 0, 1);
+    }
 
     if constexpr (is_put(Kind)) {
       detail::atomic::threadfence<detail::atomic::memory_scope_system,
                                   detail::atomic::memory_order_release>();
     }
-  } else {
-    // Small transfer or single-lane: cache-bypass policy provides direct
-    // remote visibility without explicit fences.
-    dispatch_aligned_copy<Kind, LP, SP>(dst, src, size, 0, 1);
+  } 
+  // Normal cache-bypass path for small transfers or single-lane execution
+  else {
+    if (size >= 16) {
+      if (__builtin_expect((align & 15) == 0, 1)) {
+        int n_chunks = size / 16;
+        int remainder = size % 16;
+
+        copy_bulk<16, LP, SP, 16>(dst, src, n_chunks, 0, 1);
+        
+        copy_remainder<LP, SP>(static_cast<uint8_t*>(dst) + n_chunks * 16,
+                               static_cast<uint8_t*>(src) + n_chunks * 16,
+                               remainder);
+      } else {
+        copy_bulk<1, LP, SP, 4>(dst, src, size, 0, 1);
+      }
+    } else {
+      copy_remainder<LP, SP>(static_cast<uint8_t*>(dst),
+                             static_cast<uint8_t*>(src),
+                             size);
+    }
   }
 }
 
 template <MemcpyKind Kind = MemcpyKind::Put>
-[[maybe_unused]] __device__ __forceinline__ void memcpy_wave(void* dst, void* src,
-                                                             size_t size) {
+[[maybe_unused]] __device__ __forceinline__ void memcpy_wave(void* dst, void* src, size_t size) {
   if (size == 0) return;
 
-  constexpr CachePolicy LP =
-      is_put(Kind) ? CachePolicy::Standard : CachePolicy::SystemScope;
-  constexpr CachePolicy SP =
-      is_put(Kind) ? CachePolicy::SystemScope : CachePolicy::Standard;
+  constexpr CachePolicy LP = is_put(Kind) ? CachePolicy::Standard : CachePolicy::SystemScope;
+  constexpr CachePolicy SP = is_put(Kind) ? CachePolicy::SystemScope : CachePolicy::Standard;
 
   int wave_tid = get_flat_block_id() % WF_SIZE;
   int wave_size{wave_SZ()};
+  uintptr_t align = reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src);
 
-  dispatch_aligned_copy<Kind, LP, SP>(dst, src, size, wave_tid, wave_size);
+  if (size >= 16) {
+    if (__builtin_expect((align & 15) == 0, 1)) {
+      // Golden Path: Fast parallel 16-byte bulk
+      int n_chunks = size / 16;
+      int remainder = size % 16;
+
+      copy_bulk<16, LP, SP, 16>(dst, src, n_chunks, wave_tid, wave_size);
+
+      if (wave_tid == 0) {
+        copy_remainder<LP, SP>(static_cast<uint8_t*>(dst) + n_chunks * 16,
+                               static_cast<uint8_t*>(src) + n_chunks * 16,
+                               remainder);
+      }
+    } else {
+      // Safety Net: Large unaligned transfer
+      copy_bulk<1, LP, SP, 4>(dst, src, size, wave_tid, wave_size);
+    }
+  } else {
+    // The "Whatever Else" Path: Small sizes skip bulk setup entirely
+    if (wave_tid == 0) {
+      copy_remainder<LP, SP>(static_cast<uint8_t*>(dst),
+                             static_cast<uint8_t*>(src),
+                             size);
+    }
+  }
 }
 
 template <MemcpyKind Kind = MemcpyKind::Put>
-[[maybe_unused]] __device__ __forceinline__ void memcpy_wg(void* dst, void* src,
-                                                           size_t size) {
+[[maybe_unused]] __device__ __forceinline__ void memcpy_wg(void* dst, void* src, size_t size) {
   if (size == 0) return;
 
-  constexpr CachePolicy LP =
-      is_put(Kind) ? CachePolicy::Standard : CachePolicy::SystemScope;
-  constexpr CachePolicy SP =
-      is_put(Kind) ? CachePolicy::SystemScope : CachePolicy::Standard;
+  constexpr CachePolicy LP = is_put(Kind) ? CachePolicy::Standard : CachePolicy::SystemScope;
+  constexpr CachePolicy SP = is_put(Kind) ? CachePolicy::SystemScope : CachePolicy::Standard;
 
-  int thread_id = get_flat_block_id();
-  int block_size = get_flat_block_size();
+  int tid = get_flat_block_id();
+  int stride = get_flat_block_size();
+  uintptr_t align = reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src);
 
-  dispatch_aligned_copy<Kind, LP, SP>(dst, src, size, thread_id, block_size);
+  if (size >= 16) {
+    if (__builtin_expect((align & 15) == 0, 1)) {
+      // Golden Path: Fast parallel 16-byte bulk
+      int n_chunks = size / 16;
+      int remainder = size % 16;
+      
+      copy_bulk<16, LP, SP, 16>(dst, src, n_chunks, tid, stride);
+      
+      if (tid == 0) {
+        copy_remainder<LP, SP>(static_cast<uint8_t*>(dst) + n_chunks * 16,
+                               static_cast<uint8_t*>(src) + n_chunks * 16,
+                               remainder);
+      }
+    } else {
+      // Safety Net: Large unaligned transfer
+      copy_bulk<1, LP, SP, 4>(dst, src, size, tid, stride);
+    }
+  } else {
+    // The "Whatever Else" Path: Small sizes skip bulk setup entirely
+    if (tid == 0) {
+      copy_remainder<LP, SP>(static_cast<uint8_t*>(dst),
+                             static_cast<uint8_t*>(src),
+                             size);
+    }
+  }
 }
 
 /* Is ptr_b in range [ptr_a, ptr_a + len_a) */
