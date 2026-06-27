@@ -501,18 +501,21 @@ __device__ __forceinline__ void execute_copy(void* dst, void* src, size_t size,
 }
 
 template <MemcpyKind Kind, CachePolicy LP, CachePolicy SP>
-__device__ __forceinline__ void dispatch_aligned_copy(void* dst, void* src, size_t size, 
+__device__ __forceinline__ void dispatch_aligned_copy(void* dst, void* src, size_t size,
                                                       int tid, int stride) {
   uintptr_t d_ptr = reinterpret_cast<uintptr_t>(dst);
   uintptr_t s_ptr = reinterpret_cast<uintptr_t>(src);
   uintptr_t align = d_ptr | s_ptr;  // Joint alignment
 
-  if ((align % 16) == 0 && size >= 16) {
+  // __builtin_expect forces the 16-byte path to be the primary instruction stream
+  if (__builtin_expect((align & 15) == 0, 1)) {
     execute_copy<16, Kind, LP, SP>(dst, src, size, tid, stride);
-  } else if ((align % 8) == 0 && size >= 8) {
+  } else if ((align & 7) == 0) {
     execute_copy<8, Kind, LP, SP>(dst, src, size, tid, stride);
-  } else if ((align % 4) == 0 && size >= 4) {
+  } else if ((align & 3) == 0) {
     execute_copy<4, Kind, LP, SP>(dst, src, size, tid, stride);
+  } else if ((align & 1) == 0) {
+    execute_copy<2, Kind, LP, SP>(dst, src, size, tid, stride);
   } else {
     execute_copy<1, Kind, LP, SP>(dst, src, size, tid, stride);
   }
