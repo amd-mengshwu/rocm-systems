@@ -508,14 +508,8 @@ __device__ __forceinline__ void dispatch_aligned_copy(void* dst, void* src, size
   uintptr_t align = d_ptr | s_ptr;  // Joint alignment
 
   // __builtin_expect forces the 16-byte path to be the primary instruction stream
-  if (__builtin_expect((align & 15) == 0, 1)) {
+  if (__builtin_expect((align & 15) == 0, 1)) [[likely]] {
     execute_copy<16, Kind, LP, SP>(dst, src, size, tid, stride);
-  } else if ((align & 7) == 0) {
-    execute_copy<8, Kind, LP, SP>(dst, src, size, tid, stride);
-  } else if ((align & 3) == 0) {
-    execute_copy<4, Kind, LP, SP>(dst, src, size, tid, stride);
-  } else if ((align & 1) == 0) {
-    execute_copy<2, Kind, LP, SP>(dst, src, size, tid, stride);
   } else {
     execute_copy<1, Kind, LP, SP>(dst, src, size, tid, stride);
   }
