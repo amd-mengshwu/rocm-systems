@@ -487,7 +487,7 @@ template <MemcpyKind Kind = MemcpyKind::Put>
   
   uintptr_t align = reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src);
 
-  // Heuristic: Many threads, large transfer: use cached Standard policy + system fences
+  // Many threads, large transfer: use cached Standard policy + system fences
   if (size >= 16 && get_flat_block_size() > 4) {
     if constexpr (!is_put(Kind)) {
       detail::atomic::threadfence<detail::atomic::memory_scope_system,
@@ -589,7 +589,7 @@ template <MemcpyKind Kind = MemcpyKind::Put>
 
   if (size >= 16) {
     if (__builtin_expect((align & 15) == 0, 1)) {
-      // Golden Path: Fast parallel 16-byte bulk
+      // Aligned fast path
       int n_chunks = size / 16;
       int remainder = size % 16;
       
@@ -601,11 +601,11 @@ template <MemcpyKind Kind = MemcpyKind::Put>
                                remainder);
       }
     } else {
-      // Safety Net: Large unaligned transfer
+      // Large unaligned transfer
       copy_bulk<1, LP, SP, 4>(dst, src, size, tid, stride);
     }
   } else {
-    // The "Whatever Else" Path: Small sizes skip bulk setup entirely
+    // Small sizes skip bulk setup entirely
     if (tid == 0) {
       copy_remainder<LP, SP>(static_cast<uint8_t*>(dst),
                              static_cast<uint8_t*>(src),
