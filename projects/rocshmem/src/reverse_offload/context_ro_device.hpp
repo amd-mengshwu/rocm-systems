@@ -166,8 +166,11 @@ class ROContext : public Context {
                             const size_t source_displs[]);
 
   template <typename T>
-  __device__ void fcollect(rocshmem_team_t team, T *dest, const T *source,
+  __device__ void fcollect_wg(rocshmem_team_t team, T *dest, const T *source,
                            int nelems);
+
+  __device__ void fcollectmem_wg(rocshmem_team_t team, void *dest,
+                                  const void *source, int nelems);
 
   template <typename T>
   __device__ int fcollect_wave(rocshmem_team_t team, T *dest, const T *source,
