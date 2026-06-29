@@ -50,6 +50,24 @@ class TestAmdSmiCli(unittest.TestCase):
         cls.common = common.Common(verbose)
         cls.util = runcmd.Util("WARNING")
 
+        cls.InvalidCommand = 193
+        cls.InvalidParameter = 194
+        cls.DeviceNotFound = 195
+        cls.InvalidFilePath = 196
+        cls.InvalidParameterValue = 197
+        cls.MissingParameterValue = 198
+        cls.CommandNotSupported = 199
+        cls.ParameterNotSupported = 200
+        cls.RequiredCommand = 201
+        cls.InvalidSubcommand = 202
+        cls.PermissionDenied = 203
+        cls.UnknownError = 255
+
+        # error codes:
+        #      2: from amdsmi.h, AMDSMI_STATUS_NOT_SUPPORTED
+        #    199: from amd-smi,  AmdSmiCommandNotSupportedException
+        cls.not_supported_error_codes = [2, 199]
+
         # Record starting values; running here (once per class) rather than in
         # __init__ (once per test method) reduces setup overhead from O(N) to
         # O(1) — N being the number of test methods in this class.
@@ -104,6 +122,22 @@ class TestAmdSmiCli(unittest.TestCase):
             #'LEVEL': ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
         }
 
+    @classmethod
+    def _str_to_number(cls, num_str):
+        rc = 0
+        num_str = num_str.strip()
+        try:
+            value = int(num_str)
+        except ValueError:
+            try:
+                value = float(num_str)
+                if value.is_integer():
+                    value = int(value)
+            except ValueError:
+                rc = 1
+                value = num_str
+        return (rc, value)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.Debug = False
@@ -116,7 +150,7 @@ class TestAmdSmiCli(unittest.TestCase):
         self.AddLogLevel = "--loglevel DEBUG"
 
         self.PASS = 0
-        self.FAIL = 1
+        self.FAIL = -1
         self.tab = "    "
         self.tmp_filename = self.TMP_FILENAME
         self.tmp_folder = self.TMP_FOLDER
@@ -678,6 +712,61 @@ class TestAmdSmiCli(unittest.TestCase):
             print(json.dumps(cmds, sort_keys=False, indent=4), flush=True)
         return cmds
 
+    def _get_error_code(self, std_out, std_err, cond):
+        error_code = 0
+        items = []
+        output_stream = None
+        if std_out and "Error code" in std_out:
+            output_stream = "std_out"
+            items = std_out.strip().split()
+        elif std_err and "Error code" in std_err:
+            output_stream = "std_err"
+            items = std_err.strip().split()
+        elif cond != self.PASS:
+            if std_out:
+                output_stream = "std_out"
+                items = std_out.strip().split()
+            elif std_err:
+                output_stream = "std_err"
+                items = std_err.strip().split()
+        if items:
+            rc, error_code = self._str_to_number(items[-1])
+        return (error_code, output_stream)
+
+    def _get_command_return_msg(self, rc_num, ec_num, cond):
+        msg = ""
+        if cond == self.PASS:
+            if rc_num in self.not_supported_error_codes:
+                msg = "Success: PASS Not Supported   "
+            elif rc_num == 0 and ec_num == 0:
+                msg = "Success: Expected PASS (0)"
+            elif rc_num != 0:
+                msg = "Failure: Expected PASS (0)"
+            elif ec_num != 0:
+                msg = "Failure: Expected PASS (0)"
+            msg = f"{msg}; Received rc={rc_num:3d}, ec={str(ec_num):3s}"
+        else:
+            if cond < 0:
+                if rc_num > 0:
+                    msg = "Success: Expected FAIL (> 0)"
+                else:
+                    msg = "Failure: Expected FAIL (> 0)"
+            else:
+                if rc_num > 0 and (rc_num == ec_num):
+                    if rc_num == cond:
+                        msg = "Success: Expected FAIL (> 0)"
+                    else:
+                        msg = f"Failure: Expected FAIL ({cond})"
+                else:
+                    msg = "Failure: Expected FAIL (> 0)"
+            msg = f"{msg}; Received rc={rc_num:3d}, ec={str(ec_num):3s}"
+
+        if "Success" in msg:
+            passed = True
+        else:
+            passed = False
+        return (msg, passed)
+
     def RunCmds(self, cmds):
         errors = []
         msg_len = 0
@@ -692,49 +781,30 @@ class TestAmdSmiCli(unittest.TestCase):
             if self.PrintCmdsOnly:
                 continue
             (rc, std_out, std_err) = self.util.RunCmdSync(cmd)
-            error_code = rc
-            if rc and std_err:
-                items = std_err.split()
-                if "amdsmi_exception" in std_err:
-                    # error code from amdsmi library exception
-                    for index, item in enumerate(items):
-                        if item == "Error":
-                            error_code_str = items[index + 4]
-                            error_code = error_code_str
-                            # break
-                else:
-                    # error code from amd-smi CLI
-                    error_code = items[-1]
-                    # Check for parse error 'choice'
-                    if "CRITICAL" in error_code:
-                        error_code = "Bad loglevel"
+            if rc:
+                error_code, output_stream = self._get_error_code(std_out, std_err, cond)
+            else:
+                error_code = 0
+                output_stream = None
+            _msg, passed = self._get_command_return_msg(rc, error_code, cond)
 
             msg = f"{cmd:{msg_len}s}:"
             if "--file" in cmd:
                 if not os.path.exists(self.tmp_filename):
-                    _msg = f"{msg} Failure: File {self.tmp_filename} does not exist"
-                    errors.append(_msg)
+                    _fmsg = f"{msg} Failure: File {self.tmp_filename} does not exist"
+                    errors.append(_fmsg)
                 else:
                     with open(self.tmp_filename, "r") as fin:
                         std_out = fin.read()
                     if not len(std_out):
-                        _msg = f"{msg} Failure: File {self.tmp_filename} was empty"
-                        errors.append(_msg)
+                        _fmsg = f"{msg} Failure: File {self.tmp_filename} was empty"
+                        errors.append(_fmsg)
                     os.chmod(self.tmp_filename, stat.S_IWRITE)
                     os.remove(self.tmp_filename)
 
-            if rc and cond == self.PASS:
-                msg += f" Failure: Received FAIL ({error_code}), expected PASS (0)"
+            msg += f" {_msg}"
+            if not passed:
                 errors.append(msg)
-            elif not rc and cond != self.PASS:
-                msg += f" Failure: Received PASS (0), expected FAIL (!0)"
-                errors.append(msg)
-            else:
-                if not rc:
-                    expected = "PASS"
-                else:
-                    expected = "FAIL"
-                msg += f" Success: Received and Expected {expected} ({error_code})"
 
             self.common.print(f"{self.tab}{msg}")
             if self.Debug:
@@ -804,25 +874,25 @@ class TestAmdSmiCli(unittest.TestCase):
 
         cmds = [
             # Test invalid command
-            ("amd-smi invalid_cmd", self.FAIL),
+            ("amd-smi invalid_cmd", self.InvalidCommand),
             # Test invalid sub command
-            ("amd-smi version --invalid", self.FAIL),
-            ("amd-smi list --invalid", self.FAIL),
-            ("amd-smi static --invalid", self.FAIL),
-            ("amd-smi firmware --invalid", self.FAIL),
-            ("amd-smi bad_pages --invalid", self.FAIL),
-            ("amd-smi metric --invalid", self.FAIL),
-            ("amd-smi process --invalid", self.FAIL),
-            ("amd-smi event --invalid", self.FAIL),
-            ("amd-smi topology --invalid", self.FAIL),
-            ("amd-smi set --invalid", self.FAIL),
-            ("amd-smi reset", self.FAIL),
-            ("amd-smi reset --invalid", self.FAIL),
-            ("amd-smi monitor --invalid", self.FAIL),
-            ("amd-smi xgmi --invalid", self.FAIL),
-            ("amd-smi partition --invalid", self.FAIL),
-            ("amd-smi ras --invalid", self.FAIL),
-            ("amd-smi node --invalid", self.FAIL),
+            ("amd-smi version --invalid", self.InvalidParameter),
+            ("amd-smi list --invalid", self.InvalidParameter),
+            ("amd-smi static --invalid", self.InvalidParameter),
+            ("amd-smi firmware --invalid", self.InvalidParameter),
+            ("amd-smi bad_pages --invalid", self.InvalidCommand),
+            ("amd-smi metric --invalid", self.InvalidParameter),
+            ("amd-smi process --invalid", self.InvalidParameter),
+            ("amd-smi event --invalid", self.InvalidParameter),
+            ("amd-smi topology --invalid", self.InvalidParameter),
+            ("amd-smi set --invalid", self.InvalidParameter),
+            ("amd-smi reset", self.RequiredCommand),
+            ("amd-smi reset --invalid", self.InvalidParameter),
+            ("amd-smi monitor --invalid", self.InvalidParameter),
+            ("amd-smi xgmi --invalid", self.InvalidParameter),
+            ("amd-smi partition --invalid", self.InvalidParameter),
+            ("amd-smi ras --invalid", self.InvalidParameter),
+            ("amd-smi node --invalid", self.InvalidParameter),
             # Test invalid gpu value
             ("amd-smi version --gpu 0", self.FAIL),
             ("amd-smi version --gpu -1", self.FAIL),
