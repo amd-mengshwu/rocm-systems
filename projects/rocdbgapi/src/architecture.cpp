@@ -76,6 +76,12 @@ architecture_t::cwsr_record_t::architecture () const
   return queue ().architecture ();
 }
 
+std::optional<std::array<uint32_t, 3>>
+architecture_t::cwsr_record_t::cluster_ids () const
+{
+  return std::nullopt;
+}
+
 /* Base class for all AMDGCN architectures.  */
 
 class amdgcn_architecture_t : public architecture_t
@@ -4379,11 +4385,26 @@ protected:
                           uint32_t compute_relaunch_wave,
                           uint32_t compute_relaunch_state,
                           uint32_t compute_relaunch2_state,
-                          agent_address_t context_save_address) const
+                          agent_address_t context_save_address,
+                          bool in_cluster) const
   {
+    dbgapi_assert (!in_cluster);
+
     return std::make_unique<cwsr_record_t> (
       queue, xcc_id, compute_relaunch_wave, compute_relaunch_state,
       compute_relaunch2_state, context_save_address);
+  }
+
+  virtual bool
+  compute_relaunch_wave_is_first_of_cluster (uint32_t /* relaunch_wave */) const
+  {
+    return false;
+  }
+
+  virtual bool
+  compute_relaunch_wave_is_last_of_cluster (uint32_t /* relaunch_wave */) const
+  {
+    return false;
   }
 
   std::optional<amdgpu_regnum_t>
@@ -5291,6 +5312,7 @@ gfx10_architecture_t::control_stack_iterate (
 {
   size_t wave_count = 0;
   uint32_t state0 = 0, state1 = 0;
+  bool in_cluster = false;
 
   agent_address_t last_wave_area = wave_area_address;
 
@@ -5312,8 +5334,15 @@ gfx10_architecture_t::control_stack_iterate (
         }
       else
         {
+          if (compute_relaunch_wave_is_first_of_cluster (relaunch))
+            in_cluster = true;
+
           auto cwsr_record = make_gfx1x_cwsr_record (
-            queue, xcc_id, relaunch, state0, state1, last_wave_area);
+            queue, xcc_id, relaunch, state0, state1, last_wave_area,
+            in_cluster);
+
+          if (compute_relaunch_wave_is_last_of_cluster (relaunch))
+            in_cluster = false;
 
           last_wave_area = cwsr_record->begin ();
           wave_callback (std::move (cwsr_record));
@@ -5477,8 +5506,10 @@ protected:
   std::unique_ptr<architecture_t::cwsr_record_t> make_gfx1x_cwsr_record (
     compute_queue_t &queue, uint32_t xcc_id, uint32_t compute_relaunch_wave,
     uint32_t compute_relaunch_state, uint32_t compute_relaunch2_state,
-    agent_address_t context_save_address) const override
+    agent_address_t context_save_address, bool in_cluster) const override
   {
+    dbgapi_assert (!in_cluster);
+
     return std::make_unique<cwsr_record_t> (
       queue, xcc_id, compute_relaunch_wave, compute_relaunch_state,
       compute_relaunch2_state, context_save_address);
@@ -6316,8 +6347,10 @@ protected:
   std::unique_ptr<architecture_t::cwsr_record_t> make_gfx1x_cwsr_record (
     compute_queue_t &queue, uint32_t xcc_id, uint32_t compute_relaunch_wave,
     uint32_t compute_relaunch_state, uint32_t compute_relaunch2_state,
-    agent_address_t context_save_address) const override
+    agent_address_t context_save_address, bool in_cluster) const override
   {
+    dbgapi_assert (!in_cluster);
+
     return std::make_unique<cwsr_record_t> (
       queue, xcc_id, compute_relaunch_wave, compute_relaunch_state,
       compute_relaunch2_state, context_save_address);
@@ -7583,6 +7616,24 @@ protected:
   gfx12_5_architecture_t (elf_amdgpu_machine_t e_machine,
                           std::string target_triplet);
 
+  static constexpr uint32_t compute_relaunch_wave_first_of_cluster_mask = 1u << 27;
+  static constexpr uint32_t compute_relaunch_wave_last_of_cluster_mask = 1u << 28;
+
+  static constexpr uint32_t ttmp6_wg_x (uint32_t ttmp6)
+  {
+    return utils::bit_extract<uint32_t> (ttmp6, 0, 3);
+  }
+
+  static constexpr uint32_t ttmp6_wg_y (uint32_t ttmp6)
+  {
+    return utils::bit_extract<uint32_t> (ttmp6, 4, 7);
+  }
+
+  static constexpr uint32_t ttmp6_wg_z (uint32_t ttmp6)
+  {
+    return utils::bit_extract<uint32_t> (ttmp6, 8, 11);
+  }
+
   class cwsr_record_t : public gfx12_architecture_t::cwsr_record_t
   {
   protected:
@@ -7603,10 +7654,12 @@ protected:
                    uint32_t compute_relaunch_wave,
                    uint32_t compute_relaunch_state,
                    uint32_t compute_relaunch2_state,
-                   agent_address_t context_save_address)
+                   agent_address_t context_save_address,
+                   bool in_cluster)
       : gfx12_architecture_t::cwsr_record_t (
           queue, xcc_id, compute_relaunch_wave, compute_relaunch_state,
-          compute_relaunch2_state, context_save_address)
+          compute_relaunch2_state, context_save_address),
+        m_in_cluster (in_cluster)
     {
     }
 
@@ -7616,9 +7669,14 @@ protected:
     size_t hwreg_count () const override;
     size_t lds_size () const override;
     bool is_last_wave () const override;
+    std::optional<std::array<uint32_t, 3>> cluster_ids () const override;
+    std::optional<std::array<uint32_t, 3>> group_ids () const override;
 
     std::optional<agent_address_t>
     register_address (amdgpu_regnum_t regnum) const override;
+
+  private:
+    bool m_in_cluster;
   };
 
   std::unique_ptr<architecture_t::cwsr_record_t>
@@ -7627,11 +7685,26 @@ protected:
                           uint32_t compute_relaunch_wave,
                           uint32_t compute_relaunch_state,
                           uint32_t compute_relaunch2_state,
-                          agent_address_t context_save_address) const override
+                          agent_address_t context_save_address,
+                          bool in_cluster) const override
   {
     return std::make_unique<cwsr_record_t> (
       queue, xcc_id, compute_relaunch_wave, compute_relaunch_state,
-      compute_relaunch2_state, context_save_address);
+      compute_relaunch2_state, context_save_address, in_cluster);
+  }
+
+  bool
+  compute_relaunch_wave_is_first_of_cluster
+    (uint32_t relaunch_wave) const override
+  {
+    return (relaunch_wave & compute_relaunch_wave_first_of_cluster_mask) != 0;
+  }
+
+  bool
+  compute_relaunch_wave_is_last_of_cluster
+    (uint32_t relaunch_wave) const override
+  {
+    return (relaunch_wave & compute_relaunch_wave_last_of_cluster_mask) != 0;
   }
 
   /* A note regarding all the register methods in this class:
@@ -7994,6 +8067,34 @@ bool
 gfx12_5_architecture_t::cwsr_record_t::is_last_wave () const
 {
   return compute_relaunch_wave_payload_last_wave (m_compute_relaunch_wave);
+}
+
+std::optional<std::array<uint32_t, 3>>
+gfx12_5_architecture_t::cwsr_record_t::cluster_ids () const
+{
+  if (!m_in_cluster)
+    return std::nullopt;
+
+  return gfx12_architecture_t::cwsr_record_t::group_ids ();
+}
+
+std::optional<std::array<uint32_t, 3>>
+gfx12_5_architecture_t::cwsr_record_t::group_ids () const
+{
+  if (!m_in_cluster)
+    return gfx12_architecture_t::cwsr_record_t::group_ids ();
+
+  uint32_t ttmp6;
+  const agent_address_t ttmp6_address
+    = register_address (amdgpu_regnum_t::ttmp6).value ();
+  agent ().read_agent_memory (ttmp6_address, &ttmp6);
+
+  std::array<uint32_t, 3> coordinates;
+  coordinates[0] = ttmp6_wg_x (ttmp6);
+  coordinates[1] = ttmp6_wg_y (ttmp6);
+  coordinates[2] = ttmp6_wg_z (ttmp6);
+
+  return coordinates;
 }
 
 std::optional<agent_address_t>

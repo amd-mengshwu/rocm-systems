@@ -201,7 +201,13 @@ public:
     virtual bool spi_ttmps_setup_enabled () const = 0;
     /* Return the globally unique wave identifier.  */
     virtual amd_dbgapi_wave_id_t id () const = 0;
-    /* The 3-dimensional workgroup coordinates.  */
+    /* The 3-dimensional cluster coordinates within the grid.  If
+       clusters are not supported by the architecture or if clusters
+       are not enabled, this is nullopt.  */
+    virtual std::optional<std::array<uint32_t, 3>> cluster_ids () const;
+    /* The 3-dimensional workgroup coordinates.  If cluster_ids is not
+       nullopt, then this is the coordinate within the cluster,
+       otherwise within the grid.  */
     virtual std::optional<std::array<uint32_t, 3>> group_ids () const = 0;
     /* Return the record's position in the workgroup.  */
     virtual std::optional<uint32_t> position_in_group () const = 0;
