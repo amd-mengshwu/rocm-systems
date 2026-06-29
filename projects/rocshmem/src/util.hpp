@@ -506,8 +506,8 @@ template <MemcpyKind Kind = MemcpyKind::Put>
           static_cast<uint8_t*>(src) + n_chunks * 16, 
           remainder);
     } else {
-      copy_bulk<1, CachePolicy::Standard, CachePolicy::Standard, 4>(
-          dst, src, size, 0, 1);
+      copy_remainder<CachePolicy::Standard, CachePolicy::Standard>(
+          static_cast<uint8_t*>(dst), static_cast<uint8_t*>(src), size);
     }
 
     if constexpr (is_put(Kind)) {
@@ -517,19 +517,15 @@ template <MemcpyKind Kind = MemcpyKind::Put>
   } 
   // Normal cache-bypass path for small transfers or single-lane execution
   else {
-    if (size >= 16) {
-      if (__builtin_expect((align & 15) == 0, 1)) {
-        int n_chunks = size / 16;
-        int remainder = size % 16;
+    if (size >= 16 && __builtin_expect((align & 15) == 0, 1)) {
+      int n_chunks = size / 16;
+      int remainder = size % 16;
 
-        copy_bulk<16, LP, SP, 16>(dst, src, n_chunks, 0, 1);
-        
-        copy_remainder<LP, SP>(static_cast<uint8_t*>(dst) + n_chunks * 16,
-                               static_cast<uint8_t*>(src) + n_chunks * 16,
-                               remainder);
-      } else {
-        copy_bulk<1, LP, SP, 4>(dst, src, size, 0, 1);
-      }
+      copy_bulk<16, LP, SP, 16>(dst, src, n_chunks, 0, 1);
+      
+      copy_remainder<LP, SP>(static_cast<uint8_t*>(dst) + n_chunks * 16,
+                              static_cast<uint8_t*>(src) + n_chunks * 16,
+                              remainder);
     } else {
       copy_remainder<LP, SP>(static_cast<uint8_t*>(dst),
                              static_cast<uint8_t*>(src),
