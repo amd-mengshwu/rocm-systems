@@ -166,6 +166,9 @@ class IPCContext : public Context {
   __device__ int fcollectmem_wave(rocshmem_team_t team, void *dest, const void *source,
                            int nelems);
 
+  __device__ void fcollectmem_wg(rocshmem_team_t team, void *dest, const void *source,
+                           int nelems);
+
   // Block/wave functions
   __device__ void putmem_wg(void *dest, const void *source, size_t nelems,
                             int pe);
@@ -375,9 +378,8 @@ class IPCContext : public Context {
   __device__ void internal_get_broadcast(T *dst, const T *src, int nelems,
                                          int pe_root);  // NOLINT(runtime/int)
 
-  template <typename T>
-  __device__ void fcollect_linear_wg(rocshmem_team_t team, T *dest,
-                                  const T *source, int nelems);
+  __device__ void fcollectmem_linear_wg(rocshmem_team_t team, void *dest,
+                                  const void *source, int nelems);
 
   __device__ void fcollectmem_linear_wave(rocshmem_team_t team, void *dest,
                                   const void *source, int nelems);

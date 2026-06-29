@@ -177,7 +177,7 @@ class GDAContext : public Context {
   __device__ void fcollect_wg(rocshmem_team_t team, T *dest, const T *source,
                            int nelems);
 
-  __device__ int fcollectmem_wg(rocshmem_team_t team, void *dest, const void *source,
+  __device__ void fcollectmem_wg(rocshmem_team_t team, void *dest, const void *source,
                            int nelems);
 
   template <typename T>
@@ -274,9 +274,8 @@ class GDAContext : public Context {
   __device__ void internal_get_broadcast(T *dst, const T *src, int nelems,
       int pe_root, ActiveWFInfo &wf_info);  // NOLINT(runtime/int)
 
-  template <typename T>
-  __device__ void fcollect_linear_wg(rocshmem_team_t team, T *dest,
-      const T *source, int nelems);
+  __device__ void fcollectmem_linear_wg(rocshmem_team_t team, void *dest,
+      const void *source, int nelems);
 
   __device__ void fcollectmem_linear_wave(rocshmem_team_t team, void *dest,
       const void *source, int nelems);
