@@ -159,7 +159,7 @@ SELECT
 FROM
     `rocpd_gpu_pc_sample{{uuid}}`;
 -- Human-readable name expansion for instruction-type and stall-reason integers.
--- Joins against nothing; the CASE expressions are pure look-ups derived from
+-- Joins against nothing: the CASE expressions are pure look-ups derived from
 -- the rocprofiler_pc_sampling_instruction_type_t and
 -- rocprofiler_pc_sampling_instruction_not_issued_reason_t enumerations so that
 -- the per-row table stays lean while names remain available at query time.
