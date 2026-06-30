@@ -98,6 +98,37 @@ add_unit_test_executable(unit_tests "regular")
 add_unit_test_executable(unit_tests_asan "asan")
 add_unit_test_executable(unit_tests_ubsan "ubsan")
 
+if(BUILD_MARKERS)
+    find_package(LLVM REQUIRED CONFIG)
+
+    set(MARKER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../markers)
+    set(MARKER_TEST_LIB_SOURCES
+        ${MARKER_SRC_DIR}/SQTTPass.cpp
+        ${MARKER_SRC_DIR}/SQTTMarkers.cpp
+        ${MARKER_SRC_DIR}/SQTTNamedMarkers.cpp
+        ${MARKER_SRC_DIR}/SQTTBarriers.cpp
+        ${MARKER_SRC_DIR}/SQTTMemory.cpp
+        ${MARKER_SRC_DIR}/SQTTAddressTrace.cpp
+        ${MARKER_SRC_DIR}/SQTTFunctions.cpp
+        ${MARKER_SRC_DIR}/SQTTFuncMap.cpp)
+
+    add_executable(marker_unit_tests markers_test.cpp ${MARKER_TEST_LIB_SOURCES})
+    target_include_directories(marker_unit_tests PRIVATE ${MARKER_SRC_DIR} ${INC_DIR} ${LLVM_INCLUDE_DIRS})
+    target_compile_definitions(marker_unit_tests PRIVATE ${LLVM_DEFINITIONS})
+    target_compile_features(marker_unit_tests PRIVATE cxx_std_17)
+    if(NOT MSVC)
+        set_source_files_properties(${MARKER_TEST_LIB_SOURCES} PROPERTIES COMPILE_OPTIONS "-fno-rtti")
+    endif()
+
+    if(TARGET LLVM)
+        set(MARKER_TEST_LLVM_LIBS LLVM)
+    else()
+        llvm_map_components_to_libnames(MARKER_TEST_LLVM_LIBS Core Support Analysis TransformUtils Passes)
+    endif()
+
+    target_link_libraries(marker_unit_tests PRIVATE GTest::gtest_main ${MARKER_TEST_LLVM_LIBS})
+endif()
+
 include(GoogleTest)
 
 gtest_discover_tests(
@@ -114,3 +145,10 @@ gtest_discover_tests(
     unit_tests_ubsan
     PROPERTIES LABELS "unit-tests;ubsan"
     TEST_PREFIX "ubsan/")
+
+if(BUILD_MARKERS)
+    gtest_discover_tests(
+        marker_unit_tests
+        PROPERTIES LABELS "unit-tests;regular;markers"
+        TEST_PREFIX "markers/")
+endif()

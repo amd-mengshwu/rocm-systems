@@ -133,12 +133,23 @@ find_program(GENHTML genhtml)
 if(BUILD_TESTS
    AND LCOV
    AND GENHTML)
+    set(TTD_COVERAGE_DEPS rocprof-trace-decoder)
+    if(TARGET unit_tests)
+        list(APPEND TTD_COVERAGE_DEPS unit_tests)
+    endif()
+    if(BUILD_MARKERS)
+        list(APPEND TTD_COVERAGE_DEPS SQTTInstrumentPass)
+        if(TARGET marker_unit_tests)
+            list(APPEND TTD_COVERAGE_DEPS marker_unit_tests)
+        endif()
+    endif()
+
     add_custom_target(
         coverage
         # Remove stale profiling data
         COMMAND find ${CMAKE_BINARY_DIR} -name "*.gcda" -delete
         # Run tests (skip sanitizer variants)
-        COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_BINARY_DIR}/test -E sanitize -E ubsan -E asan -j8
+        COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_BINARY_DIR}/test -E "sanitize|ubsan|asan" -j8
                 --output-on-failure
         # Capture coverage
         COMMAND ${LCOV} --quiet --capture --directory ${CMAKE_BINARY_DIR} --output-file
@@ -153,6 +164,22 @@ if(BUILD_TESTS
         COMMAND ${CMAKE_COMMAND} -E echo "Coverage report: ${CMAKE_BINARY_DIR}/coverage_report/index.html"
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Generating code coverage report"
-        DEPENDS unit_tests rocprof-trace-decoder
+        DEPENDS ${TTD_COVERAGE_DEPS}
         VERBATIM)
+
+    if(BUILD_MARKERS)
+        add_custom_command(
+            TARGET coverage
+            POST_BUILD
+            COMMAND
+                ${LCOV} --quiet --extract ${CMAKE_BINARY_DIR}/coverage.info "${CMAKE_SOURCE_DIR}/markers/*"
+                "${CMAKE_SOURCE_DIR}/include/rocprof_trace_decoder/cxx/markers.hpp" --output-file
+                ${CMAKE_BINARY_DIR}/coverage_markers.info --ignore-errors empty,unused
+            COMMAND ${LCOV} --summary ${CMAKE_BINARY_DIR}/coverage_markers.info --fail-under-lines 90
+            COMMAND ${GENHTML} --quiet ${CMAKE_BINARY_DIR}/coverage_markers.info --output-directory
+                    ${CMAKE_BINARY_DIR}/coverage_markers_report --ignore-errors empty
+            COMMAND ${CMAKE_COMMAND} -E echo
+                    "Marker coverage report: ${CMAKE_BINARY_DIR}/coverage_markers_report/index.html"
+            VERBATIM)
+    endif()
 endif()
