@@ -708,7 +708,7 @@ class AMDSMIParser(argparse.ArgumentParser):
                             .lower()
                         )
                     except Exception:
-                        msg = f"Confirmation not given. Exiting without setting value"
+                        msg = "Confirmation not given. Exiting without setting value"
                         self.helpers.raise_permission_exception(msg)
                     if resp in ("a", "append"):
                         setattr(args, self.dest, path)

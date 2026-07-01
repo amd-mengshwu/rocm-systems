@@ -64,8 +64,10 @@ class ResetCommands:
             clean_local_data (bool, optional): Value override for args.run_cleaner_shader. Defaults to None.
 
         Raises:
-            AmdSmiInvalidParameterValueException: Value error if no core value is provided
-            IndexError: Index error if gpu list is empty
+            AmdSmiLibraryErrorException
+            AmdSmiDeviceNotFoundException
+            AmdSmiRequiredCommandException
+            AmdSmiInvalidParameterException
 
         Return:
             Nothing

@@ -27,6 +27,10 @@ import stat
 import sys
 import tempfile
 
+import ast
+import glob
+import re
+
 import unittest
 
 import common
@@ -63,19 +67,25 @@ class TestAmdSmiCli(unittest.TestCase):
         cls.PermissionDenied = 203
         cls.UnknownError = 255
 
+        cls.amd_smi_exe = "amd-smi"
+
         # error codes:
         #      2: from amdsmi.h, AMDSMI_STATUS_NOT_SUPPORTED
         #    199: from amd-smi,  AmdSmiCommandNotSupportedException
         cls.not_supported_error_codes = [2, 199]
 
+        # TODO: Remove this condition when CLI supports User automated input
+        # Commands that need User permission to run
+        cls.cmds_need_permission = {"set": ["--fan", "--memory-partition", "--compute-partition"]}
+
         # Record starting values; running here (once per class) rather than in
         # __init__ (once per test method) reduces setup overhead from O(N) to
         # O(1) — N being the number of test methods in this class.
         cmds = [
-            ("metric", "amd-smi metric --json"),
-            ("static", "amd-smi static --json"),
-            ("list", "amd-smi list --json"),
-            ("partition", "amd-smi partition --current --json"),
+            ("metric", f"{cls.amd_smi_exe} metric --json"),
+            ("static", f"{cls.amd_smi_exe} static --json"),
+            ("list", f"{cls.amd_smi_exe} list --json"),
+            ("partition", f"{cls.amd_smi_exe} partition --current --json"),
         ]
         for name, cmd in cmds:
             (rc, data, std_err) = cls.util.RunCmdSync(cmd)
@@ -172,12 +182,12 @@ class TestAmdSmiCli(unittest.TestCase):
             "DETERMINISM",
         ]
         self.profile_levels = [
-            "CUSTOM_MASK",
-            "VIDEO_MASK",
-            "POWER_SAVING_MASK",
-            "COMPUTE_MASK",
-            "VR_MASK",
-            "THREE_D_FULL_SCR_MASK",
+            "CUSTOM",
+            "VIDEO",
+            "POWER_SAVING",
+            "COMPUTE",
+            "VR",
+            "3D_FULL_SCREEN",
             "BOOTUP_DEFAULT",
         ]
         self.compute_partition_modes = ["SPX", "DPX", "TPX", "QPX", "CPX"]
@@ -376,7 +386,7 @@ class TestAmdSmiCli(unittest.TestCase):
         return options
 
     def CreateCmds(self, cmd_name, list1_name, list2_name, list3_name, list4_name):
-        cmd = f"amd-smi {cmd_name} --help"
+        cmd = f"{self.amd_smi_exe} {cmd_name} --help"
         list1_args = self.FindArgs(cmd, list1_name)
         list2_args = self.FindArgs(cmd, list2_name)
         list3_args = self.FindArgs(cmd, list3_name)
@@ -392,7 +402,7 @@ class TestAmdSmiCli(unittest.TestCase):
             print(json.dumps(list4_args, sort_keys=False, indent=4), flush=True)
 
         cmds = []
-        cmd = f"amd-smi {cmd_name}"
+        cmd = f"{self.amd_smi_exe} {cmd_name}"
         for list1_arg in list1_args:
             if list1_arg != "pass":
                 cmds.append((f"{cmd} {list1_arg} {self.AddLogLevel}", self.PASS))
@@ -530,7 +540,7 @@ class TestAmdSmiCli(unittest.TestCase):
                     if clock_sys != "N/A" and len(clock_sys["frequency_levels"]):
                         num = len(clock_sys["frequency_levels"])
                         level = f"Level {num - 1}"
-                        clock_freq = int(clock_sys["frequency_levels"][level].split()[0].strip())
+                        clock_freq = int(clock_sys["frequency_levels"][level]["value"])
                         cmd = cmd.replace(
                             "{perf_determinism}", f"--perf-determinism {clock_freq + 50}", 1
                         )
@@ -698,6 +708,21 @@ class TestAmdSmiCli(unittest.TestCase):
 
                 cmds[index] = (cmd, cond)
 
+        # Remove commands requiring input
+        for index, cmd_cond in enumerate(cmds):
+            cmd, cond = cmd_cond
+            if not cmd:
+                continue
+            items = cmd.split()
+            if len(items) < 3:
+                continue
+            if items[1] == "set":
+                if items[2] in self.cmds_need_permission["set"]:
+                    cmd = ""
+            # Update cmds when cmd has changed
+            if not cmd:
+                cmds[index] = (cmd, cond)
+
         # Remove empty (cmd,cond) arguments
         cmds = [cmd_cond for cmd_cond in cmds if cmd_cond[0] != ""]
 
@@ -819,10 +844,10 @@ class TestAmdSmiCli(unittest.TestCase):
 
     def test_help(self):
         self.common.print_func_name("")
-        msg = f"### amd-smi help"
+        msg = "### amd-smi help"
         self.common.print(msg)
 
-        cmd = "amd-smi --help"
+        cmd = f"{self.amd_smi_exe} --help"
         (rc, std_out, std_err) = self.util.RunCmdSync(cmd)
         lines = std_out.split("\n")
         # Find all available command line args
@@ -848,9 +873,9 @@ class TestAmdSmiCli(unittest.TestCase):
             if "Descriptions" in line:
                 found = True
 
-        cmds = [(f"amd-smi --help", self.PASS)]
+        cmds = [(f"{self.amd_smi_exe} --help", self.PASS)]
         for cmd_arg in cmd_args:
-            cmds.append((f"amd-smi {cmd_arg} --help", self.PASS))
+            cmds.append((f"{self.amd_smi_exe} {cmd_arg} --help", self.PASS))
 
         self.RunCmds(cmds)
         return
@@ -874,103 +899,107 @@ class TestAmdSmiCli(unittest.TestCase):
 
         cmds = [
             # Test invalid command
-            ("amd-smi invalid_cmd", self.InvalidCommand),
+            (f"{self.amd_smi_exe} invalid_cmd", self.InvalidCommand),
+            (f"{self.amd_smi_exe} bad_pages --retired", self.InvalidCommand),
+            (f"{self.amd_smi_exe} bad_pages --invalid", self.InvalidCommand),
             # Test invalid sub command
-            ("amd-smi version --invalid", self.InvalidParameter),
-            ("amd-smi list --invalid", self.InvalidParameter),
-            ("amd-smi static --invalid", self.InvalidParameter),
-            ("amd-smi firmware --invalid", self.InvalidParameter),
-            ("amd-smi bad_pages --invalid", self.InvalidCommand),
-            ("amd-smi metric --invalid", self.InvalidParameter),
-            ("amd-smi process --invalid", self.InvalidParameter),
-            ("amd-smi event --invalid", self.InvalidParameter),
-            ("amd-smi topology --invalid", self.InvalidParameter),
-            ("amd-smi set --invalid", self.InvalidParameter),
-            ("amd-smi reset", self.RequiredCommand),
-            ("amd-smi reset --invalid", self.InvalidParameter),
-            ("amd-smi monitor --invalid", self.InvalidParameter),
-            ("amd-smi xgmi --invalid", self.InvalidParameter),
-            ("amd-smi partition --invalid", self.InvalidParameter),
-            ("amd-smi ras --invalid", self.InvalidParameter),
-            ("amd-smi node --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} version --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} list --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} static --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} firmware --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} bad-pages --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} metric --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} process --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} event --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} topology --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} set --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} reset", self.RequiredCommand),
+            (f"{self.amd_smi_exe} reset --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} monitor --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} xgmi --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} partition --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} ras --invalid", self.InvalidParameter),
+            (f"{self.amd_smi_exe} node --invalid", self.InvalidParameter),
             # Test invalid gpu value
-            ("amd-smi version --gpu 0", self.FAIL),
-            ("amd-smi version --gpu -1", self.FAIL),
-            ("amd-smi version --gpu ALL", self.FAIL),
-            (f"amd-smi version --gpu {len(self.common.processors)}", self.FAIL),
-            ("amd-smi static --gpu -1", self.FAIL),
-            ("amd-smi static --gpu _ALL", self.FAIL),
-            (f"amd-smi static --gpu {len(self.common.processors)}", self.FAIL),
-            (f"amd-smi static --gpu {bad_bdf}", self.FAIL),
-            (f"amd-smi static --gpu {self.list_data[0]['bdf'][:-1]}", self.FAIL),
-            (f"amd-smi static --gpu {self.list_data[0]['bdf'] + '0'}", self.FAIL),
-            (f"amd-smi static --gpu {bad_uuid}", self.FAIL),
-            (f"amd-smi static --gpu {self.list_data[0]['uuid'][:-1]}", self.FAIL),
-            (f"amd-smi static --gpu {self.list_data[0]['uuid'] + '0'}", self.FAIL),
+            (f"{self.amd_smi_exe} version --gpu 0", self.FAIL),
+            (f"{self.amd_smi_exe} version --gpu -1", self.FAIL),
+            (f"{self.amd_smi_exe} version --gpu ALL", self.FAIL),
+            (f"{self.amd_smi_exe} version --gpu {len(self.common.processors)}", self.FAIL),
+            (f"{self.amd_smi_exe} static --gpu -1", self.FAIL),
+            (f"{self.amd_smi_exe} static --gpu _ALL", self.FAIL),
+            (f"{self.amd_smi_exe} static --gpu {len(self.common.processors)}", self.FAIL),
+            (f"{self.amd_smi_exe} static --gpu {bad_bdf}", self.FAIL),
+            (f"{self.amd_smi_exe} static --gpu {self.list_data[0]['bdf'][:-1]}", self.FAIL),
+            (f"{self.amd_smi_exe} static --gpu {self.list_data[0]['bdf'] + '0'}", self.FAIL),
+            (f"{self.amd_smi_exe} static --gpu {bad_uuid}", self.FAIL),
+            (f"{self.amd_smi_exe} static --gpu {self.list_data[0]['uuid'][:-1]}", self.FAIL),
+            (f"{self.amd_smi_exe} static --gpu {self.list_data[0]['uuid'] + '0'}", self.FAIL),
             # Test invalid loglevel
-            ("amd-smi metric --loglevel DDEBUG", self.FAIL),
-            ("amd-smi metric --loglevel DEBUGG", self.FAIL),
-            ("amd-smi metric --loglevel BADLEVEL", self.FAIL),
+            (f"{self.amd_smi_exe} metric --loglevel DDEBUG", self.FAIL),
+            (f"{self.amd_smi_exe} metric --loglevel DEBUGG", self.FAIL),
+            (f"{self.amd_smi_exe} metric --loglevel BADLEVEL", self.FAIL),
             # Test invalid set options
-            ("amd-smi set", self.FAIL),
-            ("amd-smi set --fan", self.FAIL),
-            ("amd-smi set --fan 500", self.FAIL),
-            ("amd-smi set --fan 150%", self.FAIL),
-            ("amd-smi set --perf-level", self.FAIL),
-            ("amd-smi set --perf-level INVALID", self.FAIL),
-            ("amd-smi set --profile", self.FAIL),
-            ("amd-smi set --profile INVALID", self.FAIL),
-            ("amd-smi set --perf-determinism", self.FAIL),
-            ("amd-smi set --compute-partition", self.FAIL),
-            ("amd-smi set --compute-partition INVALID", self.FAIL),
-            ("amd-smi set --memory-partition", self.FAIL),
-            ("amd-smi set --memory-partition NPS3", self.FAIL),
-            ("amd-smi set --memory-partition INVALID", self.FAIL),
-            ("amd-smi set --compute-partition-mem-alloc-mode", self.FAIL),
-            ("amd-smi set --compute-partition-mem-alloc-mode HALF", self.FAIL),
-            ("amd-smi set --compute-partition-mem-alloc-mode INVALID", self.FAIL),
-            ("amd-smi set --process-isolation", self.FAIL),
-            ("amd-smi set --process-isolation 2", self.FAIL),
-            ("amd-smi set --clk-limit", self.FAIL),
-            ("amd-smi set --clk-limit INVALID", self.FAIL),
-            ("amd-smi set --clk-limit SCLK INVALID", self.FAIL),
-            ("amd-smi set --clk-limit MCLK INVALID", self.FAIL),
-            ("amd-smi set --clk-limit SCLK MIN", self.FAIL),
-            ("amd-smi set --clk-limit MCLK MAX", self.FAIL),
-            ("amd-smi set --clk-level SCLK", self.FAIL),
-            ("amd-smi set --clk-level SCLK INVALID", self.FAIL),
-            ("amd-smi set --clk-level MCLK", self.FAIL),
-            ("amd-smi set --clk-level MCLK INVALID", self.FAIL),
-            ("amd-smi set --clk-level FCLK", self.FAIL),
-            ("amd-smi set --clk-level FCLK INVALID", self.FAIL),
-            ("amd-smi set --clk-level SOCCLK", self.FAIL),
-            ("amd-smi set --clk-level SOCCLK INVALID", self.FAIL),
-            ("amd-smi set --clk-level PCIE", self.FAIL),
-            ("amd-smi set --clk-level PCIE INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} set", self.FAIL),
+            (f"{self.amd_smi_exe} set --fan", self.FAIL),
+            (f"{self.amd_smi_exe} set --fan 500", self.FAIL),
+            (f"{self.amd_smi_exe} set --fan 150%", self.FAIL),
+            (f"{self.amd_smi_exe} set --perf-level", self.FAIL),
+            (f"{self.amd_smi_exe} set --perf-level INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} set --profile", self.FAIL),
+            (f"{self.amd_smi_exe} set --profile INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} set --perf-determinism", self.FAIL),
+            (f"{self.amd_smi_exe} set --compute-partition", self.FAIL),
+            (f"{self.amd_smi_exe} set --compute-partition INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} set --memory-partition", self.FAIL),
+            (f"{self.amd_smi_exe} set --memory-partition NPS3", self.FAIL),
+            (f"{self.amd_smi_exe} set --memory-partition INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} set --compute-partition-mem-alloc-mode", self.FAIL),
+            (f"{self.amd_smi_exe} set --compute-partition-mem-alloc-mode HALF", self.FAIL),
+            (f"{self.amd_smi_exe} set --compute-partition-mem-alloc-mode INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} set --process-isolation", self.FAIL),
+            (f"{self.amd_smi_exe} set --process-isolation 2", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-limit", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-limit INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-limit SCLK INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-limit MCLK INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-limit SCLK MIN", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-limit MCLK MAX", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-level SCLK", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-level SCLK INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-level MCLK", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-level MCLK INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-level FCLK", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-level FCLK INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-level SOCCLK", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-level SOCCLK INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-level PCIE", self.FAIL),
+            (f"{self.amd_smi_exe} set --clk-level PCIE INVALID", self.FAIL),
             # Test invalid process PID, NAME
-            ("amd-smi process --name", self.FAIL),
-            ("amd-smi process --pid", self.FAIL),
-            ("amd-smi process --pid NOT_A_NUMBER", self.FAIL),
+            (f"{self.amd_smi_exe} process --name", self.FAIL),
+            (f"{self.amd_smi_exe} process --pid", self.FAIL),
+            (f"{self.amd_smi_exe} process --pid NOT_A_NUMBER", self.FAIL),
             # Test invalid ras options
-            ("amd-smi ras", self.FAIL),
-            ("amd-smi ras --cper INVALID", self.FAIL),
-            ("amd-smi ras --cper --severity INVALID", self.FAIL),
-            ("amd-smi ras --afid", self.FAIL),
-            ("amd-smi ras --afid INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} ras", self.FAIL),
+            (f"{self.amd_smi_exe} ras --cper INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} ras --cper --severity INVALID", self.FAIL),
+            (f"{self.amd_smi_exe} ras --afid", self.FAIL),
+            (f"{self.amd_smi_exe} ras --afid INVALID", self.FAIL),
             # --afid --folder requires an existing directory of CPER records
-            ("amd-smi ras --afid --folder /nonexistent_amdsmi_pr4812_dir", self.FAIL),
+            (f"{self.amd_smi_exe} ras --afid --folder /nonexistent_amdsmi_pr4812_dir", self.FAIL),
             # --decode is not a valid flag
-            ("amd-smi ras --decode", self.FAIL),
+            (f"{self.amd_smi_exe} ras --decode", self.FAIL),
             # Test invalid watch order
-            ("amd-smi monitor --interval 2 --watch 1", self.FAIL),
-            ("amd-smi monitor --watch_time 2 --watch 1", self.FAIL),
+            (f"{self.amd_smi_exe} monitor --interval 2 --watch 1", self.FAIL),
+            (f"{self.amd_smi_exe} monitor --watch_time 2 --watch 1", self.FAIL),
         ]
 
         for index, gpu in enumerate(self.common.processors):
             # Test invalid power-cap values
-            cmds.append((f"amd-smi set --power-cap --gpu {index}", self.FAIL))
+            cmds.append((f"{self.amd_smi_exe} set --power-cap --gpu {index}", self.FAIL))
             for power_type in self.power_types:
-                cmds.append((f"amd-smi set --power-cap {power_type} --gpu {index}", self.FAIL))
+                cmds.append(
+                    (f"{self.amd_smi_exe} set --power-cap {power_type} --gpu {index}", self.FAIL)
+                )
                 _power_type = self.static_data["gpu_data"][index]["limit"][power_type]
                 socket_power_limit = _power_type["socket_power_limit"]
                 if socket_power_limit != "N/A":
@@ -978,19 +1007,19 @@ class TestAmdSmiCli(unittest.TestCase):
                     max_power = _power_type["max_power_limit"]["value"]
                     cmds.append(
                         (
-                            f"amd-smi set --power-cap {min_power - 1} {power_type} --gpu {index}",
+                            f"{self.amd_smi_exe} set --power-cap {min_power - 1} {power_type} --gpu {index}",
                             self.FAIL,
                         )
                     )
                     cmds.append(
                         (
-                            f"amd-smi set --power-cap {max_power + 1} {power_type} --gpu {index}",
+                            f"{self.amd_smi_exe} set --power-cap {max_power + 1} {power_type} --gpu {index}",
                             self.FAIL,
                         )
                     )
                     cmds.append(
                         (
-                            f"amd-smi set --power-cap {int(max_power * 1.10)} {power_type} --gpu {index}",
+                            f"{self.amd_smi_exe} set --power-cap {int(max_power * 1.10)} {power_type} --gpu {index}",
                             self.FAIL,
                         )
                     )
@@ -998,16 +1027,23 @@ class TestAmdSmiCli(unittest.TestCase):
             # Test invalid soc-pstate values
             soc_pstate = self.static_data["gpu_data"][index]["soc_pstate"]
             if soc_pstate != "N/A":
-                cmds.append((f"amd-smi set --soc-pstate --gpu {index}", self.FAIL))
+                cmds.append((f"{self.amd_smi_exe} set --soc-pstate --gpu {index}", self.FAIL))
                 num_supported = int(soc_pstate["num_supported"])
-                cmds.append((f"amd-smi set --soc-pstate {num_supported} --gpu {index}", self.FAIL))
+                cmds.append(
+                    (
+                        f"{self.amd_smi_exe} set --soc-pstate {num_supported} --gpu {index}",
+                        self.FAIL,
+                    )
+                )
 
             # Test invalid xgmi-plpd values
             xgmi_plpd = self.static_data["gpu_data"][index]["xgmi_plpd"]
             if xgmi_plpd != "N/A":
-                cmds.append((f"amd-smi set --xgmi-plpd --gpu {index}", self.FAIL))
+                cmds.append((f"{self.amd_smi_exe} set --xgmi-plpd --gpu {index}", self.FAIL))
                 num_supported = int(xgmi_plpd["num_supported"])
-                cmds.append((f"amd-smi set --xgmi-plpd {num_supported} --gpu {index}", self.FAIL))
+                cmds.append(
+                    (f"{self.amd_smi_exe} set --xgmi-plpd {num_supported} --gpu {index}", self.FAIL)
+                )
 
         self.RunCmds(cmds)
         return
@@ -1028,9 +1064,9 @@ class TestAmdSmiCli(unittest.TestCase):
         self.common.print(msg)
 
         cmds = [
-            ("amd-smi version", self.PASS),
-            ("amd-smi version --cpu_version", self.PASS),
-            ("amd-smi version --gpu_version", self.PASS),
+            (f"{self.amd_smi_exe} version", self.PASS),
+            (f"{self.amd_smi_exe} version --cpu_version", self.PASS),
+            (f"{self.amd_smi_exe} version --gpu_version", self.PASS),
         ]
 
         self.RunCmds(cmds)
@@ -1126,8 +1162,8 @@ class TestAmdSmiCli(unittest.TestCase):
                 self.common.print(msg)
                 self.skipTest(msg)
 
-        # Start process with "amd-smi event"
-        # In another process create an event with like "amd-smi reset --gpureset"
+        # Start process with f"{self.amd_smi_exe} event"
+        # In another process create an event with like f"{self.amd_smi_exe} reset --gpureset"
         cmds = self.CreateCmds(
             "event", "Event Arguments:", "Device Arguments:", "Command Modifiers:", ""
         )
@@ -1149,13 +1185,6 @@ class TestAmdSmiCli(unittest.TestCase):
         self.common.print_func_name("")
         msg = f"{self.tab}### amd-smi set"
         self.common.print(msg)
-
-        # TODO allow set commands to be executed
-        if not self.PrintCmdsOnly:
-            if self.common.TODO_SKIP_FAIL:
-                msg = f"{self.tab}Needs input"
-                # self.common.print(msg)
-                self.skipTest(msg)
 
         # Get current settings
         power_profile = {}
@@ -1190,41 +1219,54 @@ class TestAmdSmiCli(unittest.TestCase):
             # reset --fans (works for both legacy hwmon and gpu_od interfaces)
             fan_speed = self.metric_data["gpu_data"][index]["fan"]["speed"]
             if fan_speed != "N/A":
-                cmds.append((f"amd-smi reset --fans --gpu {index}", self.PASS))
+                cmds.append((f"{self.amd_smi_exe} reset --fans --gpu {index}", self.PASS))
 
             # set --perf-level defaults
             perf_level = self.metric_data["gpu_data"][index]["perf_level"]
             if perf_level != "N/A":
                 perf_level = perf_level.removeprefix("AMDSMI_DEV_PERF_LEVEL_")
-                cmds.append((f"amd-smi set --perf-level {perf_level} --gpu {index}", self.PASS))
+                cmds.append(
+                    (f"{self.amd_smi_exe} set --perf-level {perf_level} --gpu {index}", self.PASS)
+                )
 
             # set --profile defaults
             if power_profile[index]:
                 profile = power_profile[index]["current"].removeprefix("AMDSMI_PWR_PROF_PRST_")
-                cmds.append((f"amd-smi set --profile {profile} --gpu {index}", self.PASS))
+                cmds.append(
+                    (f"{self.amd_smi_exe} set --profile {profile} --gpu {index}", self.PASS)
+                )
 
             # set --perf-determinism defaults
             clock_sys = self.static_data["gpu_data"][index]["clock"]["sys"]
             if clock_sys != "N/A":
                 num = len(clock_sys["frequency_levels"])
                 level = f"Level {num - 1}"
-                clock_freq = int(clock_sys["frequency_levels"][level].split()[0].strip())
+                clock_freq = int(clock_sys["frequency_levels"][level]["value"])
                 cmds.append(
-                    (f"amd-smi set --perf-determinism {clock_freq} --gpu {index}", self.PASS)
+                    (
+                        f"{self.amd_smi_exe} set --perf-determinism {clock_freq} --gpu {index}",
+                        self.PASS,
+                    )
                 )
 
             # set --compute-partition defaults
             accelerator_type = self.partition_data["current_partition"][index]["accelerator_type"]
             if accelerator_type != "N/A":
                 cmds.append(
-                    (f"amd-smi set --compute-partition {accelerator_type} --gpu {index}", self.PASS)
+                    (
+                        f"{self.amd_smi_exe} set --compute-partition {accelerator_type} --gpu {index}",
+                        self.PASS,
+                    )
                 )
 
             # set --memory-partition defaults
             memory_partition = self.partition_data["current_partition"][index]["memory"]
             if memory_partition != "N/A":
                 cmds.append(
-                    (f"amd-smi set --memory-partition {memory_partition} --gpu {index}", self.PASS)
+                    (
+                        f"{self.amd_smi_exe} set --memory-partition {memory_partition} --gpu {index}",
+                        self.PASS,
+                    )
                 )
 
             # set --compute-partition-mem-alloc-mode defaults
@@ -1237,7 +1279,7 @@ class TestAmdSmiCli(unittest.TestCase):
             if mem_alloc_mode not in ("N/A", "INVALID"):
                 cmds.append(
                     (
-                        f"amd-smi set --compute-partition-mem-alloc-mode {mem_alloc_mode} --gpu {index}",
+                        f"{self.amd_smi_exe} set --compute-partition-mem-alloc-mode {mem_alloc_mode} --gpu {index}",
                         self.PASS,
                     )
                 )
@@ -1250,7 +1292,7 @@ class TestAmdSmiCli(unittest.TestCase):
                     socket_power = socket_power_limit["value"]
                     cmds.append(
                         (
-                            f"amd-smi set --power-cap {socket_power} {power_type} --gpu {index}",
+                            f"{self.amd_smi_exe} set --power-cap {socket_power} {power_type} --gpu {index}",
                             self.PASS,
                         )
                     )
@@ -1261,13 +1303,13 @@ class TestAmdSmiCli(unittest.TestCase):
                     max_power = _power_type["max_power_limit"]["value"]
                     cmds.append(
                         (
-                            f"amd-smi set --power-cap {min_power} {power_type} --gpu {index}",
+                            f"{self.amd_smi_exe} set --power-cap {min_power} {power_type} --gpu {index}",
                             self.PASS,
                         )
                     )
                     cmds.append(
                         (
-                            f"amd-smi set --power-cap {max_power} {power_type} --gpu {index}",
+                            f"{self.amd_smi_exe} set --power-cap {max_power} {power_type} --gpu {index}",
                             self.PASS,
                         )
                     )
@@ -1276,13 +1318,17 @@ class TestAmdSmiCli(unittest.TestCase):
             soc_pstate = self.static_data["gpu_data"][index]["soc_pstate"]
             if soc_pstate != "N/A":
                 current = int(soc_pstate["current"])
-                cmds.append((f"amd-smi set --soc-pstate {current} --gpu {index}", self.PASS))
+                cmds.append(
+                    (f"{self.amd_smi_exe} set --soc-pstate {current} --gpu {index}", self.PASS)
+                )
 
             # set --xgmi-plpd defaults
             xgmi_plpd = self.static_data["gpu_data"][index]["xgmi_plpd"]
             if xgmi_plpd != "N/A":
                 current = int(xgmi_plpd["current"])
-                cmds.append((f"amd-smi set --xgmi-plpd {current} --gpu {index}", self.PASS))
+                cmds.append(
+                    (f"{self.amd_smi_exe} set --xgmi-plpd {current} --gpu {index}", self.PASS)
+                )
 
             # set --ptl-status defaults
             ptl_state = self.static_data["gpu_data"][index]["limit"]["ptl_state"]
@@ -1292,14 +1338,19 @@ class TestAmdSmiCli(unittest.TestCase):
                 else:
                     ptl_state_value = 1
                 cmds.append(
-                    (f"amd-smi set --ptl-status {ptl_state_value} --gpu {index}", self.PASS)
+                    (
+                        f"{self.amd_smi_exe} set --ptl-status {ptl_state_value} --gpu {index}",
+                        self.PASS,
+                    )
                 )
 
             # set --ptl-format defaults
             ptl_format = self.static_data["gpu_data"][index]["limit"]["ptl_format"]
             if ptl_format != "N/A":
                 # TODO: get the right ptl-format
-                cmds.append((f"amd-smi set --ptl-format {ptl_format} --gpu {index}", self.PASS))
+                cmds.append(
+                    (f"{self.amd_smi_exe} set --ptl-format {ptl_format} --gpu {index}", self.PASS)
+                )
 
             # set --clk-limit defaults
             clock = self.metric_data["gpu_data"][index]["clock"]
@@ -1318,7 +1369,7 @@ class TestAmdSmiCli(unittest.TestCase):
                         value = clk_type_limit_name["value"]
                         cmds.append(
                             (
-                                f"amd-smi set --clk-limit {clk_type} {limit_type} {value} --gpu {index}",
+                                f"{self.amd_smi_exe} set --clk-limit {clk_type} {limit_type} {value} --gpu {index}",
                                 self.PASS,
                             )
                         )
@@ -1349,7 +1400,10 @@ class TestAmdSmiCli(unittest.TestCase):
                         value = current_level
                 if value >= 0:
                     cmds.append(
-                        (f"amd-smi set --clk-level {clk_type} {value} --gpu {index}", self.PASS)
+                        (
+                            f"{self.amd_smi_exe} set --clk-level {clk_type} {value} --gpu {index}",
+                            self.PASS,
+                        )
                     )
             # set --process-isolation defaults
             process_isolation = self.static_data["gpu_data"][index]["process_isolation"]
@@ -1359,7 +1413,7 @@ class TestAmdSmiCli(unittest.TestCase):
                 process_isolation_value = 1
             cmds.append(
                 (
-                    f"amd-smi set --process-isolation {process_isolation_value} --gpu {index}",
+                    f"{self.amd_smi_exe} set --process-isolation {process_isolation_value} --gpu {index}",
                     self.PASS,
                 )
             )
@@ -1478,22 +1532,28 @@ class TestAmdSmiCli(unittest.TestCase):
             cmds = [
                 # Folder with a (garbage) .cper: undecodable rows are reported but
                 # the command exits 0.
-                (f"amd-smi ras --afid --folder {tmp_dir}", self.PASS),
+                (f"{self.amd_smi_exe} ras --afid --folder {tmp_dir}", self.PASS),
                 # --cper-file and --folder are mutually exclusive under --afid.
-                (f"amd-smi ras --afid --cper-file {garbage} --folder {tmp_dir}", self.FAIL),
+                (
+                    f"{self.amd_smi_exe} ras --afid --cper-file {garbage} --folder {tmp_dir}",
+                    self.FAIL,
+                ),
                 # Nonexistent folder.
-                (f"amd-smi ras --afid --folder {os.path.join(tmp_dir, 'nope')}", self.FAIL),
+                (
+                    f"{self.amd_smi_exe} ras --afid --folder {os.path.join(tmp_dir, 'nope')}",
+                    self.FAIL,
+                ),
                 # Existing folder with no .cper files.
-                (f"amd-smi ras --afid --folder {empty_dir}", self.FAIL),
+                (f"{self.amd_smi_exe} ras --afid --folder {empty_dir}", self.FAIL),
                 # Symlinked folder is refused even though it contains a .cper.
-                (f"amd-smi ras --afid --folder {symlink_dir}", self.FAIL),
+                (f"{self.amd_smi_exe} ras --afid --folder {symlink_dir}", self.FAIL),
             ]
             self.RunCmds(cmds)
 
             # The --json output must be a flat list of per-file objects, not a
             # doubly-wrapped [[...]]. Guards against the logger wrapping a list
             # assigned to self.output a second time.
-            cmd = f"amd-smi ras --afid --folder {tmp_dir} --json"
+            cmd = f"{self.amd_smi_exe} ras --afid --folder {tmp_dir} --json"
             (rc, data, std_err) = self.util.RunCmdSync(cmd)
             self.assertEqual(rc, self.PASS, f"Command '{cmd}' failed with rc={rc}")
             json_data = json.loads(data)
@@ -1545,17 +1605,17 @@ class TestAmdSmiCli(unittest.TestCase):
         return
 
         # Test mem-carveout display (static subcommand)
-        cmd = "amd-smi static --mem-carveout"
+        cmd = f"{self.amd_smi_exe} static --mem-carveout"
         (rc, data, std_err) = self.util.RunCmdSync(cmd)
         self.assertEqual(rc, self.PASS, f"Command '{cmd}' failed with rc={rc}")
 
         # Test GTT display (node subcommand — GTT is system-wide, not per-GPU)
-        cmd = "amd-smi node --gtt"
+        cmd = f"{self.amd_smi_exe} node --gtt"
         (rc, data, std_err) = self.util.RunCmdSync(cmd)
         self.assertEqual(rc, self.PASS, f"Command '{cmd}' failed with rc={rc}")
 
         # Test mem-carveout with JSON output
-        cmd = "amd-smi static --mem-carveout --json"
+        cmd = f"{self.amd_smi_exe} static --mem-carveout --json"
         (rc, data, std_err) = self.util.RunCmdSync(cmd)
         self.assertEqual(rc, self.PASS, f"Command '{cmd}' failed with rc={rc}")
         if data:
@@ -1566,7 +1626,7 @@ class TestAmdSmiCli(unittest.TestCase):
                 self.fail(f"Invalid JSON output for command '{cmd}'")
 
         # Test GTT with JSON output (node subcommand)
-        cmd = "amd-smi node --gtt --json"
+        cmd = f"{self.amd_smi_exe} node --gtt --json"
         (rc, data, std_err) = self.util.RunCmdSync(cmd)
         self.assertEqual(rc, self.PASS, f"Command '{cmd}' failed with rc={rc}")
         if data:
@@ -1577,12 +1637,12 @@ class TestAmdSmiCli(unittest.TestCase):
                 self.fail(f"Invalid JSON output for command '{cmd}'")
 
         # Test mem-carveout with CSV output
-        cmd = "amd-smi static --mem-carveout --csv"
+        cmd = f"{self.amd_smi_exe} static --mem-carveout --csv"
         (rc, data, std_err) = self.util.RunCmdSync(cmd)
         self.assertEqual(rc, self.PASS, f"Command '{cmd}' failed with rc={rc}")
 
         # Test GTT with CSV output (node subcommand)
-        cmd = "amd-smi node --gtt --csv"
+        cmd = f"{self.amd_smi_exe} node --gtt --csv"
         (rc, data, std_err) = self.util.RunCmdSync(cmd)
         self.assertEqual(rc, self.PASS, f"Command '{cmd}' failed with rc={rc}")
 
@@ -1595,6 +1655,106 @@ class TestAmdSmiCli(unittest.TestCase):
         msg = f"{self.tab}Static mem-carveout and node GTT tests passed (display mode only)"
         self.common.print(msg)
         return
+
+
+class TestAmdSmiCliExceptions(unittest.TestCase):
+    """Hardware-independent checks for the CLI exception framework.
+
+    Guards two classes of regression:
+      1. A CLI module raising an ``AmdSmi*Exception`` it never imported, which
+         only surfaces as a ``NameError`` on an error path (e.g. the missing
+         imports in ``subcommands/reset.py`` and ``subcommands/set_value.py``).
+      2. The empty-string ``hint`` ``IndexError`` in
+         ``AmdSmiInvalidParameterValueException``.
+    """
+
+    EXCEPTION_NAME = re.compile(r"^AmdSmi.*Exception$")
+
+    @staticmethod
+    def _cli_dir():
+        # Prefer CLI in the in-repo source tree; fall back to the installed CLI
+        # the `amd-smi` launcher points at
+        repo_cli = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "amdsmi_cli")
+        )
+        if os.path.isfile(os.path.join(repo_cli, "amdsmi_cli_exceptions.py")):
+            return repo_cli
+        amd_smi = shutil.which("amd-smi")
+        if amd_smi:
+            cli_dir = os.path.dirname(os.path.realpath(amd_smi))
+            if os.path.isfile(os.path.join(cli_dir, "amdsmi_cli_exceptions.py")):
+                return cli_dir
+        return None
+
+    @staticmethod
+    def _resolvable_names(tree):
+        names = set(dir(__builtins__))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    names.add(alias.asname or alias.name)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    names.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                names.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+        return names
+
+    def test_cli_modules_import_every_exception_they_raise(self):
+        cli_dir = self._cli_dir()
+        if cli_dir is None:
+            self.skipTest("Could not locate amdsmi_cli source directory")
+
+        py_files = glob.glob(os.path.join(cli_dir, "*.py"))
+        py_files += glob.glob(os.path.join(cli_dir, "subcommands", "*.py"))
+        self.assertTrue(py_files, f"No CLI source files found under {cli_dir}")
+
+        offenders = {}
+        for path in py_files:
+            with open(path, "r", encoding="utf-8") as fin:
+                tree = ast.parse(fin.read(), filename=path)
+            resolvable = self._resolvable_names(tree)
+            used = {
+                node.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Load)
+                and self.EXCEPTION_NAME.match(node.id)
+            }
+            missing = sorted(name for name in used if name not in resolvable)
+            if missing:
+                offenders[os.path.relpath(path, cli_dir)] = missing
+
+        self.assertEqual(
+            offenders,
+            {},
+            "CLI modules reference exception classes they never import "
+            f"(NameError on the error path): {offenders}",
+        )
+
+    def test_invalid_parameter_value_exception_accepts_empty_hint(self):
+        cli_dir = self._cli_dir()
+        if cli_dir is None:
+            self.skipTest("Could not locate amdsmi_cli source directory")
+        if cli_dir not in sys.path:
+            sys.path.insert(0, cli_dir)
+        import amdsmi_cli_exceptions
+
+        try:
+            exc = amdsmi_cli_exceptions.AmdSmiInvalidParameterValueException(
+                "set", None, "json", hint=""
+            )
+        except IndexError as e:
+            self.fail(f"Empty hint raised IndexError: {e}")
+
+        # The guard is that an empty hint does not raise IndexError; the
+        # specific code number is intentionally not asserted here.
+        self.assertIsInstance(exc.value, int)
+        self.assertIsInstance(str(exc), str)
 
 
 if __name__ == "__main__":

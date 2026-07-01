@@ -84,6 +84,10 @@ def _get_error_message(error_code):
     return "Generic error"
 
 
+# All exception values are derived from accepted values in Confluence
+# "AMD SMI Error Codes"
+
+
 class AmdSmiException(Exception):
     def __init__(self):
         self.json_message = {}
@@ -111,13 +115,11 @@ class AmdSmiImportException(AmdSmiException):
         super().__init__()
 
         self.value = 192
-
         common_message = "AMD-SMI Unhandled import error."
         if message:
             common_message = message
 
         self.stdout_message = f"{common_message} Error code: {self.value}"
-        print(self.stdout_message, file=sys.stderr)
 
 
 class AmdSmiInvalidCommandException(AmdSmiException):
@@ -340,7 +342,7 @@ class AmdSmiUnknownErrorException(AmdSmiException):
 
 
 class AmdSmiLibraryErrorException(AmdSmiException):
-    def __init__(self, outputformat: str, msg: str, error_code):
+    def __init__(self, outputformat: str, msg: str | None, error_code):
         super().__init__()
         if error_code == 0xFFFFFFFF:
             error_code = 206
@@ -352,7 +354,7 @@ class AmdSmiLibraryErrorException(AmdSmiException):
         if msg:
             common_message = msg
         else:
-            common_message = f"AMDSMI has returned error '{self.value}' - '{_get_error_message(abs(self.smilibcode))}.'"
+            common_message = f"AMDSMI has returned error '{self.value}' - '{_get_error_message(abs(self.smilibcode))}'."
         self.json_message["error"] = common_message
         self.json_message["code"] = self.value
         self.csv_message = f"error,code\n{common_message}, {self.value}"

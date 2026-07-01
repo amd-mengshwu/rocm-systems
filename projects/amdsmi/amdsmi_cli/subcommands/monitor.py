@@ -85,7 +85,7 @@ class MonitorCommands:
             brcm_switch (bool, optional): Value override for args.brcm_switch. Defaults to None.
 
         Raises:
-            AmdSmiInvalidParameterValueException: if no core value is provided
+            AmdSmiLibraryException: if there is an AMDSMI library error
             IndexError: Index error if gpu list is empty
 
         Return:

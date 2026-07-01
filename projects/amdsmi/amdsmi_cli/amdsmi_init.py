@@ -37,7 +37,6 @@ sys.path.insert(0, python_lib_path)
 
 try:
     from amdsmi import amdsmi_interface, amdsmi_exception
-    import amdsmi_cli_exceptions
 except ImportError as e:
     error_code = 192
     print(
@@ -166,7 +165,7 @@ def amdsmi_cli_init():
         error_code = amdsmi_interface.AmdSmiStatus.TIMEOUT
         msg = f"amdsmi_init() timed out after {_INIT_TIMEOUT_SEC}s. The GPU driver may be unresponsive."
         logging.error(msg)
-        print(f"{msg} Error code: {error_code}", file=sys.stderr)
+        print(f"{msg} Error code: {int(error_code)}", file=sys.stderr)
         sys.exit(error_code)
 
     if isinstance(
@@ -186,7 +185,7 @@ def amdsmi_cli_init():
             msg = "Drivers not loaded (amdgpu, amd_hsmp, ionic, rdma drivers not found in modules)"
             logging.error(msg)
             error_code = amdsmi_interface.AmdSmiStatus.DRIVER_NOT_LOADED
-            print(f"{msg}. Error code: {error_code}", file=sys.stderr)
+            print(f"{msg}. Error code: {int(error_code)}", file=sys.stderr)
             sys.exit(error_code)
         else:
             raise e

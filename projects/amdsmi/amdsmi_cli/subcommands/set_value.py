@@ -1692,7 +1692,6 @@ class SetValueCommands:
                         self.helpers.raise_permission_exception("Command requires elevation")
                     detected_exception = e
                     result = f"[{e.get_error_info(detailed=False)}] Unable to set PTL format to {requested_str}"
-                    self.logger.store_output(args.gpu, "ptlformat", result)
                 self.logger.store_output(args.gpu, "ptlformat", result)
                 self.logger.print_output()
                 self.logger.clear_multiple_devices_output()
@@ -2265,15 +2264,15 @@ class SetValueCommands:
         if not any([gpu_args_enabled, cpu_args_enabled, core_args_enabled]):
             msg = "No GPU, CPU, or CORE arguments provided, specific arguments are needed"
             command = " ".join(sys.argv[1:])
-            raise AmdSmiRequiredCommandException(command, self.logger.format)
+            raise AmdSmiRequiredCommandException(command, self.logger.format, msg)
         elif all([gpu_args_enabled, cpu_args_enabled, core_args_enabled]):
             msg = "Cannot set GPU, CPU, and CORE arguments at the same time"
             command = " ".join(sys.argv[1:])
-            raise AmdSmiRequiredCommandException(command, self.logger.format)
+            raise AmdSmiRequiredCommandException(command, self.logger.format, msg)
         elif not (gpu_args_enabled ^ cpu_args_enabled ^ core_args_enabled):
             msg = "Cannot set GPU, CPU, or CORE arguments at the same time"
             command = " ".join(sys.argv[1:])
-            raise AmdSmiRequiredCommandException(command, self.logger.format)
+            raise AmdSmiRequiredCommandException(command, self.logger.format, msg)
 
         if self.helpers.is_amdgpu_initialized() and gpu_args_enabled:
             if args.gpu == None:

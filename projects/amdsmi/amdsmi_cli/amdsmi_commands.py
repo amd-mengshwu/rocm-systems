@@ -26,7 +26,7 @@ import sys
 from amdsmi_helpers import AMDSMIHelpers
 from amdsmi_logger import AMDSMILogger
 from amdsmi import amdsmi_exception, amdsmi_interface
-from amdsmi_cli_exceptions import AmdSmiInvalidCommandException
+from amdsmi_cli_exceptions import AmdSmiDeviceNotFoundException
 
 from subcommands import (
     BadPagesCommands,
@@ -202,7 +202,14 @@ class AMDSMICommands(
             self.version(version_args)
             output_format = self.helpers.get_output_format()
             command = sys.argv[1] if len(sys.argv) > 1 else "unknown"
-            raise AmdSmiInvalidCommandException(command, output_format)
+            gpu = cpu = core = False
+            if len(self.device_handles) == 0:
+                gpu = True
+            if len(self.cpu_handles) == 0:
+                cpu = True
+            if len(self.core_handles) == 0:
+                core = True
+            raise AmdSmiDeviceNotFoundException(command, output_format, gpu, cpu, core)
 
     def profile(self, args):
         """Not applicable to linux baremetal"""

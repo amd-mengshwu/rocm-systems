@@ -1871,7 +1871,7 @@ class AMDSMIHelpers:
             print("")
             return
         else:
-            msg = f"Confirmation not given. Exiting without setting value"
+            msg = "Confirmation not given. Exiting without setting value"
             self.raise_permission_exception(msg)
 
     def is_valid_profile(self, profile):
