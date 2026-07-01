@@ -158,7 +158,7 @@ amdsmi_status_t AMDSmiNoDrmNIC::amd_query_nic_info(uint32_t nic_index,
   std::string net_path = device_path + "/net";
   auto net_node_dir = opendir(net_path.c_str());
   if (net_node_dir != nullptr) {
-    auto dentry = readdir(net_node_dir);
+    struct dirent* dentry = nullptr;
     std::string mac_path;
     while ((dentry = readdir(net_node_dir)) != nullptr) {
       if ((strcmp(dentry->d_name, ".") == 0) || (strcmp(dentry->d_name, "..") == 0)) {
@@ -522,7 +522,7 @@ amdsmi_status_t AMDSmiNoDrmNIC::amd_query_nic_uuid(std::string device_path, std:
 
     return AMDSMI_STATUS_FILE_ERROR;
   }
-  auto dentry = readdir(net_node_dir);
+  struct dirent* dentry = nullptr;
   std::string mac_path;
   while ((dentry = readdir(net_node_dir)) != nullptr) {
     // Skip "." and ".." directories
