@@ -38,11 +38,11 @@ def test_rocpd_tables_populated(rocpd_connection):
 
 
 def test_setup_blob_views_decoded_view(rocpd_connection):
-    from rocpd.query import setup_blob_views
+    from rocpd.query import update_query_for_blob_views
 
-    # setup_blob_views should return a query with base-table names rewritten to decoded view names.
+    # update_query_for_blob_views should return a query with base-table names rewritten to decoded view names.
     # The decoded views are created by importer.setup_blob_views during RocpdImportData init.
-    rewritten = setup_blob_views(
+    rewritten = update_query_for_blob_views(
         rocpd_connection,
         "SELECT timestamp FROM rocpd_gpu_pc_sample LIMIT 1",
     )

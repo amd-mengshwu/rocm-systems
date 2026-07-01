@@ -39,7 +39,7 @@ __all__ = [
     "export_sqlite_query",
     "send_report_email",
     "zip_files",
-    "setup_blob_views",
+    "update_query_for_blob_views",
     "add_args",
     "execute",
     "main",
@@ -49,7 +49,7 @@ __all__ = [
 _BLOB_DECODED_SUFFIX = "_decoded"
 
 
-def setup_blob_views(conn, query: str = None, profile: bool = False):
+def update_query_for_blob_views(conn, query: str = None, profile: bool = False):
     """Rewrite *query* replacing blob-source table references with their
     ``_decoded`` TEMP VIEW counterparts.
 
@@ -532,7 +532,7 @@ def execute(input, args, config=None, **kwargs):
     query = args.query
     db = input
 
-    query = setup_blob_views(
+    query = update_query_for_blob_views(
         db,
         query=query,
         profile=getattr(args, "blob_view_profile", False),

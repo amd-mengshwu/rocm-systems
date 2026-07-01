@@ -2147,6 +2147,263 @@ write_rocpd(
 #pragma pack(pop)
 
     // ---------------------------------------------------------------------------
+    // blob_field_desc — describes one field inside a packed blob struct.
+    // blob_schema_desc — bundles the table-level metadata with the field list.
+    // Passing a blob_schema_desc to register_blob_schema keeps that function
+    // independent of any specific data type.
+    // ---------------------------------------------------------------------------
+    struct blob_field_desc
+    {
+        std::string_view name;
+        size_t           offset;
+        size_t           size;
+        std::string_view data_type;
+        bool             is_signed;
+        std::string_view description;
+    };
+
+    struct blob_schema_desc
+    {
+        std::string_view             name;
+        std::string_view             source_table;
+        std::string_view             description;
+        std::string_view             byte_order;
+        int64_t                      alignment;
+        int64_t                      struct_size;
+        int64_t                      version;
+        std::vector<blob_field_desc> fields;
+    };
+
+    // PC sampling extdata schema: hw_id (both methods) + arbiter-state snapshot
+    // (stochastic only; arbiter fields remain zero for host-trap samples).
+    const auto pc_sample_extdata_v1_schema =
+        blob_schema_desc{"pc_sample_extdata_v1",
+                         "rocpd_gpu_pc_sample",
+                         "PC sampling arch-specific fields (packed)",
+                         "little",
+                         int64_t{1},
+                         static_cast<int64_t>(sizeof(pc_sample_extdata_v1)),
+                         int64_t{1},
+                         {
+                             {"hw_id_chiplet",
+                              offsetof(pc_sample_extdata_v1, hw_id_chiplet),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "HW ID chiplet index"},
+                             {"hw_id_wave_id",
+                              offsetof(pc_sample_extdata_v1, hw_id_wave_id),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "HW ID wave slot index"},
+                             {"hw_id_simd_id",
+                              offsetof(pc_sample_extdata_v1, hw_id_simd_id),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "HW ID SIMD index"},
+                             {"hw_id_pipe_id",
+                              offsetof(pc_sample_extdata_v1, hw_id_pipe_id),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "HW ID pipe index"},
+                             {"hw_id_cu_or_wgp_id",
+                              offsetof(pc_sample_extdata_v1, hw_id_cu_or_wgp_id),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "HW ID CU (GFX9) or WGP (GFX10+) index"},
+                             {"hw_id_shader_array_id",
+                              offsetof(pc_sample_extdata_v1, hw_id_shader_array_id),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "HW ID shader array index"},
+                             {"hw_id_shader_engine_id",
+                              offsetof(pc_sample_extdata_v1, hw_id_shader_engine_id),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "HW ID shader engine index"},
+                             {"hw_id_workgroup_id",
+                              offsetof(pc_sample_extdata_v1, hw_id_workgroup_id),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "HW ID workgroup index"},
+                             {"hw_id_vm_id",
+                              offsetof(pc_sample_extdata_v1, hw_id_vm_id),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "HW ID virtual memory ID"},
+                             {"hw_id_queue_id",
+                              offsetof(pc_sample_extdata_v1, hw_id_queue_id),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "HW ID queue ID"},
+                             {"hw_id_microengine_id",
+                              offsetof(pc_sample_extdata_v1, hw_id_microengine_id),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "HW ID microengine (ACE) index"},
+                             {"wave_in_group",
+                              offsetof(pc_sample_extdata_v1, wave_in_group),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "Wave position within workgroup"},
+                             {"workgroup_id_x",
+                              offsetof(pc_sample_extdata_v1, workgroup_id_x),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "Workgroup coordinate X"},
+                             {"workgroup_id_y",
+                              offsetof(pc_sample_extdata_v1, workgroup_id_y),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "Workgroup coordinate Y"},
+                             {"workgroup_id_z",
+                              offsetof(pc_sample_extdata_v1, workgroup_id_z),
+                              sizeof(uint32_t),
+                              "uint32_t",
+                              false,
+                              "Workgroup coordinate Z"},
+                             {"dual_issue_valu",
+                              offsetof(pc_sample_extdata_v1, dual_issue_valu),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Dual-issue VALU (stochastic only)"},
+                             {"arb_state_issue_valu",
+                              offsetof(pc_sample_extdata_v1, arb_state_issue_valu),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Arbiter issued VALU instruction"},
+                             {"arb_state_issue_matrix",
+                              offsetof(pc_sample_extdata_v1, arb_state_issue_matrix),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Arbiter issued matrix instruction"},
+                             {"arb_state_issue_lds",
+                              offsetof(pc_sample_extdata_v1, arb_state_issue_lds),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Arbiter issued LDS instruction"},
+                             {"arb_state_issue_lds_direct",
+                              offsetof(pc_sample_extdata_v1, arb_state_issue_lds_direct),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Arbiter issued LDS direct instruction"},
+                             {"arb_state_issue_scalar",
+                              offsetof(pc_sample_extdata_v1, arb_state_issue_scalar),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Arbiter issued scalar instruction"},
+                             {"arb_state_issue_vmem_tex",
+                              offsetof(pc_sample_extdata_v1, arb_state_issue_vmem_tex),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Arbiter issued VMEM/TEX instruction"},
+                             {"arb_state_issue_flat",
+                              offsetof(pc_sample_extdata_v1, arb_state_issue_flat),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Arbiter issued FLAT instruction"},
+                             {"arb_state_issue_exp",
+                              offsetof(pc_sample_extdata_v1, arb_state_issue_exp),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Arbiter issued export instruction"},
+                             {"arb_state_issue_misc",
+                              offsetof(pc_sample_extdata_v1, arb_state_issue_misc),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Arbiter issued misc instruction"},
+                             {"arb_state_issue_brmsg",
+                              offsetof(pc_sample_extdata_v1, arb_state_issue_brmsg),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Arbiter issued branch/message instruction"},
+                             {"arb_state_stall_valu",
+                              offsetof(pc_sample_extdata_v1, arb_state_stall_valu),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "VALU stall"},
+                             {"arb_state_stall_matrix",
+                              offsetof(pc_sample_extdata_v1, arb_state_stall_matrix),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Matrix stall"},
+                             {"arb_state_stall_lds",
+                              offsetof(pc_sample_extdata_v1, arb_state_stall_lds),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "LDS stall"},
+                             {"arb_state_stall_lds_direct",
+                              offsetof(pc_sample_extdata_v1, arb_state_stall_lds_direct),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "LDS direct stall"},
+                             {"arb_state_stall_scalar",
+                              offsetof(pc_sample_extdata_v1, arb_state_stall_scalar),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Scalar stall"},
+                             {"arb_state_stall_vmem_tex",
+                              offsetof(pc_sample_extdata_v1, arb_state_stall_vmem_tex),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "VMEM/TEX stall"},
+                             {"arb_state_stall_flat",
+                              offsetof(pc_sample_extdata_v1, arb_state_stall_flat),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Flat stall"},
+                             {"arb_state_stall_exp",
+                              offsetof(pc_sample_extdata_v1, arb_state_stall_exp),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Export stall"},
+                             {"arb_state_stall_misc",
+                              offsetof(pc_sample_extdata_v1, arb_state_stall_misc),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Misc stall"},
+                             {"arb_state_stall_brmsg",
+                              offsetof(pc_sample_extdata_v1, arb_state_stall_brmsg),
+                              sizeof(uint8_t),
+                              "uint8_t",
+                              false,
+                              "Branch/message stall"},
+                         }};
+
+    // ---------------------------------------------------------------------------
     // Design note:
     // 1) The blob schema is registered once and shared by host-trap and
     //    stochastic PC sampling generators.
@@ -2156,9 +2413,9 @@ write_rocpd(
     //    sqlite3_last_insert_rowid(), and we must read it before enqueueing any
     //    field rows in this lambda.
     // ---------------------------------------------------------------------------
-    auto register_blob_schema = [&db, node_id, this_pid]() -> uint64_t {
-        auto schema_table     = replace_uuid(db, "rocpd_info_blob_schema{{uuid}}");
-        auto schema_field_tbl = replace_uuid(db, "rocpd_info_blob_field{{uuid}}");
+    auto register_blob_schema =
+        [&db, node_id, this_pid](const blob_schema_desc& schema) -> uint64_t {
+        auto schema_table = replace_uuid(db, "rocpd_info_blob_schema{{uuid}}");
 
         auto _deferred = sql::deferred_transaction{db.conn};
 
@@ -2168,15 +2425,13 @@ write_rocpd(
             {
                 insert_value("nid", node_id),
                 insert_value("pid", this_pid),
-                insert_value("name", std::string{"pc_sample_extdata_v1"}),
-                insert_value("source_table", std::string{"rocpd_gpu_pc_sample"}),
-                insert_value("description",
-                             std::string{"PC sampling arch-specific fields (packed)"},
-                             allow_empty_string{}),
-                insert_value("byte_order", std::string{"little"}),
-                insert_value("alignment", int64_t{1}),
-                insert_value("struct_size", static_cast<int64_t>(sizeof(pc_sample_extdata_v1))),
-                insert_value("version", int64_t{1}),
+                insert_value("name", std::string{schema.name}),
+                insert_value("source_table", std::string{schema.source_table}),
+                insert_value("description", std::string{schema.description}, allow_empty_string{}),
+                insert_value("byte_order", std::string{schema.byte_order}),
+                insert_value("alignment", schema.alignment),
+                insert_value("struct_size", schema.struct_size),
+                insert_value("version", schema.version),
             });
 
         // Flush the schema row now so last_insert_rowid is valid.
@@ -2185,76 +2440,22 @@ write_rocpd(
 
         const auto schema_id = static_cast<uint64_t>(sqlite3_last_insert_rowid(db.conn));
 
-        auto add_field = [&](std::string_view name,
-                             size_t           offset,
-                             size_t           size,
-                             std::string_view dtype,
-                             bool             is_signed,
-                             std::string_view desc) {
+        for(const auto& field : schema.fields)
+        {
             get_insert_statement(
                 db,
                 "rocpd_info_blob_field{{uuid}}",
                 {
                     insert_value("schema_id", schema_id),
-                    insert_value("name", std::string{name}),
-                    insert_value("offset", static_cast<int64_t>(offset)),
-                    insert_value("size", static_cast<int64_t>(size)),
-                    insert_value("data_type", std::string{dtype}),
-                    insert_value("is_signed", is_signed ? int64_t{1} : int64_t{0}),
-                    insert_value("description", std::string{desc}, allow_empty_string{}),
+                    insert_value("name", std::string{field.name}),
+                    insert_value("offset", static_cast<int64_t>(field.offset)),
+                    insert_value("size", static_cast<int64_t>(field.size)),
+                    insert_value("data_type", std::string{field.data_type}),
+                    insert_value("is_signed", field.is_signed ? int64_t{1} : int64_t{0}),
+                    insert_value(
+                        "description", std::string{field.description}, allow_empty_string{}),
                 });
-        };
-
-#define ADD_FIELD_U32(FIELD, DESC)                                                                 \
-    add_field(                                                                                     \
-        #FIELD, offsetof(pc_sample_extdata_v1, FIELD), sizeof(uint32_t), "uint32_t", false, DESC)
-#define ADD_FIELD_U8(FIELD, DESC)                                                                  \
-    add_field(                                                                                     \
-        #FIELD, offsetof(pc_sample_extdata_v1, FIELD), sizeof(uint8_t), "uint8_t", false, DESC)
-#define ADD_FIELD_U64(FIELD, DESC)                                                                 \
-    add_field(                                                                                     \
-        #FIELD, offsetof(pc_sample_extdata_v1, FIELD), sizeof(uint64_t), "uint64_t", false, DESC)
-
-        ADD_FIELD_U32(hw_id_chiplet, "HW ID chiplet index");
-        ADD_FIELD_U32(hw_id_wave_id, "HW ID wave slot index");
-        ADD_FIELD_U32(hw_id_simd_id, "HW ID SIMD index");
-        ADD_FIELD_U32(hw_id_pipe_id, "HW ID pipe index");
-        ADD_FIELD_U32(hw_id_cu_or_wgp_id, "HW ID CU (GFX9) or WGP (GFX10+) index");
-        ADD_FIELD_U32(hw_id_shader_array_id, "HW ID shader array index");
-        ADD_FIELD_U32(hw_id_shader_engine_id, "HW ID shader engine index");
-        ADD_FIELD_U32(hw_id_workgroup_id, "HW ID workgroup index");
-        ADD_FIELD_U32(hw_id_vm_id, "HW ID virtual memory ID");
-        ADD_FIELD_U32(hw_id_queue_id, "HW ID queue ID");
-        ADD_FIELD_U32(hw_id_microengine_id, "HW ID microengine (ACE) index");
-        ADD_FIELD_U32(wave_in_group, "Wave position within workgroup");
-        ADD_FIELD_U32(workgroup_id_x, "Workgroup coordinate X");
-        ADD_FIELD_U32(workgroup_id_y, "Workgroup coordinate Y");
-        ADD_FIELD_U32(workgroup_id_z, "Workgroup coordinate Z");
-        ADD_FIELD_U8(dual_issue_valu, "Dual-issue VALU (stochastic only)");
-        ADD_FIELD_U8(arb_state_issue_valu, "Arbiter issued VALU instruction");
-        ADD_FIELD_U8(arb_state_issue_matrix, "Arbiter issued matrix instruction");
-        ADD_FIELD_U8(arb_state_issue_lds, "Arbiter issued LDS instruction");
-        ADD_FIELD_U8(arb_state_issue_lds_direct, "Arbiter issued LDS direct instruction");
-        ADD_FIELD_U8(arb_state_issue_scalar, "Arbiter issued scalar instruction");
-        ADD_FIELD_U8(arb_state_issue_vmem_tex, "Arbiter issued VMEM/TEX instruction");
-        ADD_FIELD_U8(arb_state_issue_flat, "Arbiter issued FLAT instruction");
-        ADD_FIELD_U8(arb_state_issue_exp, "Arbiter issued export instruction");
-        ADD_FIELD_U8(arb_state_issue_misc, "Arbiter issued misc instruction");
-        ADD_FIELD_U8(arb_state_issue_brmsg, "Arbiter issued branch/message instruction");
-        ADD_FIELD_U8(arb_state_stall_valu, "VALU stall");
-        ADD_FIELD_U8(arb_state_stall_matrix, "Matrix stall");
-        ADD_FIELD_U8(arb_state_stall_lds, "LDS stall");
-        ADD_FIELD_U8(arb_state_stall_lds_direct, "LDS direct stall");
-        ADD_FIELD_U8(arb_state_stall_scalar, "Scalar stall");
-        ADD_FIELD_U8(arb_state_stall_vmem_tex, "VMEM/TEX stall");
-        ADD_FIELD_U8(arb_state_stall_flat, "Flat stall");
-        ADD_FIELD_U8(arb_state_stall_exp, "Export stall");
-        ADD_FIELD_U8(arb_state_stall_misc, "Misc stall");
-        ADD_FIELD_U8(arb_state_stall_brmsg, "Branch/message stall");
-
-#undef ADD_FIELD_U32
-#undef ADD_FIELD_U8
-#undef ADD_FIELD_U64
+        }
 
         return schema_id;
     };
@@ -2465,7 +2666,8 @@ write_rocpd(
         // The schema covers hw_id (both methods) and arbiter-state snapshot (stochastic only).
         const bool has_pc_sampling =
             !pc_sampling_host_trap_gen.empty() || !pc_sampling_stochastic_gen.empty();
-        const auto ext_schema_id = has_pc_sampling ? register_blob_schema() : uint64_t{0};
+        const auto ext_schema_id =
+            has_pc_sampling ? register_blob_schema(pc_sample_extdata_v1_schema) : uint64_t{0};
 
         if(ext_schema_id == 0)
         {

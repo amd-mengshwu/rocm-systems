@@ -79,7 +79,7 @@ rocprofiler_add_integration_validate_test(
     rocprofv3-test-pc-sampling-rocpd
     TEST_PATHS validate.py
     COPY conftest.py
-    CONFIG pytest.ini
+    CONFIG pytest.ini LIBRARY_PATH "${rocprofiler-sdk_LIB_DIR}"
     PYTHON_PATH
         "${rocprofiler-sdk_LIB_DIR}/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages"
     ARGS --json-input
