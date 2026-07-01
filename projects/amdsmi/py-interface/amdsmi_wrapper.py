@@ -179,7 +179,6 @@ from pathlib import Path
 #    - defined path in /etc/ld.so.conf.d/
 # 3. Relative to amdsmi_wrapper.py
 #    - parent directory
-#    - current directory
 def find_smi_library():
     err = OSError("Could not load libamd_smi.so")
     possible_locations = []
@@ -194,9 +193,7 @@ def find_smi_library():
     possible_locations.append("libamd_smi.so")
     # 3.
     libamd_smi_parent_dir = Path(__file__).resolve().parent / "libamd_smi.so"
-    libamd_smi_cwd = Path.cwd() / "libamd_smi.so"
     possible_locations.append(libamd_smi_parent_dir)
-    possible_locations.append(libamd_smi_cwd)
 
     for location in possible_locations:
         try:
