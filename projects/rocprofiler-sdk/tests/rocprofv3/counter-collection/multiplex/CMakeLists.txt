@@ -35,6 +35,15 @@ find_package(rocprofiler-sdk REQUIRED)
 string(REPLACE "LD_PRELOAD=" "ROCPROF_PRELOAD=" PRELOAD_ENV
                "${ROCPROFILER_MEMCHECK_PRELOAD_ENV}")
 
+# All multiplex tests below are marked UNSTABLE. The multiplexed counter-collection
+# execute path intermittently hard-hangs the GPU on back-to-back runs (observed on gfx942,
+# and reproducible even with the original 2-group tests), so this is a tool/driver issue
+# independent of the test logic or the app being profiled. Because
+# ROCPROFILER_DISABLE_UNSTABLE_CTESTS defaults ON, these tests only run when configured
+# with -DROCPROFILER_DISABLE_UNSTABLE_CTESTS=OFF.
+# TODO(AIROCVAL-62): drop UNSTABLE once the multiplex counter-collection GPU hang is
+# resolved.
+
 # JSON input test
 rocprofiler_add_integration_execute_test(
     rocprofv3-test-counter-collection-multiplex
