@@ -89,6 +89,14 @@ def multiplex_layout(request):
 
     job = config["jobs"][0]
     pmc_groups = [list(group) for group in job["pmc_groups"]]
-    pmc_group_interval = int(job.get("pmc_group_interval", 1))
+
+    # A missing pmc_group_interval defaults to 1, but an explicitly invalid
+    # value (0, null/None or a non-integer) must fail loudly here rather than
+    # blowing up downstream as a ZeroDivisionError / TypeError inside the group
+    # derivation ((dispatch_id - 1) // interval).
+    pmc_group_interval = job.get("pmc_group_interval", 1)
+    assert (
+        isinstance(pmc_group_interval, int) and pmc_group_interval > 0
+    ), "pmc_group_interval must be a positive integer"
 
     return pmc_groups, pmc_group_interval

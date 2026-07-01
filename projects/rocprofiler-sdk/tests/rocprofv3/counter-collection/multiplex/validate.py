@@ -88,11 +88,20 @@ def test_counter_collection_multiplex(counter_input_data, multiplex_layout):
         group_id = expected_group_index(dispatch_id, pmc_group_interval, num_groups)
         expected_counters = group_counters[group_id]
 
-        # every dispatch must map to exactly one group: the counters collected
-        # for it are a non-empty subset of its scheduled group, so no counter
-        # belonging to any other group leaks into this dispatch.
+        # Every dispatch must map to exactly one group AND collect that whole
+        # group in a single pass. The multiplexing contract is that when a
+        # pmc_group is scheduled for a dispatch, all of its counters are
+        # collected together, so the set of counters seen for the dispatch must
+        # equal (not merely be a subset of) the scheduled group. Equality both
+        # rejects counters leaking in from another group and catches a group
+        # that is only partially collected. This is safe because rows for a
+        # dispatch are aggregated into `seen_counters` before comparing (a group
+        # may emit one row per counter), and because zero-valued counter rows
+        # are never dropped (see the `Counter_Value > 0` assertion above). For
+        # the 2-counter group [SQ_WAVES, GRBM_COUNT] this means both counters
+        # must appear for each dispatch scheduled to that group.
         assert seen_counters, f"dispatch {dispatch_id} collected no counters"
-        assert seen_counters <= expected_counters, (
+        assert seen_counters == expected_counters, (
             f"dispatch {dispatch_id} maps to group {group_id} "
             f"({sorted(expected_counters)}) but collected {sorted(seen_counters)}"
         )
