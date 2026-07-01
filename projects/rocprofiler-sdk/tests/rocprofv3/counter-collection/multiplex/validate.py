@@ -46,10 +46,25 @@ def test_agent_info(agent_info_input_data):
             assert int(row["Max_Waves_Per_Simd"]) > 0
 
 
-def test_counter_collection_multiple_yaml(counter_input_data):
-    counter_names = ["SQ_WAVES", "GRBM_COUNT", "GRBM_GUI_ACTIVE"]
-    counter_groups = [{"SQ_WAVES": 0, "GRBM_COUNT": 0}, {"GRBM_GUI_ACTIVE": 0}]
+def expected_group_index(dispatch_id, pmc_group_interval, num_groups):
+    # The interval increments per dispatch on the device (i.e. Dispatch_Id) and
+    # once it is reached the next pmc_group is selected, wrapping around after
+    # the last group. Deriving the expected group from the dispatch index and
+    # the interval generalizes the layout to any number of groups (the previous
+    # hard-coded `(dispatch_id - 1) % 2` is just this formula for two groups and
+    # an interval of one).
+    return ((dispatch_id - 1) // pmc_group_interval) % num_groups
+
+
+def test_counter_collection_multiplex(counter_input_data, multiplex_layout):
+    pmc_groups, pmc_group_interval = multiplex_layout
+    num_groups = len(pmc_groups)
+
+    group_counters = [set(group) for group in pmc_groups]
+    all_counters = set().union(*group_counters)
+
     di_list = []
+    dispatch_counters = {}
 
     for row in counter_input_data:
         assert int(row["Queue_Id"]) > 0
@@ -57,19 +72,42 @@ def test_counter_collection_multiple_yaml(counter_input_data):
         assert len(row["Kernel_Name"]) > 0
 
         assert len(row["Counter_Value"]) > 0
-        # assert row["Counter_Name"].contains("SQ_WAVES").all()
-        assert row["Counter_Name"] in counter_names
+        assert row["Counter_Name"] in all_counters
         assert float(row["Counter_Value"]) > 0
-        row_id = (int(row["Dispatch_Id"]) - 1) % 2
-        assert row["Counter_Name"] in counter_groups[int(row_id)]
-        counter_groups[int(row_id)][row["Counter_Name"]] += 1
-        di_list.append(int(row["Dispatch_Id"]))
 
-    for group in counter_groups:
-        for counter in group:
-            assert group[counter] > 0, f"Counter {counter} not found in the group"
+        dispatch_id = int(row["Dispatch_Id"])
+        di_list.append(dispatch_id)
+        dispatch_counters.setdefault(dispatch_id, set()).add(row["Counter_Name"])
 
-    # # make sure the dispatch ids are unique and ordered
+    assert len(dispatch_counters) > 0, "no counter collection data was produced"
+
+    # track which counters each defined group actually collected across the run
+    observed_group_counters = [set() for _ in pmc_groups]
+
+    for dispatch_id, seen_counters in dispatch_counters.items():
+        group_id = expected_group_index(dispatch_id, pmc_group_interval, num_groups)
+        expected_counters = group_counters[group_id]
+
+        # every dispatch must map to exactly one group: the counters collected
+        # for it are a non-empty subset of its scheduled group, so no counter
+        # belonging to any other group leaks into this dispatch.
+        assert seen_counters, f"dispatch {dispatch_id} collected no counters"
+        assert seen_counters <= expected_counters, (
+            f"dispatch {dispatch_id} maps to group {group_id} "
+            f"({sorted(expected_counters)}) but collected {sorted(seen_counters)}"
+        )
+
+        observed_group_counters[group_id] |= seen_counters
+
+    # every defined group must appear across the run and every counter packed
+    # into a group must be collected by that group at least once.
+    for group_id, expected_counters in enumerate(group_counters):
+        assert observed_group_counters[group_id] == expected_counters, (
+            f"group {group_id} ({sorted(expected_counters)}) was not fully "
+            f"collected, saw {sorted(observed_group_counters[group_id])}"
+        )
+
+    # make sure the dispatch ids are unique and ordered
     di_list = list(dict.fromkeys(di_list))
     di_expect = [idx + 1 for idx in range(len(di_list))]
     assert di_expect == di_list

@@ -52,12 +52,14 @@ rocprofiler_add_integration_execute_test(
 rocprofiler_add_integration_validate_test(
     rocprofv3-test-counter-collection-multiplex
     TEST_PATHS validate.py
-    COPY conftest.py input.json input.yml
+    COPY conftest.py input.json input.yml input_3group.json input_3group.yml
     CONFIG pytest.ini
     ARGS --agent-input
          ${CMAKE_CURRENT_BINARY_DIR}/simple-transpose-cc/out_json_agent_info.csv
          --counter-input
          ${CMAKE_CURRENT_BINARY_DIR}/simple-transpose-cc/out_json_counter_collection.csv
+         --multiplex-input
+         ${CMAKE_CURRENT_BINARY_DIR}/input.json
     TIMEOUT 45
     LABELS "integration-tests"
     FIXTURES_REQUIRED rocprofv3-test-counter-collection-multiplex
@@ -80,13 +82,84 @@ rocprofiler_add_integration_execute_test(
 rocprofiler_add_integration_validate_test(
     rocprofv3-test-counter-collection-multiple-yaml
     TEST_PATHS validate.py
-    COPY conftest.py input.json input.yml
+    COPY conftest.py input.json input.yml input_3group.json input_3group.yml
     CONFIG pytest.ini
     ARGS --agent-input
          ${CMAKE_CURRENT_BINARY_DIR}/simple-transpose-cc/out_yaml_agent_info.csv
          --counter-input
          ${CMAKE_CURRENT_BINARY_DIR}/simple-transpose-cc/out_yaml_counter_collection.csv
+         --multiplex-input
+         ${CMAKE_CURRENT_BINARY_DIR}/input.yml
     TIMEOUT 45
     LABELS "integration-tests"
     FIXTURES_REQUIRED rocprofv3-test-counter-collection-multiple-yaml
+    UNSTABLE)
+
+# 3-group multiplex layout tests. simple-transpose only issues two device dispatches,
+# which is not enough to exercise a three-group layout, so reproducible-dispatch-count is
+# used to issue a deterministic number of dispatches (9 kernels on a single synchronized
+# stream) so that all three groups are guaranteed to be scheduled across the run. The
+# interval of 2 also exercises the generalized `dispatch-index / interval` group
+# derivation (not just a per-dispatch rotation).
+
+# JSON 3-group input test
+rocprofiler_add_integration_execute_test(
+    rocprofv3-test-counter-collection-multiplex-3group
+    COMMAND
+        $<TARGET_FILE:rocprofiler-sdk::rocprofv3> -i
+        ${CMAKE_CURRENT_BINARY_DIR}/input_3group.json -d
+        ${CMAKE_CURRENT_BINARY_DIR}/multiplex-3group-json-cc -o out_3group_json -f csv --
+        $<TARGET_FILE:reproducible-dispatch-count> 9 1 100 1
+    DEPENDS reproducible-dispatch-count
+    TIMEOUT 120
+    LABELS "integration-tests"
+    PRELOAD "${PRELOAD_ENV}"
+    FIXTURES_SETUP rocprofv3-test-counter-collection-multiplex-3group
+    UNSTABLE)
+
+rocprofiler_add_integration_validate_test(
+    rocprofv3-test-counter-collection-multiplex-3group
+    TEST_PATHS validate.py
+    COPY conftest.py input.json input.yml input_3group.json input_3group.yml
+    CONFIG pytest.ini
+    ARGS --agent-input
+         ${CMAKE_CURRENT_BINARY_DIR}/multiplex-3group-json-cc/out_3group_json_agent_info.csv
+         --counter-input
+         ${CMAKE_CURRENT_BINARY_DIR}/multiplex-3group-json-cc/out_3group_json_counter_collection.csv
+         --multiplex-input
+         ${CMAKE_CURRENT_BINARY_DIR}/input_3group.json
+    TIMEOUT 120
+    LABELS "integration-tests"
+    FIXTURES_REQUIRED rocprofv3-test-counter-collection-multiplex-3group
+    UNSTABLE)
+
+# YAML 3-group input test
+rocprofiler_add_integration_execute_test(
+    rocprofv3-test-counter-collection-multiplex-3group-yaml
+    COMMAND
+        $<TARGET_FILE:rocprofiler-sdk::rocprofv3> -i
+        ${CMAKE_CURRENT_BINARY_DIR}/input_3group.yml -d
+        ${CMAKE_CURRENT_BINARY_DIR}/multiplex-3group-yaml-cc -o out_3group_yaml -f csv --
+        $<TARGET_FILE:reproducible-dispatch-count> 9 1 100 1
+    DEPENDS reproducible-dispatch-count
+    TIMEOUT 120
+    LABELS "integration-tests"
+    PRELOAD "${PRELOAD_ENV}"
+    FIXTURES_SETUP rocprofv3-test-counter-collection-multiplex-3group-yaml
+    UNSTABLE)
+
+rocprofiler_add_integration_validate_test(
+    rocprofv3-test-counter-collection-multiplex-3group-yaml
+    TEST_PATHS validate.py
+    COPY conftest.py input.json input.yml input_3group.json input_3group.yml
+    CONFIG pytest.ini
+    ARGS --agent-input
+         ${CMAKE_CURRENT_BINARY_DIR}/multiplex-3group-yaml-cc/out_3group_yaml_agent_info.csv
+         --counter-input
+         ${CMAKE_CURRENT_BINARY_DIR}/multiplex-3group-yaml-cc/out_3group_yaml_counter_collection.csv
+         --multiplex-input
+         ${CMAKE_CURRENT_BINARY_DIR}/input_3group.yml
+    TIMEOUT 120
+    LABELS "integration-tests"
+    FIXTURES_REQUIRED rocprofv3-test-counter-collection-multiplex-3group-yaml
     UNSTABLE)

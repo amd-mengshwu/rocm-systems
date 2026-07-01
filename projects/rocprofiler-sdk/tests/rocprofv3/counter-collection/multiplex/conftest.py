@@ -25,6 +25,7 @@
 import json
 import pytest
 import csv
+import yaml
 
 from rocprofiler_sdk.pytest_utils.dotdict import dotdict
 from rocprofiler_sdk.pytest_utils import collapse_dict_list
@@ -40,6 +41,12 @@ def pytest_addoption(parser):
         "--counter-input",
         action="store",
         help="Path to counter collection CSV file.",
+    )
+    parser.addoption(
+        "--multiplex-input",
+        action="store",
+        help="Path to the JSON/YAML input file describing the multiplex layout "
+        "(pmc_groups and pmc_group_interval) used for the run.",
     )
 
 
@@ -65,3 +72,23 @@ def counter_input_data(request):
             data.append(row)
 
     return data
+
+
+@pytest.fixture
+def multiplex_layout(request):
+    # Read the multiplex layout straight from the input file used for the run so
+    # the validator always stays in sync with the layout under test (number of
+    # groups, their counters and the pmc_group_interval), regardless of whether
+    # the run was driven by JSON or YAML input.
+    filename = request.config.getoption("--multiplex-input")
+    with open(filename, "r") as inp:
+        if filename.endswith((".yml", ".yaml")):
+            config = yaml.safe_load(inp)
+        else:
+            config = json.load(inp)
+
+    job = config["jobs"][0]
+    pmc_groups = [list(group) for group in job["pmc_groups"]]
+    pmc_group_interval = int(job.get("pmc_group_interval", 1))
+
+    return pmc_groups, pmc_group_interval
