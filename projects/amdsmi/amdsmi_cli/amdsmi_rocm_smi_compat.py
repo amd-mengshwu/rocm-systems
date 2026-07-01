@@ -187,7 +187,7 @@ def check_runtime_pm_status(card_path):
                 return "suspended" in status
 
         return False
-    except:
+    except Exception:
         return False
 
 
@@ -236,7 +236,7 @@ def wake_device(card_path):
                     if os.path.dirname(entry_real) == os.path.dirname(card_real):
                         render_name = entry
                         break
-                except:
+                except Exception:
                     continue
 
         if not render_name:
@@ -267,7 +267,7 @@ def wake_device(card_path):
                 return False
 
         return False
-    except:
+    except Exception:
         return False
 
 
@@ -297,7 +297,7 @@ def check_runtime_status():
                     wake_device(card_path)
 
         return all_active
-    except:
+    except Exception:
         return True
 
 
@@ -308,7 +308,7 @@ def get_bdf(processor):
 
         bdf = amdsmi.amdsmi_get_gpu_device_bdf(processor)
         return bdf
-    except:
+    except Exception:
         return None
 
 
@@ -328,7 +328,7 @@ def bdf_to_location_id(bdf):
             # KFD location_id = (bus << 8) | (device << 3) | function
             location_id = (bus << 8) | (device << 3) | function
             return location_id
-    except:
+    except Exception:
         pass
     return None
 
@@ -403,7 +403,7 @@ def get_kfd_node_id(processor, bdf=None):
 
         # Fallback to NUMA node
         return amdsmi.amdsmi_topo_get_numa_node_number(processor)
-    except:
+    except Exception:
         return None
 
 
@@ -427,7 +427,7 @@ def get_temperature(processor, temp_type="edge"):
             processor, temp_enum, amdsmi.AmdSmiTemperatureMetric.CURRENT
         )
         return temp
-    except:
+    except Exception:
         # Try other temperature types
         try:
             for ttype in [
@@ -440,9 +440,9 @@ def get_temperature(processor, temp_type="edge"):
                         processor, ttype, amdsmi.AmdSmiTemperatureMetric.CURRENT
                     )
                     return temp
-                except:
+                except Exception:
                     continue
-        except:
+        except Exception:
             pass
         return None
 
@@ -470,7 +470,7 @@ def getTemperatureLabel(deviceList):
             )
             if temp is not None and temp > 0:
                 return label
-        except:
+        except Exception:
             continue
 
     return "edge"
@@ -515,7 +515,7 @@ def get_power_from_sysfs(bdf):
                                             return power_uw / 1000000.0
                             break
         return None
-    except:
+    except Exception:
         return None
 
 
@@ -540,7 +540,7 @@ def get_power(processor, bdf=None):
             if power_w != "N/A" and isinstance(power_w, (int, float)):
                 return float(power_w)
         return None
-    except:
+    except Exception:
         return None
 
 
@@ -590,7 +590,7 @@ def get_clock_freq_from_sysfs(bdf, clk_type):
                                                 return float(freq_str)
                             break
         return None
-    except:
+    except Exception:
         return None
 
 
@@ -613,7 +613,7 @@ def get_clock_freq(processor, clk_type, bdf=None):
                 freq_hz = frequencies[current_idx]
                 return freq_hz / 1000000
         return None
-    except:
+    except Exception:
         return None
 
 
@@ -640,7 +640,7 @@ def get_gpu_usage_from_sysfs(bdf):
                                     return int(f.read().strip())
                             break
         return None
-    except:
+    except Exception:
         return None
 
 
@@ -657,7 +657,7 @@ def get_gpu_usage(processor, bdf=None):
         # Fallback to API
         usage = amdsmi.amdsmi_get_gpu_busy_percent(processor)
         return usage
-    except:
+    except Exception:
         return None
 
 
@@ -671,7 +671,7 @@ def get_memory_usage(processor):
         if vram_total > 0:
             return (vram_used / vram_total) * 100
         return None
-    except:
+    except Exception:
         return None
 
 
@@ -682,7 +682,7 @@ def get_fan_speed(processor):
 
         fan_speed = amdsmi.amdsmi_get_gpu_fan_speed(processor, 0)
         return fan_speed
-    except:
+    except Exception:
         # Fan not supported (e.g., OAM modules) - return 0
         return 0
 
@@ -711,7 +711,7 @@ def get_perf_level(processor):
             elif "STABLE_MIN_SCLK" in perf_level:
                 return "stable_min_sclk"
         return perf_level
-    except:
+    except Exception:
         return None
 
 
@@ -724,7 +724,7 @@ def get_power_cap(processor):
         if "power_cap" in power_cap_info:
             return power_cap_info["power_cap"] / 1000000.0
         return None
-    except:
+    except Exception:
         return None
 
 
@@ -745,7 +745,7 @@ def get_memory_partition(processor):
             amdsmi.AmdSmiMemoryPartitionType.NPS8: "NPS8",
         }
         return partition_names.get(partition, str(partition))
-    except:
+    except Exception:
         return "N/A"
 
 
@@ -767,7 +767,7 @@ def get_compute_partition(processor):
             amdsmi.AmdSmiComputePartitionType.CPX: "CPX",
         }
         return partition_names.get(partition, str(partition))
-    except:
+    except Exception:
         return "N/A"
 
 
@@ -1037,7 +1037,7 @@ def main():
         # Shutdown AMD SMI
         try:
             amdsmi.amdsmi_shut_down()
-        except:
+        except Exception:
             pass
 
     return RETCODE
