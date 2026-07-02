@@ -447,9 +447,12 @@ ncclResult_t ncclAllReduce_impl(const void* sendbuff, void* recvbuff, size_t cou
       rcclUseCeAllReduce(comm, count, datatype, op) &&
       comm->ceColl.ceARTmpBuf != NULL) {
     if (count == 0) return ncclSuccess;
-    WARN("CE 2-shot AllReduce: count=%zu datatype=%d op=%d rank=%d/%d",
-         count, (int)datatype, (int)op, comm->rank, comm->nRanks);
-    return ncclCeAllReduce(comm, sendbuff, recvbuff, count, datatype, op, stream);
+    struct ncclDevrWindow* recvWin = nullptr;
+    NCCLCHECK(ncclDevrFindWindow(comm, recvbuff, &recvWin));
+    WARN("CE 2-shot AllReduce: count=%zu rank=%d/%d recvWin=%p userPtr=%p",
+         count, comm->rank, comm->nRanks, (void*)recvWin,
+         recvWin ? recvWin->userPtr : nullptr);
+    return ncclCeAllReduce(comm, sendbuff, recvbuff, count, datatype, op, stream, recvWin);
   }
 
   if (rcclDdaEnabled(comm, count * ncclTypeSize(datatype), 8388608) &&
