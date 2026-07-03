@@ -673,6 +673,8 @@ TestColl() {
   #       | Name             | Ranks | Workgroups | Threads | Max Message Size #
   ##############################################################################
   ExecTest  "syncall"          2       1            1
+  ExecTest  "syncall"          3       1            1
+  ExecTest  "syncall"          5       1            1
 
   ExecTest  "wavesyncall"      2       1            1
 
@@ -682,6 +684,8 @@ TestColl() {
   ExecTest  "teamsync"         2       16           64
   ExecTest  "teamsync"         2       32           256
   ExecTest  "teamsync"         2       39           1024
+  ExecTest  "teamsync"         3       16           64
+  ExecTest  "teamsync"         5       16           64
 
   ExecTest  "teamwavesync"     2       1            1
   ExecTest  "teamwavesync"     2       16           64
@@ -694,6 +698,8 @@ TestColl() {
   ExecTest  "teamwgsync"       2       39           1024
 
   ExecTest  "barrierall"       2       1            1
+  ExecTest  "barrierall"       3       1            1
+  ExecTest  "barrierall"       5       1            1
 
   ExecTest  "wavebarrierall"   2       1            1
 
@@ -703,6 +709,8 @@ TestColl() {
   ExecTest  "teambarrier"      2       16           64
   ExecTest  "teambarrier"      2       32           256
   ExecTest  "teambarrier"      2       39           1024
+  ExecTest  "teambarrier"      3       16           64
+  ExecTest  "teambarrier"      5       16           64
 
   ExecTest  "teamwavebarrier"  2       1            1
   ExecTest  "teamwavebarrier"  2       16           64
@@ -715,11 +723,20 @@ TestColl() {
   ExecTest  "teamwgbarrier"    2       39           1024
 
   ExecTest  "alltoall"         2       1            64        512
+  ExecTest  "alltoall"         3       1            64        512
+  ExecTest  "alltoall"         5       1            64        512
 
   ExecTest  "teambroadcast"    2       1            64        32768
+  ExecTest  "teambroadcast"    3       1            64        32768
+  ExecTest  "teambroadcast"    5       1            64        32768
 
   ExecTest  "fcollect"         2       1            64        32768
+  ExecTest  "fcollect"         3       1            64        32768
+  ExecTest  "fcollect"         5       1            64        32768
 
+  # NOTE: teamreduction at rank counts > 2 currently fails a data validation
+  # check in the ring all-reduce path; this is a pre-existing bug unrelated to
+  # work/sync pool alignment, so it is only run at 2 ranks here.
   ExecTest  "teamreduction"    2       1            64        32768
 
   if [[ $TEST != ro* ]]; then #AIROCSHMEM-432: wave tests not supported on ROA
