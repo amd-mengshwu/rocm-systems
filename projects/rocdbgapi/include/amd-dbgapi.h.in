@@ -3287,7 +3287,12 @@ typedef enum
    * not define a completion event, then ::amd_dbgapi_dispatch_get_info will
    * return ::AMD_DBGAPI_STATUS_ERROR_NOT_SUPPORTED.
    */
-  AMD_DBGAPI_DISPATCH_INFO_KERNEL_COMPLETION_ADDRESS = 17
+  AMD_DBGAPI_DISPATCH_INFO_KERNEL_COMPLETION_ADDRESS = 17,
+  /**
+   * Return the dispatch cluster size (work-items) in the X, Y, and Z
+   * dimensions.  The type of this attribute is \p uint32_t[3].
+   */
+  AMD_DBGAPI_DISPATCH_INFO_CLUSTER_SIZES = 18,
 } amd_dbgapi_dispatch_info_t;
 
 /**
