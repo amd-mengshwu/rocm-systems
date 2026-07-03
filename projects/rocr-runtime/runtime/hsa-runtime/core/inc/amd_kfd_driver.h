@@ -130,6 +130,11 @@ public:
   hsa_status_t SetSigbusDelay(uint32_t node_id, uint32_t delay_ms) const override;
   hsa_status_t GetDeviceHandle(uint32_t node_id, void** device_handle) const override;
   hsa_status_t GetDeviceFd(uint32_t node_id, int *fd) const override;
+  hsa_status_t SvmSetAttr(void* base, size_t size, const hsa_amd_svm_attribute_pair_t* attribs,
+                          size_t count) override;
+  hsa_status_t SvmGetAttr(void* base, size_t size, hsa_amd_svm_attribute_pair_t* attribs,
+                          size_t count) override;
+  hsa_status_t SvmPrefetch(void* base, size_t size, uint32_t dst_node) override;
   hsa_status_t GetClockCounters(uint32_t node_id, HsaClockCounters* clock_counter) const override;
   hsa_status_t GetTileConfig(uint32_t node_id, HsaGpuTileConfig* config) const override;
   hsa_status_t GetWallclockFrequency(uint32_t node_id, uint64_t* frequency) const override;

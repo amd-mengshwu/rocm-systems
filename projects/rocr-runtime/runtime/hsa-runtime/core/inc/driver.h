@@ -414,6 +414,37 @@ public:
   /// @return HSA_STATUS_SUCCESS if the driver successfully returns the file descriptor
   virtual hsa_status_t GetDeviceFd(uint32_t node_id, int *fd) const = 0;
 
+  /// @brief Set SVM attributes for an address range.
+  /// @param[in] base Start address of the range.
+  /// @param[in] size Size of the range in bytes.
+  /// @param[in] attribs hsa_amd_svm_attribute_pair_t list.
+  /// @param[in] count Number of entries in @p attribs.
+  /// @return HSA_STATUS_SUCCESS on success.
+  virtual hsa_status_t SvmSetAttr(void* base, size_t size,
+                                  const hsa_amd_svm_attribute_pair_t* attribs, size_t count) {
+    return HSA_STATUS_ERROR_INVALID_AGENT;
+  }
+
+  /// @brief Query SVM attributes for an address range.
+  /// @param[in] base Start address of the range.
+  /// @param[in] size Size of the range in bytes.
+  /// @param[in,out] attribs hsa_amd_svm_attribute_pair_t list.
+  /// @param[in] count Number of entries in @p attribs.
+  /// @return HSA_STATUS_SUCCESS on success.
+  virtual hsa_status_t SvmGetAttr(void* base, size_t size,
+                                  hsa_amd_svm_attribute_pair_t* attribs, size_t count) {
+    return HSA_STATUS_ERROR_INVALID_AGENT;
+  }
+
+  /// @brief Prefetch (migrate) an SVM range to @p dst_node.
+  /// @param[in] base Start address of the range.
+  /// @param[in] size Size of the range in bytes.
+  /// @param[in] dst_node Target node id (a GPU, or a CPU/sysmem node).
+  /// @return HSA_STATUS_SUCCESS on success.
+  virtual hsa_status_t SvmPrefetch(void* base, size_t size, uint32_t dst_node) {
+    return HSA_STATUS_ERROR_INVALID_AGENT;
+  }
+
   /// @brief Gets clock counters for particular Node
   /// @param[in] node_id Node ID of the agent
   /// @param[out] clock_counter Clock counter

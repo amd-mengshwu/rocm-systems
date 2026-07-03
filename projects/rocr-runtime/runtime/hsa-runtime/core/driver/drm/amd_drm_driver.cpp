@@ -7,10 +7,15 @@
 
 #include <cerrno>
 #include <cstring>
+#include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include "core/inc/amd_drm_driver.h"
 #include "core/inc/amd_aql_queue.h"
 #include "core/inc/amd_gpu_agent.h"
+#include "core/inc/exceptions.h"
 
 namespace rocr {
 namespace AMD {
@@ -386,6 +391,469 @@ hsa_status_t DrmDriver::AllocQueueGWS(HSA_QUEUEID queue_id, uint32_t num_gws,
 hsa_status_t DrmDriver::DestroyQueue(HSA_QUEUEID queue_id) const {
   if (HSAKMT_CALL(hsaKmtDestroyQueue(queue_id)) != HSAKMT_STATUS_SUCCESS) {
     return HSA_STATUS_ERROR;
+  }
+  return HSA_STATUS_SUCCESS;
+}
+
+namespace {
+
+// Boolean DRM SVM attributes occupy the contiguous enum range
+// [AMDGPU_SVM_ATTR_HOST_ACCESS, AMDGPU_SVM_ATTR_GPU_READ_MOSTLY]. Their enum
+// values double as bit positions in the set/clear masks used below.
+constexpr uint32_t kFirstDrmBoolAttr = AMDGPU_SVM_ATTR_HOST_ACCESS;
+constexpr uint32_t kLastDrmBoolAttr = AMDGPU_SVM_ATTR_GPU_READ_MOSTLY;
+
+constexpr uint32_t DrmFlagBit(uint32_t drm_attr) { return 1u << drm_attr; }
+
+// Boolean DRM SVM attributes that SvmGetAttr can read back. AMDGPU_SVM_ATTR_GPU_EXEC
+// is settable but not reported, so it is intentionally omitted.
+constexpr uint32_t kReportedDrmFlags[] = {
+    AMDGPU_SVM_ATTR_HOST_ACCESS,  AMDGPU_SVM_ATTR_COHERENT,
+    AMDGPU_SVM_ATTR_EXT_COHERENT, AMDGPU_SVM_ATTR_HIVE_LOCAL,
+    AMDGPU_SVM_ATTR_GPU_RO,       AMDGPU_SVM_ATTR_GPU_READ_MOSTLY,
+};
+
+bool IsGpuNode(uint32_t node, const std::vector<uint32_t>& gpu_nodes) {
+  return std::find(gpu_nodes.begin(), gpu_nodes.end(), node) != gpu_nodes.end();
+}
+
+// SVM location value meaning "this GPU/VRAM". The kernel's SVM model is one
+// context per device, so it only distinguishes SYSMEM(0), UNDEFINED(0xffffffff),
+// and "any other value => the device that received the ioctl".
+constexpr uint32_t kSvmLocationThisGpu = 1u;
+
+// Resolve a GPU node's libdrm device handle directly from the GpuAgent's
+// cached ldrm_dev_ (populated once in InitLibDrm). Returns nullptr for non-GPU
+// or unknown nodes. This is a plain cached-field read; GetDeviceHandle(node)
+// would return the same handle but via a virtual call plus an internal node
+// lookup.
+amdgpu_device_handle LibDrmDevForNode(uint32_t node) {
+  core::Agent* agent = core::Runtime::runtime_singleton_->agent_by_nodeid(node);
+
+  if (agent == nullptr || agent->device_type() != core::Agent::kAmdGpuDevice)
+    return nullptr;
+  return static_cast<GpuAgent*>(agent)->libDrmDev();
+}
+
+}  // namespace
+
+hsa_status_t DrmDriver::SvmSetAttr(void* base, size_t size,
+                                   const hsa_amd_svm_attribute_pair_t* attribs, size_t count) {
+  const auto& gpu_nodes = core::Runtime::runtime_singleton_->gpu_ids();
+
+  if (gpu_nodes.empty())
+    return HSA_STATUS_ERROR;
+
+  std::vector<drm_amdgpu_svm_attribute> common;
+  std::unordered_map<uint32_t, std::vector<drm_amdgpu_svm_attribute>> per_device;
+  // Bitmasks of boolean DRM attributes to set (=1) or clear (=0), indexed by
+  // the DRM attribute enum value (see DrmFlagBit).
+  uint32_t set_mask = 0, clr_mask = 0;
+
+  uint32_t set_attribs = 0;
+  std::unordered_set<uint32_t> agent_seen;
+
+  auto Convert = [&](uint64_t value) -> core::Agent* {
+    hsa_agent_t handle = {value};
+    core::Agent* agent = core::Agent::Convert(handle);
+    if ((agent == nullptr) || !agent->IsValid())
+      throw hsa_exception(HSA_STATUS_ERROR_INVALID_AGENT,
+                          "Invalid agent handle in DrmDriver::SvmSetAttr.");
+    return agent;
+  };
+
+  auto ConvertAllowNull = [&](uint64_t value) -> core::Agent* {
+    hsa_agent_t handle = {value};
+    core::Agent* agent = core::Agent::Convert(handle);
+    if ((agent != nullptr) && (!agent->IsValid()))
+      throw hsa_exception(HSA_STATUS_ERROR_INVALID_AGENT,
+                          "Invalid agent handle in DrmDriver::SvmSetAttr.");
+    return agent;
+  };
+
+  auto ConfirmNew = [&](core::Agent* agent) {
+    if (!agent_seen.insert(agent->node_id()).second)
+      throw hsa_exception(HSA_STATUS_ERROR_INCOMPATIBLE_ARGUMENTS,
+                          "Multiple attributes given for the same agent in DrmDriver::SvmSetAttr.");
+  };
+
+  auto Check = [&](uint64_t attrib) {
+    if (set_attribs & (1 << attrib))
+      throw hsa_exception(HSA_STATUS_ERROR_INCOMPATIBLE_ARGUMENTS,
+                          "Attribute given multiple times in DrmDriver::SvmSetAttr.");
+    set_attribs |= (1 << attrib);
+  };
+
+  // Route an access policy for a specific agent to that GPU's context.
+  auto PushAccess = [&](core::Agent* agent, uint32_t policy) {
+    per_device[agent->node_id()].push_back({AMDGPU_SVM_ATTR_ACCESS, policy});
+  };
+
+  for (size_t i = 0; i < count; ++i) {
+    const auto attrib = attribs[i].attribute;
+    const auto value = attribs[i].value;
+
+    switch (attrib) {
+      case HSA_AMD_SVM_ATTRIB_GLOBAL_FLAG: {
+        Check(attrib);
+        switch (value) {
+          case HSA_AMD_SVM_GLOBAL_FLAG_FINE_GRAINED:
+            set_mask |= DrmFlagBit(AMDGPU_SVM_ATTR_COHERENT);
+            break;
+          case HSA_AMD_SVM_GLOBAL_FLAG_COARSE_GRAINED:
+            clr_mask |= DrmFlagBit(AMDGPU_SVM_ATTR_COHERENT);
+            break;
+          default:
+            throw hsa_exception(HSA_STATUS_ERROR_INVALID_ARGUMENT,
+                                "Invalid HSA_AMD_SVM_ATTRIB_GLOBAL_FLAG value.");
+        }
+        break;
+      }
+      case HSA_AMD_SVM_ATTRIB_READ_ONLY:
+        Check(attrib);
+        (value ? set_mask : clr_mask) |= DrmFlagBit(AMDGPU_SVM_ATTR_GPU_RO);
+        break;
+      case HSA_AMD_SVM_ATTRIB_HIVE_LOCAL:
+        Check(attrib);
+        (value ? set_mask : clr_mask) |= DrmFlagBit(AMDGPU_SVM_ATTR_HIVE_LOCAL);
+        break;
+      case HSA_AMD_SVM_ATTRIB_READ_MOSTLY:
+        Check(attrib);
+        (value ? set_mask : clr_mask) |= DrmFlagBit(AMDGPU_SVM_ATTR_GPU_READ_MOSTLY);
+        break;
+      case HSA_AMD_SVM_ATTRIB_GPU_EXEC:
+        Check(attrib);
+        (value ? set_mask : clr_mask) |= DrmFlagBit(AMDGPU_SVM_ATTR_GPU_EXEC);
+        break;
+      case HSA_AMD_SVM_ATTRIB_MIGRATION_GRANULARITY: {
+        Check(attrib);
+        uint32_t granularity = value;
+        // Max migration size is 1GB.
+        if (granularity > 18) granularity = 18;
+        common.push_back({AMDGPU_SVM_ATTR_GRANULARITY, granularity});
+        break;
+      }
+      case HSA_AMD_SVM_ATTRIB_PREFERRED_LOCATION: {
+        Check(attrib);
+        core::Agent* agent = ConvertAllowNull(value);
+        if (agent == nullptr)
+          common.push_back({AMDGPU_SVM_ATTR_PREFERRED_LOC, AMDGPU_SVM_LOCATION_UNDEFINED});
+        else if (agent->device_type() == core::Agent::kAmdGpuDevice)
+          per_device[agent->node_id()].push_back(
+              {AMDGPU_SVM_ATTR_PREFERRED_LOC, kSvmLocationThisGpu});
+        else
+          common.push_back({AMDGPU_SVM_ATTR_PREFERRED_LOC, AMDGPU_SVM_LOCATION_SYSMEM});
+        break;
+      }
+      case HSA_AMD_SVM_ATTRIB_AGENT_ACCESSIBLE: {
+        core::Agent* agent = Convert(value);
+        ConfirmNew(agent);
+        if (agent->device_type() == core::Agent::kAmdCpuDevice)
+          set_mask |= DrmFlagBit(AMDGPU_SVM_ATTR_HOST_ACCESS);
+        else
+          PushAccess(agent, AMDGPU_SVM_ACCESS_ALLOW_MIGRATE);
+        break;
+      }
+      case HSA_AMD_SVM_ATTRIB_AGENT_ACCESSIBLE_IN_PLACE: {
+        core::Agent* agent = Convert(value);
+        ConfirmNew(agent);
+        if (agent->device_type() == core::Agent::kAmdCpuDevice)
+          set_mask |= DrmFlagBit(AMDGPU_SVM_ATTR_HOST_ACCESS);
+        else
+          PushAccess(agent, AMDGPU_SVM_ACCESS_IN_PLACE);
+        break;
+      }
+      case HSA_AMD_SVM_ATTRIB_AGENT_NO_ACCESS: {
+        core::Agent* agent = Convert(value);
+        ConfirmNew(agent);
+        if (agent->device_type() == core::Agent::kAmdCpuDevice)
+          clr_mask |= DrmFlagBit(AMDGPU_SVM_ATTR_HOST_ACCESS);
+        else
+          PushAccess(agent, AMDGPU_SVM_ACCESS_INACCESSIBLE);
+        break;
+      }
+      default:
+        throw hsa_exception(HSA_STATUS_ERROR_INVALID_ARGUMENT,
+                            "Illegal or invalid attribute in DrmDriver::SvmSetAttr");
+    }
+  }
+
+  // Merge CPU access properties - grant access if any CPU needs access.
+  if (set_mask & DrmFlagBit(AMDGPU_SVM_ATTR_HOST_ACCESS))
+    clr_mask &= ~DrmFlagBit(AMDGPU_SVM_ATTR_HOST_ACCESS);
+
+  for (uint32_t attr = kFirstDrmBoolAttr; attr <= kLastDrmBoolAttr; ++attr) {
+    if (set_mask & DrmFlagBit(attr))
+      common.push_back({attr, 1});
+    else if (clr_mask & DrmFlagBit(attr))
+      common.push_back({attr, 0});
+  }
+
+  // Issue one ioctl per GPU with the shared entries plus that GPU's own ones.
+  for (uint32_t node : gpu_nodes) {
+    amdgpu_device_handle dev = LibDrmDevForNode(node);
+    if (dev == nullptr)
+      continue;
+
+    std::vector<drm_amdgpu_svm_attribute> atrrs = common;
+    auto it = per_device.find(node);
+    if (it != per_device.end())
+      atrrs.insert(atrrs.end(), it->second.begin(), it->second.end());
+
+    if (atrrs.empty())
+      continue;
+
+    if (amdgpu_svm_set_attr(dev, reinterpret_cast<uint64_t>(base), size,
+                            static_cast<uint32_t>(atrrs.size()), atrrs.data()) != 0)
+      return HSA_STATUS_ERROR;
+  }
+
+  return HSA_STATUS_SUCCESS;
+}
+
+hsa_status_t DrmDriver::SvmGetAttr(void* base, size_t size,
+                                   hsa_amd_svm_attribute_pair_t* attribs, size_t count) {
+  const auto& gpu_nodes = core::Runtime::runtime_singleton_->gpu_ids();
+  if (gpu_nodes.empty())
+    return HSA_STATUS_ERROR;
+
+  auto Convert = [&](uint64_t value) -> core::Agent* {
+    hsa_agent_t handle = {value};
+    core::Agent* agent = core::Agent::Convert(handle);
+    if ((agent == nullptr) || !agent->IsValid())
+      throw hsa_exception(HSA_STATUS_ERROR_INVALID_AGENT,
+                          "Invalid agent handle in DrmDriver::SvmGetAttr.");
+    return agent;
+  };
+
+  // Read every DRM SVM attribute the caller needs with at most one ioctl per
+  // GPU. Boolean flags and migration granularity are range properties shared
+  // across devices, so they are read from a representative device (gpu_nodes[0]);
+  // preferred/prefetch locations must be scanned across all GPUs; per-agent
+  // access is read from that agent's device. A first pass determines what is
+  // needed, then a single batched amdgpu_svm_get_attr per node collects it.
+  bool need_flags = false;
+  bool need_gran = false;
+  bool need_pref = false;
+  bool need_prefetch = false;
+  std::unordered_set<uint32_t> access_nodes;
+
+  for (size_t i = 0; i < count; ++i) {
+    switch (attribs[i].attribute) {
+      case HSA_AMD_SVM_ATTRIB_GLOBAL_FLAG:
+      case HSA_AMD_SVM_ATTRIB_READ_ONLY:
+      case HSA_AMD_SVM_ATTRIB_HIVE_LOCAL:
+      case HSA_AMD_SVM_ATTRIB_READ_MOSTLY:
+        need_flags = true;
+        break;
+      case HSA_AMD_SVM_ATTRIB_MIGRATION_GRANULARITY:
+        need_gran = true;
+        break;
+      case HSA_AMD_SVM_ATTRIB_PREFERRED_LOCATION:
+        need_pref = true;
+        break;
+      case HSA_AMD_SVM_ATTRIB_PREFETCH_LOCATION:
+        need_prefetch = true;
+        break;
+      case HSA_AMD_SVM_ATTRIB_ACCESS_QUERY: {
+        core::Agent* agent = Convert(attribs[i].value);
+        if (agent->device_type() == core::Agent::kAmdCpuDevice)
+          need_flags = true;
+        else
+          access_nodes.insert(agent->node_id());
+        break;
+      }
+      default:
+        throw hsa_exception(HSA_STATUS_ERROR_INVALID_ARGUMENT,
+                            "Illegal or invalid attribute in DrmDriver::SvmGetAttr.");
+    }
+  }
+
+  // node -> (DRM attribute type -> value), populated only for successful reads.
+  std::unordered_map<uint32_t, std::unordered_map<uint32_t, uint32_t>> node_vals;
+
+  for (uint32_t node : gpu_nodes) {
+    std::vector<drm_amdgpu_svm_attribute> req;
+    if (node == gpu_nodes[0]) {
+      if (need_flags)
+        for (uint32_t drm_attr : kReportedDrmFlags)
+          req.push_back({drm_attr, 0});
+      if (need_gran)
+        req.push_back({AMDGPU_SVM_ATTR_GRANULARITY, 0});
+    }
+    if (need_pref)
+      req.push_back({AMDGPU_SVM_ATTR_PREFERRED_LOC, 0});
+    if (need_prefetch)
+      req.push_back({AMDGPU_SVM_ATTR_PREFETCH_LOC, 0});
+    if (access_nodes.count(node))
+      req.push_back({AMDGPU_SVM_ATTR_ACCESS, 0});
+
+    if (req.empty())
+      continue;
+
+    amdgpu_device_handle dev = LibDrmDevForNode(node);
+    if (dev == nullptr)
+      continue;
+
+    if (amdgpu_svm_get_attr(dev, reinterpret_cast<uint64_t>(base), size,
+                            static_cast<uint32_t>(req.size()), req.data()) != 0)
+      continue;
+
+    auto& vals = node_vals[node];
+    for (const auto& a : req)
+      vals[a.type] = a.value;
+  }
+
+  // Look up a cached attribute value for a node. Returns false if the node was
+  // not queried successfully or did not report the attribute.
+  auto node_val = [&](uint32_t node, uint32_t drm_attr, uint32_t& out) -> bool {
+    auto nit = node_vals.find(node);
+    if (nit == node_vals.end())
+      return false;
+    auto vit = nit->second.find(drm_attr);
+    if (vit == nit->second.end())
+      return false;
+    out = vit->second;
+    return true;
+  };
+
+  // Reconstruct the boolean-flag bitmask (indexed by DRM attribute enum value,
+  // see DrmFlagBit) from the representative device's cached values.
+  auto flags = [&]() -> uint32_t {
+    uint32_t f = 0;
+    uint32_t v = 0;
+    for (uint32_t drm_attr : kReportedDrmFlags)
+      if (node_val(gpu_nodes[0], drm_attr, v) && v)
+        f |= DrmFlagBit(drm_attr);
+    return f;
+  };
+
+  // Resolve a preferred/prefetch location to a public agent handle (handle 0
+  // when the range has no or a mixed destination), scanning cached per-node
+  // values.
+  auto location_handle = [&](uint32_t drm_type) -> uint64_t {
+    uint32_t result = INVALID_NODEID;
+    bool sysmem_seen = false;
+    for (uint32_t node : gpu_nodes) {
+      uint32_t v = 0;
+      if (!node_val(node, drm_type, v))
+        continue;
+      if (v == AMDGPU_SVM_LOCATION_UNDEFINED) continue;
+      if (v == AMDGPU_SVM_LOCATION_SYSMEM) {
+        sysmem_seen = true;
+        continue;
+      }
+      // Not sysmem and not undefined => the range lives on this GPU.
+      result = node;
+      break;
+    }
+    if (result == INVALID_NODEID && sysmem_seen) result = 0;
+
+    core::Agent* agent = nullptr;
+    if (result != INVALID_NODEID)
+      agent = core::Runtime::runtime_singleton_->agent_by_nodeid(result);
+    return core::Agent::Convert(agent).handle;
+  };
+
+  for (size_t i = 0; i < count; ++i) {
+    auto& attrib = attribs[i].attribute;
+    auto& value = attribs[i].value;
+
+    switch (attrib) {
+      case HSA_AMD_SVM_ATTRIB_GLOBAL_FLAG: {
+        value = (flags() & DrmFlagBit(AMDGPU_SVM_ATTR_COHERENT))
+                    ? HSA_AMD_SVM_GLOBAL_FLAG_FINE_GRAINED
+                    : HSA_AMD_SVM_GLOBAL_FLAG_COARSE_GRAINED;
+        break;
+      }
+      case HSA_AMD_SVM_ATTRIB_READ_ONLY: {
+        value = (flags() & DrmFlagBit(AMDGPU_SVM_ATTR_GPU_RO)) ? 1 : 0;
+        break;
+      }
+      case HSA_AMD_SVM_ATTRIB_HIVE_LOCAL: {
+        value = (flags() & DrmFlagBit(AMDGPU_SVM_ATTR_HIVE_LOCAL)) ? 1 : 0;
+        break;
+      }
+      case HSA_AMD_SVM_ATTRIB_READ_MOSTLY: {
+        value = (flags() & DrmFlagBit(AMDGPU_SVM_ATTR_GPU_READ_MOSTLY)) ? 1 : 0;
+        break;
+      }
+      case HSA_AMD_SVM_ATTRIB_MIGRATION_GRANULARITY: {
+        uint32_t v = 0;
+        if (node_val(gpu_nodes[0], AMDGPU_SVM_ATTR_GRANULARITY, v))
+          value = v;
+        break;
+      }
+      case HSA_AMD_SVM_ATTRIB_PREFERRED_LOCATION: {
+        value = location_handle(AMDGPU_SVM_ATTR_PREFERRED_LOC);
+        break;
+      }
+      case HSA_AMD_SVM_ATTRIB_PREFETCH_LOCATION: {
+        value = location_handle(AMDGPU_SVM_ATTR_PREFETCH_LOC);
+        break;
+      }
+      case HSA_AMD_SVM_ATTRIB_ACCESS_QUERY: {
+        core::Agent* agent = Convert(value);
+        if (agent->device_type() == core::Agent::kAmdCpuDevice) {
+          attrib = (flags() & DrmFlagBit(AMDGPU_SVM_ATTR_HOST_ACCESS))
+                       ? HSA_AMD_SVM_ATTRIB_AGENT_ACCESSIBLE
+                       : HSA_AMD_SVM_ATTRIB_AGENT_NO_ACCESS;
+          break;
+        }
+        uint32_t v = 0;
+        if (node_val(agent->node_id(), AMDGPU_SVM_ATTR_ACCESS, v)) {
+          switch (v) {
+            case AMDGPU_SVM_ACCESS_IN_PLACE:
+              attrib = HSA_AMD_SVM_ATTRIB_AGENT_ACCESSIBLE_IN_PLACE;
+              break;
+            case AMDGPU_SVM_ACCESS_INACCESSIBLE:
+              attrib = HSA_AMD_SVM_ATTRIB_AGENT_NO_ACCESS;
+              break;
+            case AMDGPU_SVM_ACCESS_ALLOW_MIGRATE:
+            default:
+              attrib = HSA_AMD_SVM_ATTRIB_AGENT_ACCESSIBLE;
+              break;
+          }
+        }
+        break;
+      }
+      default:
+        throw hsa_exception(HSA_STATUS_ERROR_INVALID_ARGUMENT,
+                            "Illegal or invalid attribute in DrmDriver::SvmGetAttr.");
+    }
+  }
+
+  return HSA_STATUS_SUCCESS;
+}
+
+hsa_status_t DrmDriver::SvmPrefetch(void* base, size_t size, uint32_t dst_node) {
+  const auto& gpu_nodes = core::Runtime::runtime_singleton_->gpu_ids();
+  if (gpu_nodes.empty())
+    return HSA_STATUS_ERROR;
+
+  if (IsGpuNode(dst_node, gpu_nodes)) {
+    // Migrate to a specific GPU: prefetch on that GPU's fd only.
+    amdgpu_device_handle dev = LibDrmDevForNode(dst_node);
+    if (dev == nullptr)
+      return HSA_STATUS_ERROR;
+
+    drm_amdgpu_svm_attribute attr{AMDGPU_SVM_ATTR_PREFETCH_LOC, kSvmLocationThisGpu};
+    if (amdgpu_svm_set_attr(dev, reinterpret_cast<uint64_t>(base), size, 1, &attr) != 0)
+      return HSA_STATUS_ERROR;
+
+    return HSA_STATUS_SUCCESS;
+  }
+
+  // Prefetch to system memory: every GPU's independent SVM context must be
+  // updated, so issue the ioctl on each device's fd.
+  drm_amdgpu_svm_attribute attr{AMDGPU_SVM_ATTR_PREFETCH_LOC, AMDGPU_SVM_LOCATION_SYSMEM};
+
+  for (uint32_t node : gpu_nodes) {
+    amdgpu_device_handle dev = LibDrmDevForNode(node);
+    if (dev == nullptr)
+      continue;
+
+    amdgpu_svm_set_attr(dev, reinterpret_cast<uint64_t>(base), size, 1, &attr);
   }
   return HSA_STATUS_SUCCESS;
 }

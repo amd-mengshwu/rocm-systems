@@ -189,6 +189,49 @@ public:
   static uint32_t MapHsaPriorityToHqd(
       HSA_QUEUE_PRIORITY hsa_priority);
 
+  /// @brief DRM ("one svm one gpu") SVM backend overrides.
+  ///
+  /// Each incoming @ref HSA_SVM_ATTRIBUTE array (KFD convention, target GPU
+  /// encoded in the value as a node id) is split per GPU and dispatched to the
+  /// matching render node via libdrm's amdgpu_svm_set_attr/get_attr.
+
+  /// @brief Apply SVM attributes to a virtual address range.
+  ///
+  /// @param [in] base    Start of the virtual address range.
+  /// @param [in] size    Size of the range in bytes.
+  /// @param [in] attribs Array of backend-neutral public attribute pairs to
+  ///                     apply; agent-valued attributes carry agent handles.
+  /// @param [in] count   Number of entries in @p attribs.
+  ///
+  /// @return HSA_STATUS_SUCCESS on success, error code on failure.
+  hsa_status_t SvmSetAttr(void* base, size_t size, const hsa_amd_svm_attribute_pair_t* attribs,
+                          size_t count) override;
+
+  /// @brief Query SVM attributes of a virtual address range.
+  ///
+  /// @param [in]     base    Start of the virtual address range.
+  /// @param [in]     size    Size of the range in bytes.
+  /// @param [in,out] attribs Array of public attribute pairs to query; each
+  ///                         entry's attribute selects the query and is filled
+  ///                         with the value read back in public terms
+  ///                         (agent-valued attributes carry agent handles).
+  /// @param [in]     count   Number of entries in @p attribs.
+  ///
+  /// @return HSA_STATUS_SUCCESS on success, error code on failure.
+  hsa_status_t SvmGetAttr(void* base, size_t size, hsa_amd_svm_attribute_pair_t* attribs,
+                          size_t count) override;
+
+  /// @brief Prefetch (migrate) a virtual address range to a location.
+  ///
+  /// @param [in] base     Start of the virtual address range.
+  /// @param [in] size     Size of the range in bytes.
+  /// @param [in] dst_node Destination KFD node id; a GPU node migrates to that
+  ///                      GPU's VRAM, otherwise the range is migrated to system
+  ///                      memory.
+  ///
+  /// @return HSA_STATUS_SUCCESS on success, error code on failure.
+  hsa_status_t SvmPrefetch(void* base, size_t size, uint32_t dst_node) override;
+
   private:
   /// @brief Allocate (if needed) doorbell memory
   ///
