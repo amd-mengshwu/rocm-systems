@@ -773,6 +773,7 @@ rocprofiler-sdk:
             - gfx12
             - gfx1200
             - gfx1201
+            - gfx1250
           expression: FETCH_SIZE
     - name: FlatLDSInsts
       description: The average number of FLAT instructions that read or write to LDS executed per 
@@ -931,6 +932,10 @@ rocprofiler-sdk:
             - gfx1201
           block: GL2C
           event: 148
+        - architectures:
+            - gfx1250
+          block: GL2C
+          event: 121
     - name: GL2C_EA_RDREQ_128B_sum
       description: Number of 128-byte GL2C/EA read requests. Sum over GL2C instances.
       properties: []
@@ -952,6 +957,7 @@ rocprofiler-sdk:
             - gfx12
             - gfx1200
             - gfx1201
+            - gfx1250
           expression: reduce(GL2C_EA_RDREQ_128B,sum)
     - name: GL2C_EA_RDREQ_256B
       description: Number of 256-byte GL2C/EA read requests
@@ -1003,6 +1009,10 @@ rocprofiler-sdk:
             - gfx1201
           block: GL2C
           event: 146
+        - architectures:
+            - gfx1250
+          block: GL2C
+          event: 119
     - name: GL2C_EA_RDREQ_32B_sum
       description: Number of 32-byte GL2C/EA read requests. Sum over GL2C instances.
       properties: []
@@ -1024,6 +1034,7 @@ rocprofiler-sdk:
             - gfx12
             - gfx1200
             - gfx1201
+            - gfx1250
           expression: reduce(GL2C_EA_RDREQ_32B,sum)
     - name: GL2C_EA_RDREQ_64B
       description: Number of 64-byte GL2C/EA read requests
@@ -1051,6 +1062,12 @@ rocprofiler-sdk:
             - gfx1201
           block: GL2C
           event: 147
+          block: GL2C
+          event: 100
+        - architectures:
+            - gfx1250
+          block: GL2C
+          event: 120
     - name: GL2C_EA_RDREQ_64B_sum
       description: Number of 64-byte GL2C/EA read requests. Sum over GL2C instances.
       properties: []
@@ -1072,6 +1089,7 @@ rocprofiler-sdk:
             - gfx12
             - gfx1200
             - gfx1201
+            - gfx1250
           expression: reduce(GL2C_EA_RDREQ_64B,sum)
     - name: GL2C_EA_RDREQ_96B
       description: Number of 96-byte GL2C/EA read requests
