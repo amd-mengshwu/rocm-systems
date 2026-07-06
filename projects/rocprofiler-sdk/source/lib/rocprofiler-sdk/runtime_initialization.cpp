@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -60,6 +60,7 @@ SPECIALIZE_RUNTIME_INIT_INFO(RCCL, "RCCL runtime")
 SPECIALIZE_RUNTIME_INIT_INFO(ROCDECODE, "rocDecode runtime")
 SPECIALIZE_RUNTIME_INIT_INFO(ROCJPEG, "rocJPEG runtime")
 SPECIALIZE_RUNTIME_INIT_INFO(ROCSHMEM, "rocSHMEM runtime")
+SPECIALIZE_RUNTIME_INIT_INFO(OMPT, "OMPT runtime")
 
 #undef SPECIALIZE_RUNTIME_INIT_INFO
 

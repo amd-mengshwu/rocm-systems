@@ -57,6 +57,7 @@ add_subdirectory(rocdecode)
 add_subdirectory(rocjpeg)
 add_subdirectory(rocshmem)
 add_subdirectory(details)
+add_subdirectory(platform)
 add_subdirectory(ompt)
 add_subdirectory(registration)
 

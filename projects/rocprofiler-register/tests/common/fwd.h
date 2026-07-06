@@ -37,6 +37,7 @@ extern "C" {
 #    pragma weak rocDecCreateDecoder
 #    pragma weak rocJpegStreamCreate
 #    pragma weak rocshmem_init_mock
+#    pragma weak hipFileGetVersion
 #endif
 
 extern void
@@ -91,6 +92,12 @@ enum rocshmem_status_t
 
 extern rocshmem_status_t
 rocshmem_init_mock(void);
+enum hipFileError_t
+{
+};
+
+extern hipFileError_t
+hipFileGetVersion(unsigned* major, unsigned* minor, unsigned* patch);
 
 #ifdef __cplusplus
 }
