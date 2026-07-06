@@ -286,6 +286,7 @@ add_executable(
     transcendental_test.cpp
     analysis/liveness_test.cpp
     patch/spill_manager_test.cpp
+    patch/log_buffer_test.cpp
     patch/instruction_builder_test.cpp
     patch/trampoline_builder_test.cpp
     patch/instrumentor_test.cpp
