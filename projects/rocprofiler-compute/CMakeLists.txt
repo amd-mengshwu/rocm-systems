@@ -553,6 +553,15 @@ add_test(
         ${WORKING_DIR_OPTION}
 )
 
+# Memory chart CLI integration tests
+add_test(
+    NAME test_mem_chart_cli
+    COMMAND
+        ${PYTHON_TEST_COMMAND} -m pytest ${STANDALONEBINARY_TEST_OPTION}
+        --junitxml=tests/test_mem_chart_cli.xml ${COV_OPTION}
+        tests/test_mem_chart_cli.py ${WORKING_DIR_OPTION}
+)
+
 add_test(
     NAME test_roofline_calc
     COMMAND
@@ -856,6 +865,7 @@ if(${ENABLE_COVERAGE})
         test_mi_gpu_spec
         test_utils
         test_mem_chart
+        test_mem_chart_cli
         test_roofline_calc
         test_roofline_analyze
         test_roofline_main

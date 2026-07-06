@@ -33,6 +33,7 @@ test_categories:
       - test_autogen_config
       - test_import_guard
       - test_mem_chart
+      - test_mem_chart_cli
       - test_native_tool_finder
       - test_metrics_common
       - test_tty
@@ -98,6 +99,7 @@ test_categories:
       - test_profiler_base
       - test_pc_sampling_profile
       - test_mem_chart
+      - test_mem_chart_cli
       - test_native_tool_finder
       - test_metrics_common
       - test_tty
@@ -166,6 +168,7 @@ test_categories:
       - test_profiler_base
       - test_pc_sampling_profile
       - test_mem_chart
+      - test_mem_chart_cli
       - test_native_tool_finder
       - test_metrics_common
       - test_tty
@@ -234,6 +237,7 @@ test_categories:
       - test_profiler_base
       - test_pc_sampling_profile
       - test_mem_chart
+      - test_mem_chart_cli
       - test_native_tool_finder
       - test_metrics_common
       - test_tty
