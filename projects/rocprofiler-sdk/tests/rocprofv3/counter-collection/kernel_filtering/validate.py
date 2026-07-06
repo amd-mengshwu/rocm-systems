@@ -64,6 +64,82 @@ def validate_csv(df, kernel_list, counter_name):
     assert (df["Counter_Value"].astype(int).values > 0).all()
 
 
+def validate_csv_iteration_range(df, kernel_list, counter_name, iteration_range):
+
+    validate_csv(df, kernel_list, counter_name)
+
+    # each kernel must capture exactly one dispatch per requested iteration
+    expected_count = len(iteration_range)
+    assert expected_count > 0
+
+    kernel_count = dict([[itr, 0] for itr in kernel_list])
+    for itr in df["Kernel_Name"]:
+        if re.search(r"__amd_rocclr_.*", itr):
+            continue
+        kernel_count[itr] += 1
+
+    for kernel_name, count in kernel_count.items():
+        assert (
+            count == expected_count
+        ), f"{kernel_name} captured {count} dispatches, expected {expected_count}"
+
+
+def validate_json_iteration_range(json_data, kernel_list, iteration_range):
+
+    # --kernel-trace records every launch in buffer_records.kernel_dispatch
+    # (unfiltered), while counter_collection holds only the selected dispatches;
+    # recover each dispatch's per-kernel launch ordinal and assert the selected
+    # ordinals equal the requested range.
+    data = json_data["rocprofiler-sdk-tool"]
+    counter_collection_data = data["callback_records"]["counter_collection"]
+    kernel_dispatch_data = data["buffer_records"]["kernel_dispatch"]
+
+    def get_kernel_name(kernel_id):
+        return data["kernel_symbols"][kernel_id]["formatted_kernel_name"]
+
+    # assign each dispatch its 1-based ordinal within its own kernel name, in
+    # dispatch_id (launch) order so the result is independent of trace record order
+    targeted_dispatches = []
+    for dispatch in kernel_dispatch_data:
+        dispatch_info = dispatch["dispatch_info"]
+        kernel_name = get_kernel_name(dispatch_info["kernel_id"])
+        if kernel_name in kernel_list:
+            targeted_dispatches.append((dispatch_info["dispatch_id"], kernel_name))
+
+    per_kernel_seen = dict([[itr, 0] for itr in kernel_list])
+    ordinal_by_dispatch_id = {}
+    kernel_by_dispatch_id = {}
+    for dispatch_id, kernel_name in sorted(targeted_dispatches):
+        per_kernel_seen[kernel_name] += 1
+        ordinal_by_dispatch_id[dispatch_id] = per_kernel_seen[kernel_name]
+        kernel_by_dispatch_id[dispatch_id] = kernel_name
+
+    # require more launches than the range size so the original ordinals are
+    # recoverable (i.e. the trace itself was not filtered down to the range)
+    expected_ordinals = set(iteration_range)
+    for kernel_name in kernel_list:
+        assert per_kernel_seen[kernel_name] > len(expected_ordinals), (
+            f"{kernel_name} launched {per_kernel_seen[kernel_name]} times; "
+            f"expected more than the {len(expected_ordinals)} requested "
+            "iterations so original launch ordinals can be recovered"
+        )
+
+    captured_ordinals = dict([[itr, set()] for itr in kernel_list])
+    for counter in counter_collection_data:
+        dispatch_info = counter["dispatch_data"]["dispatch_info"]
+        dispatch_id = dispatch_info["dispatch_id"]
+        kernel_name = kernel_by_dispatch_id.get(dispatch_id)
+        if kernel_name is None:
+            continue
+        captured_ordinals[kernel_name].add(ordinal_by_dispatch_id[dispatch_id])
+
+    for kernel_name in kernel_list:
+        assert captured_ordinals[kernel_name] == expected_ordinals, (
+            f"{kernel_name} captured iterations {sorted(captured_ordinals[kernel_name])}, "
+            f"expected {sorted(expected_ordinals)}"
+        )
+
+
 def validate_json(json_data, counter_name, check_dispatch):
 
     data = json_data["rocprofiler-sdk-tool"]
@@ -131,6 +207,28 @@ def test_validate_counter_collection_csv_pass1(input_csv_pass1: pd.DataFrame):
 def test_validate_counter_collection_csv_pmc1(input_csv_pmc1: pd.DataFrame):
     kernel_list = sorted(["addition_kernel", "subtract_kernel", "divide_kernel"])
     validate_csv(input_csv_pmc1, kernel_list, "SQ_WAVES")
+
+
+def test_validate_counter_collection_csv_iteration_range(
+    input_csv_iteration_range: pd.DataFrame, iteration_range
+):
+    kernel_list = sorted(
+        ["addition_kernel", "subtract_kernel", "multiply_kernel", "divide_kernel"]
+    )
+    validate_csv_iteration_range(
+        input_csv_iteration_range, kernel_list, "SQ_WAVES", iteration_range
+    )
+
+
+def test_validate_counter_collection_json_iteration_range(
+    input_json_iteration_range, iteration_range
+):
+    kernel_list = sorted(
+        ["addition_kernel", "subtract_kernel", "multiply_kernel", "divide_kernel"]
+    )
+    validate_json_iteration_range(
+        input_json_iteration_range, kernel_list, iteration_range
+    )
 
 
 def test_validate_counter_collection_csv_pass2(input_csv_pass2: pd.DataFrame):

@@ -86,6 +86,40 @@ def pytest_addoption(parser):
         help="Path to CSV file.",
     )
 
+    parser.addoption(
+        "--input-csv-iteration-range",
+        action="store",
+        help="Path to CSV file.",
+    )
+
+    parser.addoption(
+        "--input-json-iteration-range",
+        action="store",
+        help="Path to JSON file.",
+    )
+
+    parser.addoption(
+        "--kernel-iteration-range",
+        action="store",
+        help="Kernel iteration range passed on the command line.",
+    )
+
+
+def tokenize(kernel_iteration_range):
+    range_str = kernel_iteration_range.replace("[", "").replace("]", "")
+    split_list = range_str.split(",")
+    _range = []
+    for split_string in split_list:
+        if "-" in split_string:
+            interval = split_string.split("-")
+            [
+                _range.append(i)
+                for i in list(range((int)(interval[0]), (int)(interval[1]) + 1))
+            ]
+        else:
+            _range.append(int(split_string))
+    return _range
+
 
 @pytest.fixture
 def input_csv_pass1(request):
@@ -120,6 +154,26 @@ def input_csv_pmc1(request):
     filename = request.config.getoption("--input-csv-pmc1")
     with open(filename, "r") as inp:
         return pd.read_csv(inp)
+
+
+@pytest.fixture
+def input_csv_iteration_range(request):
+    filename = request.config.getoption("--input-csv-iteration-range")
+    with open(filename, "r") as inp:
+        return pd.read_csv(inp)
+
+
+@pytest.fixture
+def input_json_iteration_range(request):
+    filename = request.config.getoption("--input-json-iteration-range")
+    with open(filename, "r") as inp:
+        return dotdict(collapse_dict_list(json.load(inp)))
+
+
+@pytest.fixture
+def iteration_range(request):
+    kernel_iteration_range = request.config.getoption("--kernel-iteration-range")
+    return tokenize(kernel_iteration_range.strip())
 
 
 @pytest.fixture
