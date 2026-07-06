@@ -1733,17 +1733,17 @@ class TestAmdSmiPython(unittest.TestCase):
     def test_status_code_to_string(self):
         self.common.print_func_name("")
 
-        # Every amdsmi status code (except the two sentinels) must resolve to a
-        # description starting with its own enum name, never to a sentinel:
+        # Every status code must resolve to a description starting with its own
+        # enum name. Skip the two catch-all error codes: a real code resolving to
+        # one of them is a library bug this test is meant to catch.
         #   * AMDSMI_STATUS_UNKNOWN_ERROR -> a `case` is missing from
         #     amdsmi_status_code_to_string() (e.g. TIMEOUT / MORE_DATA).
         #   * AMDSMI_STATUS_MAP_ERROR -> a lower-level rsmi/esmi/nic status has
         #     no amdsmi mapping.
-        # Either of these two errors is a library bug, which test should catch & fail.
-        sentinel_descs = ("AMDSMI_STATUS_UNKNOWN_ERROR", "AMDSMI_STATUS_MAP_ERROR")
+        fallback_descs = ("AMDSMI_STATUS_UNKNOWN_ERROR", "AMDSMI_STATUS_MAP_ERROR")
         for status in amdsmi.AmdSmiStatus:
             error_name = f"AMDSMI_STATUS_{status.name}"
-            if error_name in sentinel_descs:
+            if error_name in fallback_descs:
                 continue
             msg = f"\t### amdsmi_status_code_to_string({error_name}={status.value}):"
 
@@ -1767,7 +1767,7 @@ class TestAmdSmiPython(unittest.TestCase):
             ret_str = ret.decode("utf-8") if isinstance(ret, bytes) else str(ret)
 
             # Every code's description must begin with its own enum name.
-            # Eg. Some code fallbacks provide an RSMI_STATUS_* string,
+            # e.g. Some code fallbacks provide an RSMI_STATUS_* string,
             # but that is not a valid AMDSMI_STATUS_* string.
             self.assertTrue(
                 ret_str.startswith(error_name),
