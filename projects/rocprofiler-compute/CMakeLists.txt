@@ -558,8 +558,8 @@ add_test(
     NAME test_mem_chart_cli
     COMMAND
         ${PYTHON_TEST_COMMAND} -m pytest ${STANDALONEBINARY_TEST_OPTION}
-        --junitxml=tests/test_mem_chart_cli.xml ${COV_OPTION}
-        tests/test_mem_chart_cli.py ${WORKING_DIR_OPTION}
+        --junitxml=tests/test_mem_chart_cli.xml ${COV_OPTION} tests/test_mem_chart_cli.py
+        ${WORKING_DIR_OPTION}
 )
 
 add_test(
