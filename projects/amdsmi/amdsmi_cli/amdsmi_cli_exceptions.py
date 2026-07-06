@@ -342,7 +342,7 @@ class AmdSmiUnknownErrorException(AmdSmiException):
 
 
 class AmdSmiLibraryErrorException(AmdSmiException):
-    def __init__(self, outputformat: str, msg: str | None, error_code):
+    def __init__(self, outputformat: str, msg: str, error_code: int):
         super().__init__()
         if error_code == 0xFFFFFFFF:
             error_code = 206
