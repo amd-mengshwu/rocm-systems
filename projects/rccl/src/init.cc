@@ -1637,7 +1637,11 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
   allXgmi = true;
   hasPeerAccess = true;
 
-  if (cudaGetDeviceCount(&localDevCount) != cudaSuccess) localDevCount = 0;
+  if (CUDACLEARERROR(cudaGetDeviceCount(&localDevCount)) != cudaSuccess) {
+    WARN("cudaGetDeviceCount failed; treating all peers as non-accessible for "
+         "clique setup");
+    localDevCount = 0;
+  }
 
   // Check that all the GPUs have peer access to one another and are XGMI connected
   for (int i = 0; i < nranks && hasPeerAccess; i++) {
@@ -1647,17 +1651,23 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
       int cudaDev2 = comm->peerInfo[j].cudaDev;
       int p2p;
 
-      // RCCL: under asymmetric HIP_VISIBLE_DEVICES a peer ordinal may be out
-      // of range here; hipDeviceCanAccessPeer would return hipErrorInvalidDevice
-      // and leave a sticky error. Treat such a pair as no peer access.
+      // RCCL: HIP_VISIBLE_DEVICES may differ per rank, so check that the peer
+      // device is visible in this process and that its busId matches.
       if (cudaDev1 < 0 || cudaDev1 >= localDevCount || cudaDev2 < 0 ||
           cudaDev2 >= localDevCount) {
         hasPeerAccess = false;
         break;
       }
 
-      if (hipDeviceCanAccessPeer(&p2p, cudaDev1, cudaDev2) != hipSuccess || !p2p)
-      {
+      int64_t busId2 = 0;
+      if (getBusId(cudaDev2, &busId2) != ncclSuccess ||
+          busId2 != comm->peerInfo[j].busId) {
+        hasPeerAccess = false;
+        break;
+      }
+
+      if (hipDeviceCanAccessPeer(&p2p, cudaDev1, cudaDev2) != hipSuccess ||
+          !p2p) {
         hasPeerAccess = false;
         break;
       }
