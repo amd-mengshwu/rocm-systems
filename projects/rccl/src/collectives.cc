@@ -247,7 +247,6 @@ ncclResult_t ncclAllGather_impl(const void* sendbuff, void* recvbuff, size_t sen
 
   if (rcclDdaEnabled(comm, nRanks * sendcount * ncclTypeSize(datatype), 8388608) &&
       ncclAllGatherDdaIpcEligible(comm, sendbuff, recvbuff, sendcount, datatype)) {
-    //printf("DDa AG\n");	  
     NCCLCHECK(ncclAllGatherDdaIpc(
         sendbuff,
         recvbuff,
