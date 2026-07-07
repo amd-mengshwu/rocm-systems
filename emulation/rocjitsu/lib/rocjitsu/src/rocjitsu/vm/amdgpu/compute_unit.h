@@ -381,17 +381,50 @@ public:
       plugin_group_->onAmdgpuReadVgprs(wf, reg_idx, lane_begin, lane_end, byte_mask);
   }
 
+  void notify_vgpr_write(const Wavefront *wf, uint32_t reg_idx, uint32_t lane,
+                         uint8_t byte_mask = 0xF) const {
+    if (wf)
+      plugin_group_->onAmdgpuWriteVgpr(wf, reg_idx, lane, byte_mask);
+  }
+
   /// @brief Read a vector register lane from the physical VGPR file.
   /// @param reg_idx Physical register index.
   /// @param lane Lane index within the wavefront.
   /// @returns Lane value.
   virtual uint32_t read_vgpr(uint32_t reg_idx, uint32_t lane) const = 0;
 
+  /// @brief Read a vector register lane while notifying plugins with a byte mask.
+  virtual uint32_t read_vgpr_masked(uint32_t reg_idx, uint32_t lane, uint8_t byte_mask) const = 0;
+
+  /// @brief Read a vector register lane without plugin hooks.
+  ///
+  /// Used by architectural memory writeback merge paths that need the old
+  /// dword value to preserve untouched D16 bits.
+  virtual uint32_t read_vgpr_raw(uint32_t reg_idx, uint32_t lane) const = 0;
+
   /// @brief Write a vector register lane in the physical VGPR file.
   /// @param reg_idx Physical register index.
   /// @param lane Lane index within the wavefront.
   /// @param val Value to write.
   virtual void write_vgpr(uint32_t reg_idx, uint32_t lane, uint32_t val) = 0;
+
+  /// @brief Write a vector register lane while notifying plugins with a byte mask.
+  virtual void write_vgpr_masked(uint32_t reg_idx, uint32_t lane, uint32_t val,
+                                 uint8_t byte_mask) = 0;
+
+  /// @brief Write a vector register lane without plugin write hooks.
+  ///
+  /// Used by simulator setup and architectural writeback paths that must update
+  /// the physical register file without reporting an instruction destination write.
+  virtual void write_vgpr_raw(uint32_t reg_idx, uint32_t lane, uint32_t val) = 0;
+
+  /// @brief Write a memory instruction result without plugin write hooks.
+  ///
+  /// The race detector observes memory results when the instruction is routed.
+  /// Completion writes must not look like a new instruction destination write.
+  void write_vgpr_from_memory(uint32_t reg_idx, uint32_t lane, uint32_t val) {
+    write_vgpr_raw(reg_idx, lane, val);
+  }
 
   /// @brief Return a pointer to a wavefront's SGPR data in the physical file.
   /// @param base Base register index in the SGPR file.
@@ -620,9 +653,15 @@ public:
 
   /// @returns Lane value from the VGPR file.
   uint32_t read_vgpr(uint32_t reg_idx, uint32_t lane) const override {
-    if (auto *wf = vgpr_to_wave_[reg_idx]) {
-      this->plugin_group_->onAmdgpuReadVgprs(wf, reg_idx, lane, lane + 1);
-    }
+    return read_vgpr_masked(reg_idx, lane, 0xF);
+  }
+
+  uint32_t read_vgpr_masked(uint32_t reg_idx, uint32_t lane, uint8_t byte_mask) const override {
+    this->notify_vgpr_read(vgpr_to_wave_[reg_idx], reg_idx, lane, lane + 1, byte_mask);
+    return vgpr_file_[reg_idx][lane];
+  }
+
+  uint32_t read_vgpr_raw(uint32_t reg_idx, uint32_t lane) const override {
     return vgpr_file_[reg_idx][lane];
   }
 
@@ -632,6 +671,16 @@ public:
 
   /// @brief Write a value to the VGPR file.
   void write_vgpr(uint32_t reg_idx, uint32_t lane, uint32_t val) override {
+    write_vgpr_masked(reg_idx, lane, val, 0xF);
+  }
+
+  void write_vgpr_masked(uint32_t reg_idx, uint32_t lane, uint32_t val,
+                         uint8_t byte_mask) override {
+    this->notify_vgpr_write(vgpr_to_wave_[reg_idx], reg_idx, lane, byte_mask);
+    write_vgpr_raw(reg_idx, lane, val);
+  }
+
+  void write_vgpr_raw(uint32_t reg_idx, uint32_t lane, uint32_t val) override {
     vgpr_file_[reg_idx][lane] = val;
   }
 

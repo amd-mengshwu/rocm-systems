@@ -308,13 +308,13 @@ void CommandProcessor::init_wavefront_regs(ComputeUnitCore *cu, Wavefront *wf,
     uint32_t id_z = flat_id / wg_xy;
     if (packed_tid_ && pkt.enable_vgpr_workitem_id > 0) {
       uint32_t packed = (id_x & 0x3FFu) | ((id_y & 0x3FFu) << 10) | ((id_z & 0x3FFu) << 20);
-      cu->write_vgpr(vbase, lane, packed);
+      cu->write_vgpr_raw(vbase, lane, packed);
     } else {
-      cu->write_vgpr(vbase, lane, id_x);
+      cu->write_vgpr_raw(vbase, lane, id_x);
       if (pkt.enable_vgpr_workitem_id >= 1)
-        cu->write_vgpr(vbase + 1, lane, id_y);
+        cu->write_vgpr_raw(vbase + 1, lane, id_y);
       if (pkt.enable_vgpr_workitem_id >= 2)
-        cu->write_vgpr(vbase + 2, lane, id_z);
+        cu->write_vgpr_raw(vbase + 2, lane, id_z);
     }
   }
 

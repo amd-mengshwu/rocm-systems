@@ -175,6 +175,7 @@ jobs:
             "RaceTest\.dual_offset_lds_race"
             "RaceTest\.scratch_vmcnt"
             "RaceTest\.scratch_vmcnt_race"
+            "RaceTest\.waw_global_load_then_alu"
             "RaceTest\.f64_vgpr_safe"
             "RaceTest\.f64_vgpr_race"
           )

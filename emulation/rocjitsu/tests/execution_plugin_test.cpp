@@ -17,6 +17,7 @@ RJ_DIAGNOSTIC_IGNORE_PEDANTIC
 #include "hsa/AMDHSAKernelDescriptor.h"
 RJ_DIAGNOSTIC_POP
 
+#include "rocjitsu/vm/plugins/profiled_execution_plugin_group.h"
 #include "rocjitsu/vm/plugins/race_detector/plugin.h"
 
 #include <gtest/gtest.h>
@@ -55,6 +56,7 @@ struct HookEvent {
     AFTER_INSTRUCTION,
     ROUTE_MEMORY,
     READ_VGPR,
+    WRITE_VGPR,
     READ_SGPR,
     BARRIER_RESOLVED,
     INIT,
@@ -71,6 +73,9 @@ struct HookEvent {
   uint32_t physical_vgpr_count = 0;
   uint32_t sgpr_count = 0;
   uint64_t pc = 0;
+  uint32_t physical_reg = 0;
+  uint32_t lane = 0;
+  uint8_t byte_mask = 0;
   std::string mnemonic;
 };
 
@@ -178,6 +183,20 @@ public:
     events.push_back(e);
   }
 
+  void onAmdgpuWriteVgpr(const amdgpu::Wavefront *wf, uint32_t physical_reg, uint32_t lane,
+                         uint8_t byte_mask) override {
+    HookEvent e{HookEvent::WRITE_VGPR};
+    if (wf) {
+      e.dispatch_id = wf->dispatch_id();
+      e.wg_id = wf->wg_id();
+      e.wf_id = wf->wf_id();
+    }
+    e.physical_reg = physical_reg;
+    e.lane = lane;
+    e.byte_mask = byte_mask;
+    events.push_back(e);
+  }
+
   void onAmdgpuReadSgpr(const amdgpu::Wavefront *wf, uint32_t) override {
     HookEvent e{HookEvent::READ_SGPR};
     if (wf) {
@@ -211,6 +230,7 @@ const char *kindName(HookEvent::Kind k) {
       "AFTER_INSTRUCTION",
       "ROUTE_MEMORY",
       "READ_VGPR",
+      "WRITE_VGPR",
       "READ_SGPR",
       "BARRIER_RESOLVED",
       "INIT",
@@ -417,13 +437,16 @@ struct PluginFixture {
   amdgpu::ComputeUnitCore *cu() { return soc->xcd(0)->shader_engine(0)->compute_unit(0); }
   amdgpu::CommandProcessor *cp() { return soc->xcd(0)->command_processor(); }
 
-  uint64_t write_kernel(uint64_t addr, const uint32_t *code, size_t num_words) {
+  uint64_t write_kernel(uint64_t addr, const uint32_t *code, size_t num_words,
+                        uint32_t enable_vgpr_workitem_id = 0) {
     using namespace rocr::llvm::amdhsa;
     kernel_descriptor_t kd{};
     kd.kernel_code_entry_byte_offset = sizeof(kernel_descriptor_t);
     AMDHSA_BITS_SET(kd.compute_pgm_rsrc1, COMPUTE_PGM_RSRC1_GRANULATED_WORKITEM_VGPR_COUNT, 31);
     AMDHSA_BITS_SET(kd.compute_pgm_rsrc1, COMPUTE_PGM_RSRC1_GRANULATED_WAVEFRONT_SGPR_COUNT, 12);
     AMDHSA_BITS_SET(kd.compute_pgm_rsrc2, COMPUTE_PGM_RSRC2_USER_SGPR_COUNT, 2);
+    AMDHSA_BITS_SET(kd.compute_pgm_rsrc2, COMPUTE_PGM_RSRC2_ENABLE_VGPR_WORKITEM_ID,
+                    enable_vgpr_workitem_id);
     mem->load_image(reinterpret_cast<const uint8_t *>(&kd), sizeof(kd), addr);
     mem->load_image(reinterpret_cast<const uint8_t *>(code), num_words * 4,
                     addr + sizeof(kernel_descriptor_t));
@@ -454,8 +477,8 @@ struct PluginFixture {
   }
 
   void run_kernel(const uint32_t *code, size_t num_words, uint32_t grid = 64,
-                  uint32_t workgroup = 64) {
-    uint64_t ko = write_kernel(0x1000, code, num_words);
+                  uint32_t workgroup = 64, uint32_t enable_vgpr_workitem_id = 0) {
+    uint64_t ko = write_kernel(0x1000, code, num_words, enable_vgpr_workitem_id);
     test::AqlQueue queue(mem, cp());
     queue.dispatch(ko, grid, workgroup);
     run_until_idle();
@@ -466,6 +489,19 @@ TEST(ExecutionPluginTest, NoPluginNoCrash) {
   PluginFixture f;
   const uint32_t code[] = {S_NOP, S_ENDPGM};
   f.run_kernel(code, 2);
+}
+
+TEST(ExecutionPluginTest, ProfiledGroupReportsVgprWriteHook) {
+  ProfiledExecutionPluginGroup group;
+  StringSink sink;
+  group.add_sink(&sink);
+
+  group.onInit();
+  group.onAmdgpuWriteVgpr(nullptr, /*physical_reg=*/7, /*lane=*/3, /*byte_mask=*/0xC);
+  group.onShutdown();
+
+  EXPECT_NE(sink.str().find("writeVgpr"), std::string::npos) << sink.str();
+  EXPECT_NE(sink.str().find("calls=1"), std::string::npos) << sink.str();
 }
 
 // -- Ordering tests ----------------------------------------------------------
@@ -507,6 +543,21 @@ TEST(HookOrderingTest, WorkgroupDispatchedReportsPhysicalVgprBlockSize) {
   EXPECT_EQ(it->physical_vgpr_count, f.cu()->vgpr_allocation_block_size());
   EXPECT_GT(it->physical_vgpr_count, f.cu()->config().vgprs_per_wf);
   EXPECT_EQ(it->sgpr_count, f.cu()->config().sgprs_per_wf);
+}
+
+TEST(HookOrderingTest, WorkitemIdSetupVgprWritesAreSilent) {
+  PluginFixture f;
+  auto *p = f.attach_ordering_plugin();
+  const uint32_t code[] = {S_ENDPGM};
+  f.run_kernel(code, 1, /*grid=*/64, /*workgroup=*/64,
+               /*enable_vgpr_workitem_id=*/2);
+  f.shutdown();
+
+  EventLog log(p->events);
+  EXPECT_EQ(log.count(HookEvent::WAVEFRONT_DISPATCHED), 1u);
+  EXPECT_EQ(log.count(HookEvent::WRITE_VGPR), 0u)
+      << "work-item ID setup writes must use the raw VGPR path and stay invisible to "
+         "instruction write hooks";
 }
 
 TEST(HookOrderingTest, FiveDispatchLifecycle) {
