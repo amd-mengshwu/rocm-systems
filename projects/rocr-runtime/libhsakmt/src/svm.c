@@ -56,9 +56,13 @@ hsaKmtSVMSetAttrCtx(HsaKFDContext *ctx,
 	if (size & (PAGE_SIZE - 1))
 		return HSAKMT_STATUS_INVALID_PARAMETER;
 
-	/* Check for integer overflow in multiplication and ioctl size-field limit */
+	/* Check for integer overflow and ioctl size-field limit */
+#if SIZE_MAX == UINT32_MAX
+	/* 32-bit: check for size_t overflow (~536M attrs) */
 	if (nattr > (SIZE_MAX - sizeof(*args)) / sizeof(*attrs))
 		return HSAKMT_STATUS_INVALID_PARAMETER;
+#endif
+	/* ioctl size limit: ~2044 attrs on all platforms */
 	if (sizeof(*args) + nattr * sizeof(*attrs) > ((1UL << _IOC_SIZEBITS) - 1))
 		return HSAKMT_STATUS_INVALID_PARAMETER;
 
@@ -138,9 +142,13 @@ hsaKmtSVMGetAttrCtx(HsaKFDContext *ctx,
 	if (size & (PAGE_SIZE - 1))
 		return HSAKMT_STATUS_INVALID_PARAMETER;
 
-	/* Check for integer overflow in multiplication and ioctl size-field limit */
+	/* Check for integer overflow and ioctl size-field limit */
+#if SIZE_MAX == UINT32_MAX
+	/* 32-bit: check for size_t overflow (~536M attrs) */
 	if (nattr > (SIZE_MAX - sizeof(*args)) / sizeof(*attrs))
 		return HSAKMT_STATUS_INVALID_PARAMETER;
+#endif
+	/* ioctl size limit: ~2044 attrs on all platforms */
 	if (sizeof(*args) + nattr * sizeof(*attrs) > ((1UL << _IOC_SIZEBITS) - 1))
 		return HSAKMT_STATUS_INVALID_PARAMETER;
 

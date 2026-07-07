@@ -286,10 +286,7 @@ static HSAKMT_STATUS get_mem_info_svm_api(HsaKFDContext *ctx, uint64_t address, 
 
 	s_attr = sizeof(attrs);
 
-	/* Check for integer overflow before malloc */
-	if (s_attr > SIZE_MAX - sizeof(*args))
-		return HSAKMT_STATUS_INVALID_PARAMETER;
-
+	/* s_attr is a compile-time constant (32 bytes); no overflow possible */
 	args = malloc(sizeof(*args) + s_attr);
 	if (!args)
 		return HSAKMT_STATUS_NO_MEMORY;

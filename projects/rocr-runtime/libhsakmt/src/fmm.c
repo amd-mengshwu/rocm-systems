@@ -1127,10 +1127,7 @@ static HSAKMT_STATUS fmm_register_mem_svm_api(HsaKFDContext *ctx,
 	if (!fmm_ctx->first_gpu_mem)
 		return HSAKMT_STATUS_ERROR;
 
-	/* Check for integer overflow: sizeof(*args) + 2 * sizeof(struct kfd_ioctl_svm_attribute) */
-	if (2 * sizeof(struct kfd_ioctl_svm_attribute) > SIZE_MAX - sizeof(*args))
-		return HSAKMT_STATUS_INVALID_PARAMETER;
-
+	/* s_attr is a compile-time constant (16 bytes); no overflow possible */
 	s_attr = 2 * sizeof(struct kfd_ioctl_svm_attribute);
 	args = malloc(sizeof(*args) + s_attr);
 	if (!args)
@@ -1179,9 +1176,13 @@ static HSAKMT_STATUS fmm_map_mem_svm_api(HsaKFDContext *ctx,
 
 	nattr = nodes_array_size;
 
-	/* Check for integer overflow in multiplication and ioctl size-field limit */
+	/* Check for integer overflow and ioctl size-field limit */
+#if SIZE_MAX == UINT32_MAX
+	/* 32-bit: check for size_t overflow (~536M attrs) */
 	if (nattr > (SIZE_MAX - sizeof(*args)) / sizeof(struct kfd_ioctl_svm_attribute))
 		return HSAKMT_STATUS_INVALID_PARAMETER;
+#endif
+	/* ioctl size limit: ~2044 attrs on all platforms */
 	if (sizeof(*args) + nattr * sizeof(struct kfd_ioctl_svm_attribute) > ((1UL << _IOC_SIZEBITS) - 1))
 		return HSAKMT_STATUS_INVALID_PARAMETER;
 
