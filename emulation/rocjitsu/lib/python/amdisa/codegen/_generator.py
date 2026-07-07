@@ -3271,6 +3271,8 @@ class CodeGenerator:
                 cls,
                 op,
                 opsel=opsel,
+                dtype=dtype,
+                is_vop3=is_vop3,
                 fp8_format_select=fp8_format_select,
                 arch_name=self.isa_spec.arch_name,
             )
