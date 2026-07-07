@@ -306,7 +306,7 @@ rocprofiler_query_callback_tracing_kind_operation_name(rocprofiler_callback_trac
         }
         case ROCPROFILER_CALLBACK_TRACING_ROCSHMEM_API:
         {
-            val = rocprofiler::rocshmem::name_by_id<ROCPROFILER_ROCSHMEM_TABLE_ID>(operation);
+            val = rocprofiler::rocshmem::name_by_id<ROCPROFILER_ROCSHMEM_TABLE_ID_CORE>(operation);
             break;
         }
     };
@@ -460,7 +460,7 @@ rocprofiler_iterate_callback_tracing_kind_operations(
         }
         case ROCPROFILER_CALLBACK_TRACING_ROCSHMEM_API:
         {
-            ops = rocprofiler::rocshmem::get_ids<ROCPROFILER_ROCSHMEM_TABLE_ID>();
+            ops = rocprofiler::rocshmem::get_ids<ROCPROFILER_ROCSHMEM_TABLE_ID_CORE>();
             break;
         }
     };
@@ -612,7 +612,7 @@ rocprofiler_iterate_callback_tracing_kind_operation_args(
         }
         case ROCPROFILER_CALLBACK_TRACING_ROCSHMEM_API:
         {
-            rocprofiler::rocshmem::iterate_args<ROCPROFILER_ROCSHMEM_TABLE_ID>(
+            rocprofiler::rocshmem::iterate_args<ROCPROFILER_ROCSHMEM_TABLE_ID_CORE>(
                 record.operation,
                 static_cast<rocprofiler_callback_tracing_rocshmem_api_data_t*>(record.payload)
                     ->args,
