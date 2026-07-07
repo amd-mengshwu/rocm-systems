@@ -227,9 +227,9 @@ struct ncclTaskColl {
 #else
   int32_t nMaxChannels:8;
 #endif
-#ifdef ENABLE_ROCSHMEM
+
   size_t* sizes;
-#endif
+
   int32_t nWarps:8;
   int32_t algorithm:8, protocol:8, pipeline:8;
   uint32_t isCollnet:1, isNvls:1, isSymLast:1;
@@ -924,6 +924,10 @@ struct ncclComm {
   int symId;
   size_t bufThreshold;
 #endif
+
+  //Added for AlltoAllv
+  void *localSizes;
+  void* gatheredSizes;
 
   // Direct Reduce Scatter [RCCL]
   bool enableDirectReduceScatter;

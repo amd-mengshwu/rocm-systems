@@ -1886,6 +1886,7 @@ ncclResult_t ncclLaunchPrepare(struct ncclComm* comm) {
         plan->ceCollArgs->sendWin = task->sendWin;
         plan->ceCollArgs->recvWin = task->recvWin;
         plan->ceCollArgs->collApiEventHandle = task->collApiEventHandle;
+	plan->ceCollArgs->sizes = (task->func == ncclFuncAlltoAllv) ? task->sizes : nullptr;
 
         if (comm->rank == 0) {
           const char* nvlsSync = comm->nvlsSupport ? "; CE synchronization with NVLS" : "";
@@ -3291,7 +3292,13 @@ static ncclResult_t ceCollTaskAppend(
   t->collApiEventHandle = ncclProfilerApiState.collApiEventHandle;
   t->sendWin = sendWin;
   t->recvWin = recvWin;
-
+  t->sizes = nullptr;
+  if (t->func == ncclFuncAlltoAllv && info->sizes != nullptr) {
+    size_t nSizes = 4 * comm->nRanks * comm->nRanks;
+    t->sizes = ncclMemoryStackAlloc<size_t>(&comm->memScoped, nSizes);
+    memcpy(t->sizes, info->sizes, nSizes * sizeof(size_t));
+    for (int r = 0; r < comm->nRanks; r++) t->trafficBytes += t->sizes[comm->rank*4*comm->nRanks + r];
+  }
   ncclIntruQueueEnqueue(&planner->collCeTaskQueue, t);
 
   ncclProfilerStopCollApiEvent();
@@ -3542,10 +3549,10 @@ static ncclResult_t taskAppend(struct ncclComm* comm, struct ncclInfo* info) {
     NCCLCHECK(rmaTaskAppend(comm, info));
   } else {
     // Empty collectives can be discarded.
-    if (info->count == 0) return ncclSuccess;
+    if (info->count == 0 && info->coll != ncclFuncAlltoAllv) return ncclSuccess;
 
     if (info->datatype == ncclFloat8e4m3 || info->datatype == ncclFloat8e5m2) {
-      if (comm->minCompCap < 90 && info->coll != ncclFuncAllGather && info->coll != ncclFuncBroadcast && info->coll != ncclFuncAlltoAll && info->coll != ncclFuncScatter && info->coll != ncclFuncGather) {
+      if (comm->minCompCap < 90 && info->coll != ncclFuncAllGather && info->coll != ncclFuncBroadcast && info->coll != ncclFuncAlltoAll && info->coll != ncclFuncAlltoAllv && info->coll != ncclFuncScatter && info->coll != ncclFuncGather) {
         WARN("FP8 reduction support begins with sm90 capable devices.");
         return ncclInvalidArgument;
       }
@@ -3556,7 +3563,7 @@ static ncclResult_t taskAppend(struct ncclComm* comm, struct ncclInfo* info) {
     struct ncclDevRedOpFull opDev;
     NCCLCHECK(hostToDevRedOp(&opDev, info->op, info->datatype, comm));
 
-    if (comm->nRanks == 1) {
+    if (comm->nRanks == 1 && info->coll != ncclFuncAlltoAllv) {
       NCCLCHECK(ncclLaunchOneRank(info->recvbuff, info->sendbuff, info->count, opDev, info->datatype, info->stream, info->acc));
       return ncclSuccess;
     } else {
