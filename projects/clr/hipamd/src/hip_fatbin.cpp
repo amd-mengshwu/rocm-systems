@@ -12,6 +12,12 @@
 #include <limits>
 #include <cstdint>
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #elif defined(__linux__)
 #include <fstream>
@@ -461,8 +467,26 @@ static bool PopulateCodeObjectMap(
 // that contains it (0 if it cannot be determined).
 static size_t AccessibleRegionSize(const void* ptr) {
 #if defined(_WIN32)
+  auto is_readable_protection = [](DWORD protect) {
+    if ((protect & PAGE_GUARD) != 0 || (protect & PAGE_NOACCESS) != 0) {
+      return false;
+    }
+    switch (protect & 0xFF) {
+      case PAGE_READONLY:
+      case PAGE_READWRITE:
+      case PAGE_WRITECOPY:
+      case PAGE_EXECUTE_READ:
+      case PAGE_EXECUTE_READWRITE:
+      case PAGE_EXECUTE_WRITECOPY:
+        return true;
+      default:
+        return false;
+    }
+  };
+
   MEMORY_BASIC_INFORMATION mbi = {};
-  if (::VirtualQuery(ptr, &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.State != MEM_COMMIT) {
+  if (::VirtualQuery(ptr, &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.State != MEM_COMMIT ||
+      !is_readable_protection(mbi.Protect)) {
     return 0;
   }
   const uintptr_t base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
@@ -480,9 +504,10 @@ static size_t AccessibleRegionSize(const void* ptr) {
     std::stringstream tokens(line);
     uintptr_t low = 0, high = 0;
     char dash = 0;
-    tokens >> std::hex >> low >> dash >> high;
+    std::string perms;
+    tokens >> std::hex >> low >> dash >> high >> perms;
     if (dash == '-' && addr >= low && addr < high) {
-      return static_cast<size_t>(high - addr);
+      return (!perms.empty() && perms[0] == 'r') ? static_cast<size_t>(high - addr) : 0;
     }
   }
   return 0;
@@ -529,6 +554,10 @@ hipError_t FatBinaryInfo::ExtractFatBinaryUsingCOMGR(const std::vector<hip::Devi
     if (size_t region = AccessibleRegionSize(image_);
         region != 0 && (image_size_ == 0 || region < image_size_)) {
       image_size_ = region;
+    }
+    if (image_size_ == 0) {
+      LogError("Cannot determine a bounded readable image range for fat binary input");
+      return hipErrorInvalidImage;
     }
   } else {
     size_t fsize = 0;
