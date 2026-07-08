@@ -755,7 +755,7 @@ TestColl() {
 
   if [[ $TEST != ro* ]]; then #AIROCSHMEM-432: wave tests not supported on RO
     ExecTest  "reduce_wave"      2       1            64        32768
-  else echo "Skip:   *_wave (AIROCSHMEM-408: wave tests not supported on RO)"; fi
+  else echo "Skip:   *_wave (AIROCSHMEM-432: wave tests not supported on RO)"; fi
 }
 
 TestOnStream() {
