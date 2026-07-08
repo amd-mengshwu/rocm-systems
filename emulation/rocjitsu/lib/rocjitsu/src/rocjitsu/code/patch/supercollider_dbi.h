@@ -177,6 +177,7 @@ struct SuperColliderDbiPatchInfo {
   uint64_t anchor_offset = 0;
   uint64_t trampoline_offset = 0;
   uint32_t original_size = 0;
+  uint32_t trampoline_size = 0;
   std::optional<uint16_t> scratch_vgpr;
 };
 

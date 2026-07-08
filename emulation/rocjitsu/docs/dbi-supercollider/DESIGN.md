@@ -187,10 +187,15 @@ must have enough trailing `s_nop 0` padding to hold the check sequence. For
 compact native LDS sites without padding, the patcher can instead redirect
 selected 8-byte sites through reachable uncovered local NOP caves.
 
-`RJ_DBI_SC_MAX_PATCHES=N` bounds how many native-DS or flat/VFLAT check/trap
-sites can be patched in one code object. Selection is greedy and conservative:
-candidates are considered in file order, and selected inline ranges, anchor
-rewrites, and local NOP caves may not overlap.
+`RJ_DBI_SC_MAX_PATCHES=N` bounds the total number of native-DS and flat/VFLAT
+check/trap sites that can be patched in one code object. Selection is greedy and
+conservative: native DS is considered first, candidates are considered in file
+order within each pass, and selected inline ranges, anchor rewrites, and local
+NOP caves may not overlap. Flat/VFLAT patching starts from the already-modified
+byte vector when a prior DS pass succeeded, as long as the prior patch ranges
+still map into the original code object. If an earlier DS patch grew `.text`,
+flat composition skips that code object rather than patching with stale file
+offset assumptions.
 
 For a load:
 
@@ -486,7 +491,7 @@ patch kind is `local-cave-flat-store-check-trap`.
 
 ## Open Design Questions
 
-- Should `MaybeGroup` stay in the default flat/VFLAT fallback, or should we add
+- Should `MaybeGroup` stay in the default flat/VFLAT selection, or should we add
   a stricter sub-mode that only treats known `Group` provenance as LDS?
 - What is the right sampled seed source for a SuperCollider-like `s_sleep_var`
   delay window?

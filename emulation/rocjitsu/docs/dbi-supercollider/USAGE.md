@@ -101,13 +101,13 @@ The MVP uses this HSA tools loader path. A separate waitcheck-style
   rather than quietly skipping them.
 
 The default check/trap scope is combined but conservative. For a given code
-object, rocJITsu tries native DS first and falls back to flat/VFLAT only if the
-native DS pass did not already modify that object. Same-code-object composition
-of native DS and flat/VFLAT rewriting is still future work because it needs a
-shared patch-range reservation plan and patching from already-modified bytes.
-Barrier fault injection is composable because it runs after the selected
-check/trap path. The bring-up-only probes below are explicit debug overrides of
-the default check/trap path.
+object, rocJITsu tries native DS first, then lets flat/VFLAT consume any
+remaining `RJ_DBI_SC_MAX_PATCHES` budget when the existing DS patch ranges can
+be mapped in the original code object and the flat ranges do not overlap them.
+If the DS pass used appended `.text` growth, flat composition skips that object
+instead of guessing at shifted ELF offsets. Barrier fault injection is
+composable because it runs after the selected check/trap path. The bring-up-only
+probes below are explicit debug overrides of the default check/trap path.
 
 Additional bring-up-only probes also exist:
 
@@ -150,9 +150,9 @@ Interpretation:
 - `function_flat_maybe_group_hints>0`: helper-function flat sites are likely
   LDS/shared accesses. The destructive flat proof can patch these with
   `RJ_DBI_SC_PROBE_FLAT_TRAP=1`. Padded likely group flat loads and stores are
-  checked by the default fallback when native DS did not patch the code object;
-  ordinary unpadded hip-moi helper sites can be checked through conservative
-  local NOP caves when they are reachable.
+  checked by the default combined scope when patch budget remains after native
+  DS selection; ordinary unpadded hip-moi helper sites can be checked through
+  conservative local NOP caves when they are reachable.
 - `local-cave-flat-load-check-trap` / `local-cave-flat-store-check-trap` patch
   logs mean an unpadded flat helper site was redirected through uncovered local
   NOP slack and returned to the original fallthrough. The focused hip-moi
@@ -163,7 +163,7 @@ Interpretation:
 - Proof-mode warnings such as `skipped ROCclr runtime helper code object` and
   `skipped code object without supported DBI candidate sites` mean the proof
   mode intentionally avoided an expensive or unsafe trampoline search.
-- For flat/VFLAT fallback, an unpadded skip warning includes
+- For flat/VFLAT selection, an unpadded skip warning includes
   `supported_candidates=...`, `scratchable_candidates=...`,
   `max_observed_padding_words=...`, `append_cave_reachable_candidates=...`,
   `uncovered_nop_caves=...`, `max_uncovered_nop_cave_words=...`, and

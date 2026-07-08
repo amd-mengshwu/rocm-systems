@@ -820,6 +820,55 @@ TEST(SuperColliderDbi, CombinedCheckTrapFallsBackToFlatWhenNoNativeLdsPatchAppli
   EXPECT_EQ(*result.patches.front().scratch_vgpr, 5u);
 }
 
+TEST(SuperColliderDbi, CombinedCheckTrapCanPatchNativeLdsAndFlatInSameCodeObject) {
+  const std::array<uint32_t, 13> kernel_words = {
+      0xD8340000u,
+      0x00000102u, // ds_store_b32 v2, v1
+      0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u,
+      0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u,
+      0xBFB00000u, // s_endpgm
+  };
+  const std::array<uint32_t, 17> function_words = {
+      0xBE8001EBu,                           // s_mov_b64 s[0:1], src_shared_base
+      0xD5810000u, 0x00000000u,              // v_mov_b32_e64 v0, s0
+      0xD5810001u, 0x00000001u,              // v_mov_b32_e64 v1, s1
+      0xEC05007Cu, 0x00000002u, 0x00000000u, // flat_load_b32 v2, v[0:1]
+      0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u,
+      0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u,
+      0xBFB00000u, // s_endpgm
+  };
+  const std::vector<uint8_t> bytes =
+      make_rdna4_code_object_with_local_function(kernel_words, function_words);
+  SuperColliderDbiOptions options;
+  options.enabled = true;
+  options.probe_lds_check_trap = true;
+  options.probe_flat_check_trap = true;
+  options.delay_nops = 1;
+  options.scratch_vgpr = 3;
+  options.max_patches = 2;
+
+  const auto result = try_patch_supercollider_dbi(bytes, options);
+
+  ASSERT_TRUE(result.errors.empty()) << (result.errors.empty() ? "" : result.errors.front());
+  ASSERT_TRUE(result.warnings.empty()) << (result.warnings.empty() ? "" : result.warnings.front());
+  EXPECT_TRUE(result.modified);
+  ASSERT_EQ(result.patches.size(), 2u);
+  EXPECT_EQ(result.patches[0].kind, SuperColliderDbiPatchKind::InlineLdsStoreCheckTrap);
+  EXPECT_EQ(result.patches[0].anchor_offset, 0u);
+  EXPECT_EQ(result.patches[0].trampoline_offset, 8u);
+  EXPECT_EQ(result.patches[0].original_size, 44u);
+  EXPECT_EQ(result.patches[0].trampoline_size, 0u);
+  ASSERT_TRUE(result.patches[0].scratch_vgpr);
+  EXPECT_EQ(*result.patches[0].scratch_vgpr, 3u);
+  EXPECT_EQ(result.patches[1].kind, SuperColliderDbiPatchKind::InlineFlatLoadCheckTrap);
+  EXPECT_EQ(result.patches[1].anchor_offset, 72u);
+  EXPECT_EQ(result.patches[1].trampoline_offset, 84u);
+  EXPECT_EQ(result.patches[1].original_size, 44u);
+  EXPECT_EQ(result.patches[1].trampoline_size, 0u);
+  ASSERT_TRUE(result.patches[1].scratch_vgpr);
+  EXPECT_EQ(*result.patches[1].scratch_vgpr, 3u);
+}
+
 TEST(SuperColliderDbi, FlatCheckTrapProofCanPatchMultiplePaddedLoads) {
   const std::array<uint32_t, 1> kernel_words = {
       0xBFB00000u, // s_endpgm

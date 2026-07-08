@@ -2043,6 +2043,19 @@ struct ByteRange {
   uint64_t end = 0;
 };
 
+[[nodiscard]] std::optional<uint64_t>
+text_offset_to_file_offset(const AmdGpuCodeObject &code_object, uint64_t text_offset,
+                           uint64_t byte_count) {
+  for (const Section *section : code_object.text_sections()) {
+    if (text_offset > section->size())
+      continue;
+    if (byte_count > section->size() - text_offset)
+      continue;
+    return section->sectionOffset() + text_offset;
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] bool ranges_overlap(ByteRange lhs, ByteRange rhs) {
   return lhs.begin < rhs.end && rhs.begin < lhs.end;
 }
@@ -2060,6 +2073,32 @@ struct ByteRange {
     return false;
   ranges.push_back(range);
   return true;
+}
+
+[[nodiscard]] std::optional<std::vector<ByteRange>>
+reserved_ranges_for_existing_patches(const AmdGpuCodeObject &code_object,
+                                     const SuperColliderDbiResult &result) {
+  std::vector<ByteRange> ranges;
+  for (const SuperColliderDbiPatchInfo &patch : result.patches) {
+    const auto anchor_file_offset =
+        text_offset_to_file_offset(code_object, patch.anchor_offset, patch.original_size);
+    if (!anchor_file_offset)
+      return std::nullopt;
+    if (!reserve_byte_range(ranges,
+                            {*anchor_file_offset, *anchor_file_offset + patch.original_size}))
+      return std::nullopt;
+
+    if (patch.trampoline_size == 0)
+      continue;
+    const auto trampoline_file_offset =
+        text_offset_to_file_offset(code_object, patch.trampoline_offset, patch.trampoline_size);
+    if (!trampoline_file_offset)
+      return std::nullopt;
+    if (!reserve_byte_range(
+            ranges, {*trampoline_file_offset, *trampoline_file_offset + patch.trampoline_size}))
+      return std::nullopt;
+  }
+  return ranges;
 }
 
 [[nodiscard]] SuperColliderDbiPatchKind
@@ -2572,6 +2611,8 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
 
       planned.info.trampoline_offset = trampoline_text_offset;
       planned.info.original_size = site.size;
+      planned.info.trampoline_size =
+          static_cast<uint32_t>(planned.cave_words.size() * sizeof(uint32_t));
     } else {
       const uint64_t patch_bytes = static_cast<uint64_t>(planned.words.size() * sizeof(uint32_t));
       if (site.file_offset > original_bytes.size() ||
@@ -2581,6 +2622,7 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
       }
       planned.info.trampoline_offset = site.text_offset + site.size;
       planned.info.original_size = static_cast<uint32_t>(patch_bytes);
+      planned.info.trampoline_size = 0;
     }
 
     planned_patches.push_back(std::move(planned));
@@ -2645,7 +2687,8 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
 
 void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_code_arch_t arch,
                                      const SuperColliderDbiOptions &options,
-                                     SuperColliderDbiResult &result) {
+                                     SuperColliderDbiResult &result,
+                                     std::span<const ByteRange> initial_reserved_ranges = {}) {
   if (arch != ROCJITSU_CODE_ARCH_RDNA4) {
     result.warnings.emplace_back(
         "DBI SuperCollider flat check/trap proof currently supports only RDNA4");
@@ -2768,7 +2811,8 @@ void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_cod
   const uint32_t max_patches = std::max<uint32_t>(options.max_patches, 1u);
   std::vector<FlatCheckTrapCandidate> selected_candidates;
   selected_candidates.reserve(max_patches);
-  std::vector<ByteRange> reserved_ranges;
+  std::vector<ByteRange> reserved_ranges(initial_reserved_ranges.begin(),
+                                         initial_reserved_ranges.end());
   auto try_select_candidate = [&](const FlatCheckTrapCandidate &candidate) {
     if (selected_candidates.size() >= max_patches)
       return;
@@ -2963,59 +3007,62 @@ void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_cod
                               build_s_nop(0, arch)};
       planned.info.trampoline_offset = candidate.local_cave->text_offset;
       planned.info.original_size = site.size;
+      planned.info.trampoline_size =
+          static_cast<uint32_t>(planned.cave_words.size() * sizeof(uint32_t));
     } else {
       planned.info.trampoline_offset = site.text_offset + site.size;
       planned.info.original_size = static_cast<uint32_t>(planned.words.size() * sizeof(uint32_t));
+      planned.info.trampoline_size = 0;
     }
 
     planned_patches.push_back(std::move(planned));
   }
 
-  result.elf_bytes.assign(original_bytes.begin(), original_bytes.end());
+  std::vector<uint8_t> patched_bytes;
+  if (result.elf_bytes.empty())
+    patched_bytes.assign(original_bytes.begin(), original_bytes.end());
+  else
+    patched_bytes = result.elf_bytes;
+
+  std::vector<SuperColliderDbiPatchInfo> new_patch_infos;
+  new_patch_infos.reserve(planned_patches.size());
   for (const PlannedFlatCheckTrapPatch &planned : planned_patches) {
     const SuperColliderDbiFlatSite &site = *planned.site;
     if (planned.use_local_cave) {
       if (planned.local_cave == nullptr) {
         result.errors.emplace_back(
             "DBI SuperCollider flat check/trap proof selected missing local cave");
-        result.elf_bytes.clear();
-        result.patches.clear();
-        result.modified = false;
         return;
       }
       const uint64_t anchor_bytes = planned.anchor_words.size() * sizeof(uint32_t);
       const uint64_t cave_bytes = planned.cave_words.size() * sizeof(uint32_t);
-      if (site.file_offset > result.elf_bytes.size() ||
-          anchor_bytes > result.elf_bytes.size() - site.file_offset ||
-          planned.local_cave->file_offset > result.elf_bytes.size() ||
-          cave_bytes > result.elf_bytes.size() - planned.local_cave->file_offset) {
+      if (site.file_offset > patched_bytes.size() ||
+          anchor_bytes > patched_bytes.size() - site.file_offset ||
+          planned.local_cave->file_offset > patched_bytes.size() ||
+          cave_bytes > patched_bytes.size() - planned.local_cave->file_offset) {
         result.errors.emplace_back("DBI SuperCollider flat check/trap proof exceeds ELF bytes");
-        result.elf_bytes.clear();
-        result.patches.clear();
-        result.modified = false;
         return;
       }
 
-      std::memcpy(result.elf_bytes.data() + site.file_offset, planned.anchor_words.data(),
+      std::memcpy(patched_bytes.data() + site.file_offset, planned.anchor_words.data(),
                   static_cast<size_t>(anchor_bytes));
-      std::memcpy(result.elf_bytes.data() + planned.local_cave->file_offset,
-                  planned.cave_words.data(), static_cast<size_t>(cave_bytes));
+      std::memcpy(patched_bytes.data() + planned.local_cave->file_offset, planned.cave_words.data(),
+                  static_cast<size_t>(cave_bytes));
     } else {
       const uint64_t patch_bytes = static_cast<uint64_t>(planned.words.size() * sizeof(uint32_t));
-      if (site.file_offset > result.elf_bytes.size() ||
-          patch_bytes > result.elf_bytes.size() - site.file_offset) {
+      if (site.file_offset > patched_bytes.size() ||
+          patch_bytes > patched_bytes.size() - site.file_offset) {
         result.errors.emplace_back("DBI SuperCollider flat check/trap proof exceeds ELF bytes");
-        result.elf_bytes.clear();
-        result.patches.clear();
-        result.modified = false;
         return;
       }
-      std::memcpy(result.elf_bytes.data() + site.file_offset, planned.words.data(),
+      std::memcpy(patched_bytes.data() + site.file_offset, planned.words.data(),
                   static_cast<size_t>(patch_bytes));
     }
 
-    result.patches.push_back(planned.info);
+    new_patch_infos.push_back(planned.info);
   }
+  result.elf_bytes = std::move(patched_bytes);
+  result.patches.insert(result.patches.end(), new_patch_infos.begin(), new_patch_infos.end());
   result.modified = true;
 }
 
@@ -3177,8 +3224,29 @@ SuperColliderDbiResult try_patch_supercollider_dbi(std::span<const uint8_t> code
   if (options.probe_lds_check_trap || options.probe_flat_check_trap) {
     if (options.probe_lds_check_trap)
       try_apply_lds_load_check_trap_patch(code_object, arch, options, result);
-    if (options.probe_flat_check_trap && !result.modified && result.errors.empty())
-      try_apply_flat_check_trap_patch(code_object, arch, options, result);
+    if (options.probe_flat_check_trap && result.errors.empty()) {
+      if (!result.modified) {
+        try_apply_flat_check_trap_patch(code_object, arch, options, result);
+      } else {
+        const uint32_t max_patches = std::max<uint32_t>(options.max_patches, 1u);
+        if (result.patches.size() >= max_patches) {
+          result.warnings.emplace_back(
+              "DBI SuperCollider flat check/trap proof skipped after native LDS patching: "
+              "patch budget already consumed");
+        } else if (auto reserved_ranges =
+                       reserved_ranges_for_existing_patches(code_object, result)) {
+          SuperColliderDbiOptions flat_options = options;
+          flat_options.max_patches =
+              static_cast<uint32_t>(max_patches - static_cast<uint32_t>(result.patches.size()));
+          try_apply_flat_check_trap_patch(code_object, arch, flat_options, result,
+                                          *reserved_ranges);
+        } else {
+          result.warnings.emplace_back(
+              "DBI SuperCollider flat check/trap proof skipped after native LDS patching: "
+              "existing patch ranges could not be mapped in the original code object");
+        }
+      }
+    }
   } else if (options.probe_flat_trap)
     try_apply_flat_trap_patch(code_object, arch, result);
   else if (options.probe_lds_endpgm)

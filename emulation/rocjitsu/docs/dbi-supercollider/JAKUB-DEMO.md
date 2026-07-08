@@ -141,11 +141,12 @@ shared memory. For targeted debugging, `RJ_DBI_SC_CHECK_TRAP_MODE=lds` restricts
 the scope to native DS and `RJ_DBI_SC_CHECK_TRAP_MODE=flat` restricts it to
 flat/VFLAT.
 
-This is not yet full same-code-object composition. If the native DS pass already
-modifies a code object, the flat/VFLAT fallback does not also patch that same
-object. Barrier fault injection is different: `RJ_DBI_SC_FAULT_DROP_BARRIER=1`
-runs after the check/trap pass and is intentionally composable with native LDS
-check/trap.
+Same-code-object composition is now supported for the common non-overlapping
+case: native DS is selected first, and flat/VFLAT can consume the remaining
+`RJ_DBI_SC_MAX_PATCHES` budget if the existing patch ranges still map into the
+original code object. If the native DS pass grows `.text`, flat/VFLAT skips that
+object rather than patching with stale offsets. Barrier fault injection is also
+composable: `RJ_DBI_SC_FAULT_DROP_BARRIER=1` runs after the check/trap pass.
 
 ## Compatibility Smoke: Full RDNA4 Matmul e2e
 

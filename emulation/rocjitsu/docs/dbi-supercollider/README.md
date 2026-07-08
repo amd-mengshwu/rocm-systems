@@ -67,11 +67,12 @@ The current check/trap proof paths cover:
 - likely group/LDS `flat_store_b{32,64,128}`.
 
 Native DS sites can use enough trailing `s_nop 0` padding for an in-place
-sequence, or reachable local NOP caves for compact sites, bounded by
-`RJ_DBI_SC_MAX_PATCHES`. Flat/VFLAT sites use the same bound for non-overlapping
-padded sites and reachable local NOP caves. Ordinary hip-moi matmul helper code
-has shown likely group/LDS flat sites rather than native `ds_*`, which is why the
-flat path matters.
+sequence, or reachable local NOP caves for compact sites. Flat/VFLAT sites use
+the same total `RJ_DBI_SC_MAX_PATCHES` budget for non-overlapping padded sites
+and reachable local NOP caves, and can now compose after native DS patches when
+patch ranges remain mappable in the original code object. Ordinary hip-moi
+matmul helper code has shown likely group/LDS flat sites rather than native
+`ds_*`, which is why the flat path matters.
 
 See [DESIGN.md](DESIGN.md) for the exact instruction policy and the current
 address-space provenance heuristic.
@@ -82,7 +83,7 @@ address-space provenance heuristic.
   `RJ_DBI_SC_DELAY_MODE=sleep_var` emits `s_sleep_var` from a scalar source
   operand. The remaining delay gap is randomized sampling policy, not the basic
   sleep instruction mechanism.
-- `RJ_DBI_SC_MAX_PATCHES=N` can patch multiple native-DS or flat/VFLAT
+- `RJ_DBI_SC_MAX_PATCHES=N` can patch multiple native-DS and flat/VFLAT
   check/trap sites in one code object, bounded by non-overlapping in-place
   ranges and reachable local NOP caves.
 - Default reporting is still `s_trap`, but `RJ_DBI_SC_REPORT_BUFFER=0x...`
