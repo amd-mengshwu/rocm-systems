@@ -98,7 +98,7 @@
     "a_cts_overflow": {
       "extends": "a_base",
       "timeout": 600,
-      "description": "A5: CTS-on overflow reproducer (expected timeout).",
+      "description": "A5: CTS-on overflow reproducer at depth 256 (expected HANG/timeout). This is the documented expected-failure boundary case: with CTS ON, CTS_QP_DEPTH=256 overruns the AINIC CTS match-table (~256 entries), so the test hangs and surfaces as the 600s timeout. This is the DOCUMENTED EXPECTED behavior, not a config bug. Paired with a_cts_depth128 (A6), which must PASS at depth 128, to demonstrably validate the overflow boundary.",
       "env_variables": {
         "RCCL_IB_P2P_DISABLE_CTS": "0",
         "CTS_NUM_CONNS": "16",
@@ -108,7 +108,26 @@
       "tests": [
         {
           "name": "A5_NetIB_CtsDepthStress_CtsOn",
-          "description": "Reproduces AINIC CTS match-table overflow (~256 entries); expected to time out.",
+          "description": "CTS ON at depth 256: reproduces AINIC CTS match-table overflow (~256 entries). Expected HANG -> runs until the 600s timeout. This is the documented expected-failure boundary case (above the overflow boundary), contrasted with A6 which passes at depth 128.",
+          "test_filter": "NetIbMPITest.CtsDepthStress"
+        }
+      ]
+    },
+
+    "a_cts_depth128": {
+      "extends": "a_base",
+      "timeout": 600,
+      "description": "A6: CTS-on at depth 128 (expected PASS). Mirrors a_cts_overflow's env exactly except CTS_QP_DEPTH=128, which is UNDER the AINIC CTS match-table overflow boundary, so this must PASS cleanly. Paired with a_cts_overflow (A5, depth 256 expected HANG) to demonstrably validate the overflow boundary from both sides (128 works, 256 overflows).",
+      "env_variables": {
+        "RCCL_IB_P2P_DISABLE_CTS": "0",
+        "CTS_NUM_CONNS": "16",
+        "CTS_QP_DEPTH": "128",
+        "CTS_SNAP_EVERY": "4"
+      },
+      "tests": [
+        {
+          "name": "A6_NetIB_CtsDepthStress_CtsOn_Depth128",
+          "description": "CTS ON at depth 128: under the CTS match-table overflow boundary, so this must PASS. Contrasts with A5 (depth 256 expected HANG) to validate the boundary.",
           "test_filter": "NetIbMPITest.CtsDepthStress"
         }
       ]
@@ -370,6 +389,21 @@
       ]
     },
 
+    "b9_cts_force_override": {
+      "extends": "b_base",
+      "timeout": 600,
+      "description": "B9: PR #4657 force-override precedence. RCCL_CTS_OFFLOAD_ENABLED=1 is the strongest override and MUST force CTS offload on ALL connections including P2P, overriding RCCL_IB_P2P_DISABLE_CTS=1. With CTS forced onto P2P connections, alltoall is expected to HANG/TIMEOUT (P2P CTS not yet supported at HW level), while collectives still pass. This exercises the `enabled && (userForced || !(isP2p && IbP2pDisableCts))` userForced branch that no other B suite covers.",
+      "env_variables": {
+        "NCCL_NET": "ROCM-IB",
+        "RCCL_CTS_OFFLOAD_ENABLED": "1",
+        "RCCL_IB_P2P_DISABLE_CTS": "1"
+      },
+      "tests": [
+        { "name": "B9_alltoall_ROCMIB_CTSforceOverride", "binary": "alltoall_perf", "command_args": "-b 1024 -e 16G -f 2 -g 1", "description": "PR #4657: RCCL_CTS_OFFLOAD_ENABLED=1 overrides IB_P2P_DISABLE_CTS=1, forcing CTS on P2P. Expected HANG/TIMEOUT on alltoall (P2P CTS overflow) - validates the force-override precedence." },
+        { "name": "B9_allreduce_ROCMIB_CTSforceOverride", "binary": "all_reduce_perf", "command_args": "-b 1024 -e 16G -f 2 -g 1", "description": "PR #4657 force-override on collective transport: allreduce expected PASS (CTS is supported on collective connections)." }
+      ]
+    },
+
     "b_large_alltoall_repro": {
       "extends": "b_base",
       "command_args": "-b 1K -e 16G -f 2 -g 1",
@@ -404,6 +438,7 @@
     { "name": "A. Component - NetIb core",          "config": "a_netib_component", "enabled": true },
     { "name": "A. Component - CTS workaround (off)", "config": "a_cts_workaround", "enabled": true },
     { "name": "A. Component - CTS overflow (on)",    "config": "a_cts_overflow",   "enabled": true },
+    { "name": "A. Component - CTS depth 128 (on, passes)", "config": "a_cts_depth128", "enabled": true },
     { "name": "A. Component - CAST WRR",             "config": "a_cast_wrr",        "enabled": true },
     { "name": "A. Component - Fault injection",      "config": "a_fault_inject",    "enabled": true },
     { "name": "A. Component - GIN proxy",            "config": "a_gin",             "enabled": true },
@@ -419,6 +454,7 @@
     { "name": "B7a. Pure PCI autodetect",            "config": "b7a_pure_autodetect","enabled": true },
     { "name": "B7b. Autodetect off (fallback)",      "config": "b7b_autodetect_off","enabled": true },
     { "name": "B8. ROCM-IB / no CTS offload",        "config": "b8_no_cts_offload", "enabled": true },
+    { "name": "B9. CTS force-override (PR#4657)",    "config": "b9_cts_force_override", "enabled": true },
     { "name": "B-large. alltoall >=256M repro",      "config": "b_large_alltoall_repro", "enabled": true },
 
     { "name": "C1. IONIC counter validation",        "config": "c_counters",        "enabled": true }
