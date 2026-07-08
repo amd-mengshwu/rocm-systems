@@ -101,6 +101,7 @@ Tester::Tester(TesterArguments args) : args(args) {
     case WAVEGetNBITestType:
     case WAVEPutTestType:
     case WAVEPutNBITestType:
+    case AllToAllWaveTestType:
       num_timers = args.num_wgs * num_warps;
       break;
     default:
@@ -318,6 +319,8 @@ std::vector<Tester*> Tester::create(TesterArguments args) {
     case AllToAllWaveTestType:
       test_name = "AllToAll Wave Test";
       testers.push_back(new AlltoallWaveTester<float>(args));
+      testers.push_back(new AlltoallWaveTester<char>(args));
+      testers.push_back(new AlltoallWaveTester<int>(args));
       break;
     case BarrierAllOnStreamTestType:
       test_name = "Barrier_All_On_Stream";
