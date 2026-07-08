@@ -74,6 +74,12 @@ jobs:
             enable_msan: 0
             c_compiler: gcc
             cxx_compiler: g++
+          - name: tsan
+            build_type: RelWithDebInfo
+            enable_asan: 0
+            enable_ubsan: 0
+            enable_tsan: 1
+            enable_msan: 0
 
     steps:
       - name: Install base dependencies
