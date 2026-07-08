@@ -491,7 +491,11 @@ static size_t AccessibleRegionSize(const void* ptr) {
   }
   const uintptr_t base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
   const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-  const uintptr_t region_end = base + static_cast<uintptr_t>(mbi.RegionSize);
+  const uintptr_t region_size = static_cast<uintptr_t>(mbi.RegionSize);
+  if (addr < base || std::numeric_limits<uintptr_t>::max() - base < region_size) {
+    return 0;
+  }
+  const uintptr_t region_end = base + region_size;
   return region_end > addr ? static_cast<size_t>(region_end - addr) : 0;
 #elif defined(__linux__)
   std::ifstream proc_maps("/proc/self/maps", std::ifstream::in);
