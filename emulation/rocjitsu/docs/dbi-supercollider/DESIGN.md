@@ -74,6 +74,12 @@ by the caller. rocJITsu does not allocate the buffer, does not add a kernel
 argument, and does not manage lifetime. When this variable is absent, the
 mismatch action remains the default `s_trap 0`.
 
+The report-buffer fields are refreshed at each intercepted code-object load,
+not only when ROCR first loads the HSA tool. This is deliberately practical for
+HIP/HSA test harnesses: the process may need to initialize HIP, allocate a
+device-visible report word, export its address, and only then launch the kernel
+whose code object should be patched.
+
 When the variable is present, each mismatch action writes the 32-bit marker to
 that address and then lets the kernel continue. The ABI is only a sticky
 "something mismatched" signal. It does not yet record kernel identity, program

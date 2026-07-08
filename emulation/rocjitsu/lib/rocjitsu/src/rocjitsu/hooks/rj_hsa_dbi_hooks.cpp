@@ -349,6 +349,8 @@ flat_address_space_hint_name(rocjitsu::SuperColliderDbiFlatAddressSpaceHint hint
          config.probe_lds_endpgm || config.probe_flat_trap;
 }
 
+[[nodiscard]] bool refresh_report_config_from_env(HookConfig *config);
+
 [[nodiscard]] std::optional<HookConfig> parse_config() {
   HookConfig config;
   if (!parse_log_level(&config.log_level))
@@ -391,20 +393,7 @@ flat_address_space_hint_name(rocjitsu::SuperColliderDbiFlatAddressSpaceHint hint
     std::fprintf(stderr, "[rocjitsu-dbi-hooks] invalid RJ_DBI_SC_MAX_PATCHES='0'; expected >=1\n");
     return std::nullopt;
   }
-  uint64_t report_buffer_address = 0;
-  if (const char *value = std::getenv("RJ_DBI_SC_REPORT_BUFFER");
-      value != nullptr && *value != '\0') {
-    if (!parse_u64_env("RJ_DBI_SC_REPORT_BUFFER", 0, &report_buffer_address))
-      return std::nullopt;
-    if (report_buffer_address == 0) {
-      std::fprintf(stderr,
-                   "[rocjitsu-dbi-hooks] invalid RJ_DBI_SC_REPORT_BUFFER='0'; expected nonzero "
-                   "device-visible address\n");
-      return std::nullopt;
-    }
-    config.report_buffer_address = report_buffer_address;
-  }
-  if (!parse_u32_env("RJ_DBI_SC_REPORT_MARKER", 1, &config.report_marker))
+  if (!refresh_report_config_from_env(&config))
     return std::nullopt;
   uint32_t delay_var_ssrc = 106;
   if (!parse_u32_env("RJ_DBI_SC_DELAY_VAR_SSRC", 106, &delay_var_ssrc))
@@ -430,6 +419,26 @@ flat_address_space_hint_name(rocjitsu::SuperColliderDbiFlatAddressSpaceHint hint
     config.scratch_vgpr = static_cast<uint16_t>(scratch_vgpr);
   }
   return config;
+}
+
+[[nodiscard]] bool refresh_report_config_from_env(HookConfig *config) {
+  uint64_t report_buffer_address = 0;
+  if (const char *value = std::getenv("RJ_DBI_SC_REPORT_BUFFER");
+      value != nullptr && *value != '\0') {
+    if (!parse_u64_env("RJ_DBI_SC_REPORT_BUFFER", 0, &report_buffer_address))
+      return false;
+    if (report_buffer_address == 0) {
+      std::fprintf(stderr,
+                   "[rocjitsu-dbi-hooks] invalid RJ_DBI_SC_REPORT_BUFFER='0'; expected nonzero "
+                   "device-visible address\n");
+      return false;
+    }
+    config->report_buffer_address = report_buffer_address;
+  } else {
+    config->report_buffer_address.reset();
+  }
+
+  return parse_u32_env("RJ_DBI_SC_REPORT_MARKER", 1, &config->report_marker);
 }
 
 [[nodiscard]] bool
@@ -872,6 +881,8 @@ hsa_status_t HSA_API rj_dbi_executable_load_agent_code_object(
     std::fprintf(stderr, "[rocjitsu-dbi-hooks] DBI hook layer is inactive during load\n");
     return HSA_STATUS_ERROR;
   }
+  if (!refresh_report_config_from_env(&*config))
+    return HSA_STATUS_ERROR;
 
   hsa_code_object_reader_t reader_to_load = code_object_reader;
   hsa_code_object_reader_t replacement_reader{};

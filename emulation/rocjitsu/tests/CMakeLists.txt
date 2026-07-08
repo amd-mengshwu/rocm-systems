@@ -1047,6 +1047,14 @@ if(RJ_ENABLE_HIP_TESTS)
             RJ_DBI_SUPERCOLLIDER_LDS_RACY_TEST
             "DbiSuperColliderLdsTest.PaddedRacyStoreCompletesOrTripsDbiTrap"
         )
+        set(
+            RJ_DBI_SUPERCOLLIDER_LDS_CLEAN_REPORT_TEST
+            "DbiSuperColliderLdsTest.PaddedCleanStoreReportBufferStaysZero"
+        )
+        set(
+            RJ_DBI_SUPERCOLLIDER_LDS_RACY_REPORT_TEST
+            "DbiSuperColliderLdsTest.PaddedRacyStoreReportsMarker"
+        )
         rj_add_test(
             NAME "DbiSuperColliderLdsTest.BaselinePaddedCleanStore"
             COMMAND
@@ -1093,6 +1101,36 @@ if(RJ_ENABLE_HIP_TESTS)
                 "RJ_DBI_SC_TMP_VGPR=3"
                 "RJ_DBI_SC_REQUIRE_PATCH=1"
                 "RJ_DBI_SC_EXPECT_TRAP=1"
+        )
+        rj_add_test(
+            NAME "DbiSuperColliderLdsTest.DbiPaddedCleanStoreReportBufferStaysZero"
+            COMMAND
+                ${CMAKE_CURRENT_BINARY_DIR}/hip_dbi_supercollider_lds_test
+                "--gtest_filter=${RJ_DBI_SUPERCOLLIDER_LDS_CLEAN_REPORT_TEST}"
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            TIMEOUT 30
+            ENVIRONMENT
+                "HSA_TOOLS_LIB=$<TARGET_FILE:rocjitsu_dbi_hooks>"
+                "RJ_DBI_SUPERCOLLIDER=1"
+                "RJ_DBI_LOG=1"
+                "RJ_DBI_SC_DELAY=2"
+                "RJ_DBI_SC_TMP_VGPR=3"
+                "RJ_DBI_SC_REQUIRE_PATCH=1"
+        )
+        rj_add_test(
+            NAME "DbiSuperColliderLdsTest.DbiPaddedRacyStoreReportsMarker"
+            COMMAND
+                ${CMAKE_CURRENT_BINARY_DIR}/hip_dbi_supercollider_lds_test
+                "--gtest_filter=${RJ_DBI_SUPERCOLLIDER_LDS_RACY_REPORT_TEST}"
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            TIMEOUT 30
+            ENVIRONMENT
+                "HSA_TOOLS_LIB=$<TARGET_FILE:rocjitsu_dbi_hooks>"
+                "RJ_DBI_SUPERCOLLIDER=1"
+                "RJ_DBI_LOG=1"
+                "RJ_DBI_SC_DELAY=2"
+                "RJ_DBI_SC_TMP_VGPR=3"
+                "RJ_DBI_SC_REQUIRE_PATCH=1"
         )
     endif()
 

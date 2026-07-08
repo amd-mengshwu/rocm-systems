@@ -85,7 +85,10 @@ The MVP uses this HSA tools loader path. A separate waitcheck-style
   mismatch, the injected check writes one 32-bit marker to this caller-supplied
   device-visible address and continues instead of executing `s_trap 0`. rocJITsu
   does not allocate this buffer or pass it as a kernel argument; a test harness
-  must provide an address that patched device code can legally store to.
+  must provide an address that patched device code can legally store to. The
+  hook refreshes this field at each code-object load, so a harness can allocate
+  the buffer, export the address, and then launch the kernel whose code object
+  will be patched.
 - `RJ_DBI_SC_REPORT_MARKER=N`: marker value written to
   `RJ_DBI_SC_REPORT_BUFFER`. The default is `1`. This is intentionally just a
   sticky "a mismatch happened" flag, not a per-site or per-lane report record.
@@ -220,6 +223,18 @@ ctest --test-dir /home/benoit/workspace/TheRock/rocm-systems/emulation/rocjitsu/
   --parallel 1 \
   --output-on-failure
 ```
+
+That regression includes two non-trapping marker-buffer cases:
+
+- `DbiSuperColliderLdsTest.DbiPaddedCleanStoreReportBufferStaysZero`
+- `DbiSuperColliderLdsTest.DbiPaddedRacyStoreReportsMarker`
+
+Both tests allocate a device report word in the HIP test process, set
+`RJ_DBI_SC_REPORT_BUFFER` to that device address before launching the padded
+LDS kernel, and run with `RJ_DBI_SC_REQUIRE_PATCH=1`. The clean case proves that
+the report word is not spuriously written. The racy case proves that the same
+instrumented site can report a mismatch by writing `RJ_DBI_SC_REPORT_MARKER`
+and allowing the dispatch to complete.
 
 Selected hip-moi smoke:
 

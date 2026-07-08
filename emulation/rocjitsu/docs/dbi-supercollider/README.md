@@ -50,6 +50,10 @@ configuration:
 The same focused WMMA control passes with `RJ_DBI_SC_DELAY_MODE=sleep` and with
 `RJ_DBI_SC_DELAY_MODE=sleep_var`.
 
+The rocJITsu GPU smoke tests also exercise the non-trapping marker-buffer path:
+a clean padded LDS store leaves the report word at zero, while the racy padded
+LDS store writes the configured marker and lets the dispatch complete.
+
 ## What Is Instrumented Today
 
 The current check/trap proof paths cover:
@@ -83,7 +87,8 @@ address-space provenance heuristic.
   ranges and reachable local NOP caves.
 - Default reporting is still `s_trap`, but `RJ_DBI_SC_REPORT_BUFFER=0x...`
   enables a simple marker-buffer prototype. On mismatch, the injected sequence
-  writes one 32-bit marker word and continues.
+  writes one 32-bit marker word and continues. The rocJITsu HIP smoke tests now
+  allocate such a report word and verify both clean and racy outcomes.
 - Current flat provenance is conservative and heuristic. `MaybeGroup` is useful
   for MVP bring-up, but it is not the same as a formal proof that an arbitrary
   flat access targets LDS.
