@@ -24,6 +24,15 @@
 
 find_package(PkgConfig)
 
+set(_libdw_ROOT_HINTS
+    ${libdw_ROOT}
+    ${rocm_version_DIR}
+    ${ROCM_PATH}
+    $ENV{ROCM_PATH}
+    ${rocm_version_DIR}/lib/rocm_sysdeps
+    ${ROCM_PATH}/lib/rocm_sysdeps
+    $ENV{ROCM_PATH}/lib/rocm_sysdeps)
+
 if(PkgConfig_FOUND)
     set(ENV{PKG_CONFIG_SYSTEM_INCLUDE_PATH} "")
     pkg_check_modules(DW libdw)
@@ -55,24 +64,24 @@ if(NOT libdw_INCLUDE_DIR OR NOT libdw_LIBRARY)
     find_path(
         libdw_ROOT_DIR
         NAMES include/elfutils/libdw.h
-        HINTS ${libdw_ROOT}
-        PATHS ${libdw_ROOT})
+        HINTS ${_libdw_ROOT_HINTS}
+        PATHS ${_libdw_ROOT_HINTS})
 
     mark_as_advanced(libdw_ROOT_DIR)
 
     find_path(
         libdw_INCLUDE_DIR
         NAMES elfutils/libdw.h
-        HINTS ${libdw_ROOT}
-        PATHS ${libdw_ROOT}
+        HINTS ${_libdw_ROOT_HINTS}
+        PATHS ${_libdw_ROOT_HINTS}
         PATH_SUFFIXES include)
 
     find_library(
         libdw_LIBRARY
         NAMES dw
-        HINTS ${libdw_ROOT}
-        PATHS ${libdw_ROOT}
-        PATH_SUFFIXES lib lib64)
+        HINTS ${_libdw_ROOT_HINTS}
+        PATHS ${_libdw_ROOT_HINTS}
+        PATH_SUFFIXES lib lib64 lib/${CMAKE_SYSTEM_PROCESSOR}-linux-gnu)
 endif()
 
 include(FindPackageHandleStandardArgs)
@@ -92,3 +101,4 @@ if(libdw_FOUND)
 endif()
 
 mark_as_advanced(libdw_INCLUDE_DIR libdw_LIBRARY)
+unset(_libdw_ROOT_HINTS)

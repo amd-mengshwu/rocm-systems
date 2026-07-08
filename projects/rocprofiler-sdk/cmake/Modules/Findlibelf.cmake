@@ -24,6 +24,15 @@
 
 find_package(PkgConfig)
 
+set(_libelf_ROOT_HINTS
+    ${libelf_ROOT}
+    ${rocm_version_DIR}
+    ${ROCM_PATH}
+    $ENV{ROCM_PATH}
+    ${rocm_version_DIR}/lib/rocm_sysdeps
+    ${ROCM_PATH}/lib/rocm_sysdeps
+    $ENV{ROCM_PATH}/lib/rocm_sysdeps)
+
 if(PkgConfig_FOUND)
     set(ENV{PKG_CONFIG_SYSTEM_INCLUDE_PATH} "")
     pkg_check_modules(ELF libelf)
@@ -44,24 +53,24 @@ if(NOT libelf_INCLUDE_DIR OR NOT libelf_LIBRARY)
     find_path(
         libelf_ROOT_DIR
         NAMES include/elf.h
-        HINTS ${libelf_ROOT}
-        PATHS ${libelf_ROOT})
+        HINTS ${_libelf_ROOT_HINTS}
+        PATHS ${_libelf_ROOT_HINTS})
 
     mark_as_advanced(libelf_ROOT_DIR)
 
     find_path(
         libelf_INCLUDE_DIR
         NAMES elf.h
-        HINTS ${libelf_ROOT}
-        PATHS ${libelf_ROOT}
+        HINTS ${_libelf_ROOT_HINTS}
+        PATHS ${_libelf_ROOT_HINTS}
         PATH_SUFFIXES include)
 
     find_library(
         libelf_LIBRARY
         NAMES elf
-        HINTS ${libelf_ROOT}
-        PATHS ${libelf_ROOT}
-        PATH_SUFFIXES lib lib64)
+        HINTS ${_libelf_ROOT_HINTS}
+        PATHS ${_libelf_ROOT_HINTS}
+        PATH_SUFFIXES lib lib64 lib/${CMAKE_SYSTEM_PROCESSOR}-linux-gnu)
 endif()
 
 include(FindPackageHandleStandardArgs)
@@ -81,3 +90,4 @@ if(libelf_FOUND)
 endif()
 
 mark_as_advanced(libelf_INCLUDE_DIR libelf_LIBRARY)
+unset(_libelf_ROOT_HINTS)
