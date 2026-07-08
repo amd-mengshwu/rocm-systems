@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -258,6 +259,24 @@ build_s_sleep_var(uint16_t ssrc0, rj_code_arch_t arch = ROCJITSU_CODE_ARCH_RDNA4
 [[nodiscard]] inline constexpr uint32_t build_v_mov_b32_e32(uint16_t vdst, uint16_t src0,
                                                             [[maybe_unused]] rj_code_arch_t arch) {
   return (0x3Fu << 25) | (static_cast<uint32_t>(vdst) << 17) | (1u << 9) | (src0 & 0x1FFu);
+}
+
+/// @brief Encode RDNA4 `v_mov_b32` in VOP3 form with a literal source.
+[[nodiscard]] inline constexpr std::optional<std::array<uint32_t, 3>>
+build_v_mov_b32_e64_literal(uint16_t vdst, uint32_t literal, rj_code_arch_t arch) {
+  if (arch != ROCJITSU_CODE_ARCH_RDNA4 || vdst > 255)
+    return std::nullopt;
+  return std::array<uint32_t, 3>{0xD5810000u | static_cast<uint32_t>(vdst), 0x000000FFu, literal};
+}
+
+/// @brief Encode RDNA4 `flat_store_b32 v[vaddr:vaddr+1], vsrc`.
+[[nodiscard]] inline constexpr std::optional<std::array<uint32_t, 3>>
+build_flat_store_b32_vaddr_vsrc(uint16_t vaddr, uint16_t vsrc, rj_code_arch_t arch) {
+  if (arch != ROCJITSU_CODE_ARCH_RDNA4 || vaddr > 255 || vsrc > 255)
+    return std::nullopt;
+  constexpr uint32_t kRdna4FlatNoSaddr = 0x7C;
+  return std::array<uint32_t, 3>{0xEC068000u | kRdna4FlatNoSaddr,
+                                 static_cast<uint32_t>(vsrc) << 23u, static_cast<uint32_t>(vaddr)};
 }
 
 /// @brief Encode an s_endpgm instruction for the given target ISA.

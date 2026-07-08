@@ -7,7 +7,9 @@ The current implementation is a trap-first, HSA-tools-loaded proof path. It can
 modify native `gfx1201` code objects at load time, patch compact native-DS IREE
 kernels through inline padding, local NOP caves, or appended `.text` caves, and
 patch selected likely group/LDS flat helper-function accesses in hip-moi. It is
-not yet full SuperCollider race detection.
+not yet full SuperCollider race detection. An opt-in prototype report-buffer
+mode can replace `s_trap` with a one-word marker write to a caller-supplied
+device-visible address.
 
 ## Start Here
 
@@ -79,7 +81,9 @@ address-space provenance heuristic.
 - `RJ_DBI_SC_MAX_PATCHES=N` can patch multiple native-DS or flat/VFLAT
   check/trap sites in one code object, bounded by non-overlapping in-place
   ranges and reachable local NOP caves.
-- Trap is still the report mechanism. A report-buffer ABI is deferred.
+- Default reporting is still `s_trap`, but `RJ_DBI_SC_REPORT_BUFFER=0x...`
+  enables a simple marker-buffer prototype. On mismatch, the injected sequence
+  writes one 32-bit marker word and continues.
 - Current flat provenance is conservative and heuristic. `MaybeGroup` is useful
   for MVP bring-up, but it is not the same as a formal proof that an arbitrary
   flat access targets LDS.

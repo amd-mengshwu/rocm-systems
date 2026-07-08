@@ -525,7 +525,7 @@ non-overlap checks.
 Not in scope for this demo:
 
 - other 8/16-bit native LDS forms beyond `ds_load_u16_d16(_hi)`,
-- non-trapping report buffers,
+- structured non-trapping report records,
 - randomized sleep sampling policy beyond the scalar-source
   `s_sleep_var` mechanism,
 - synchronization fault injection beyond the single selected decoded
@@ -537,8 +537,8 @@ The next work is feature depth:
 
 1. Strengthen `sleep_var` from "variable scalar source" into a real randomized
    or sampled delay policy.
-2. Replace trap-only reporting with a device-visible report buffer once we want
-   non-fatal diagnostics.
+2. Grow the one-word marker-buffer prototype into structured non-fatal
+   diagnostics when we need more than a sticky mismatch signal.
 3. Expand flat/generic multi-site instrumentation beyond the conservative
    one-selected-site shape.
 4. Add more native LDS widths and atomics only when the MVP needs them.

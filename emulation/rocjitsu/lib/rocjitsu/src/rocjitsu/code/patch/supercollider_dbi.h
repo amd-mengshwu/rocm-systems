@@ -36,8 +36,10 @@ struct SuperColliderDbiOptions {
   SuperColliderDbiDelayMode delay_mode = SuperColliderDbiDelayMode::Nop;
   uint16_t delay_var_ssrc = 106;
   std::optional<uint16_t> scratch_vgpr;
+  std::optional<uint64_t> report_buffer_address;
   uint32_t delay_nops = 0;
   uint32_t max_patches = 1;
+  uint32_t report_marker = 1;
 };
 
 struct SuperColliderDbiTextSection {

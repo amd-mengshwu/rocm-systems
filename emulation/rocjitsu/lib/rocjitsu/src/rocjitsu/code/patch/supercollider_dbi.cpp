@@ -2086,6 +2086,67 @@ build_v_mov_b32_e32_vgpr_word(uint16_t vdst, uint16_t src_vgpr, rj_code_arch_t a
   return build_v_mov_b32_e32(vdst, vector_source_vgpr(src_vgpr), arch);
 }
 
+[[nodiscard]] uint32_t report_action_scratch_vgprs(const SuperColliderDbiOptions &options) {
+  return options.report_buffer_address ? 3u : 0u;
+}
+
+[[nodiscard]] std::optional<uint32_t>
+mismatch_action_word_count(const SuperColliderDbiOptions &options, rj_code_arch_t arch,
+                           std::vector<std::string> &errors, std::string_view context) {
+  if (!options.report_buffer_address)
+    return 1u;
+  if (arch != ROCJITSU_CODE_ARCH_RDNA4) {
+    errors.emplace_back(std::string(context) +
+                        " report-buffer action currently supports only RDNA4");
+    return std::nullopt;
+  }
+  return 12u;
+}
+
+[[nodiscard]] std::optional<std::vector<uint32_t>>
+build_mismatch_action_words(const SuperColliderDbiOptions &options, rj_code_arch_t arch,
+                            uint16_t report_scratch_vgpr, std::vector<std::string> &errors,
+                            std::string_view context) {
+  if (!options.report_buffer_address) {
+    auto trap = build_s_trap_word(0, arch);
+    if (!trap) {
+      errors.emplace_back(std::string(context) + " could not encode s_trap");
+      return std::nullopt;
+    }
+    return std::vector<uint32_t>{*trap};
+  }
+
+  if (static_cast<uint32_t>(report_scratch_vgpr) + report_action_scratch_vgprs(options) > 256u) {
+    errors.emplace_back(std::string(context) +
+                        " report-buffer action has insufficient scratch VGPR headroom");
+    return std::nullopt;
+  }
+
+  const uint64_t address = *options.report_buffer_address;
+  const uint16_t address_lo_vgpr = report_scratch_vgpr;
+  const uint16_t address_hi_vgpr = static_cast<uint16_t>(report_scratch_vgpr + 1u);
+  const uint16_t marker_vgpr = static_cast<uint16_t>(report_scratch_vgpr + 2u);
+
+  const auto mov_address_lo =
+      build_v_mov_b32_e64_literal(address_lo_vgpr, static_cast<uint32_t>(address), arch);
+  const auto mov_address_hi =
+      build_v_mov_b32_e64_literal(address_hi_vgpr, static_cast<uint32_t>(address >> 32u), arch);
+  const auto mov_marker = build_v_mov_b32_e64_literal(marker_vgpr, options.report_marker, arch);
+  const auto store = build_flat_store_b32_vaddr_vsrc(address_lo_vgpr, marker_vgpr, arch);
+  if (!mov_address_lo || !mov_address_hi || !mov_marker || !store) {
+    errors.emplace_back(std::string(context) + " could not encode report-buffer action");
+    return std::nullopt;
+  }
+
+  std::vector<uint32_t> words;
+  words.reserve(12);
+  words.insert(words.end(), mov_address_lo->begin(), mov_address_lo->end());
+  words.insert(words.end(), mov_address_hi->begin(), mov_address_hi->end());
+  words.insert(words.end(), mov_marker->begin(), mov_marker->end());
+  words.insert(words.end(), store->begin(), store->end());
+  return words;
+}
+
 [[nodiscard]] std::optional<std::vector<uint32_t>> build_lds_check_trap_words(
     std::span<const uint8_t> original_bytes, const SuperColliderDbiLdsSite &site,
     rj_code_arch_t arch, const SuperColliderDbiOptions &options, uint32_t delay_words,
@@ -2126,12 +2187,21 @@ build_v_mov_b32_e32_vgpr_word(uint16_t vdst, uint16_t src_vgpr, rj_code_arch_t a
         "DBI SuperCollider LDS check/trap proof selected site without compare VGPR");
     return std::nullopt;
   }
-  auto skip_trap = build_s_cbranch_vccz_word(1, arch);
-  auto trap = build_s_trap_word(0, arch);
+  const uint16_t report_scratch_vgpr =
+      static_cast<uint16_t>(scratch_vgpr + static_cast<uint16_t>(*required_vgprs));
+  auto mismatch_action = build_mismatch_action_words(options, arch, report_scratch_vgpr, errors,
+                                                     "DBI SuperCollider LDS check/trap proof");
+  if (!mismatch_action)
+    return std::nullopt;
+  if (mismatch_action->size() > static_cast<size_t>(std::numeric_limits<int16_t>::max())) {
+    errors.emplace_back("DBI SuperCollider LDS check/trap proof mismatch action is too large");
+    return std::nullopt;
+  }
+  auto skip_action = build_s_cbranch_vccz_word(static_cast<int16_t>(mismatch_action->size()), arch);
   constexpr uint16_t kRdna4VccLo = 106;
   const uint32_t save_vcc = build_s_mov_b32(vcc_save_sgpr, kRdna4VccLo, arch);
   const uint32_t restore_vcc = build_s_mov_b32(kRdna4VccLo, vcc_save_sgpr, arch);
-  if (!wait_dscnt || !skip_trap || !trap) {
+  if (!wait_dscnt || !skip_action) {
     errors.emplace_back("DBI SuperCollider LDS check/trap proof could not encode sequence");
     return std::nullopt;
   }
@@ -2148,7 +2218,7 @@ build_v_mov_b32_e32_vgpr_word(uint16_t vdst, uint16_t src_vgpr, rj_code_arch_t a
 
   const uint32_t total_words =
       static_cast<uint32_t>(2u + lds_check_trap_predelay_setup_words(site) + delay_words + 2u + 1u +
-                            1u + 3u * *required_vgprs + 1u);
+                            1u + (2u + mismatch_action->size()) * *required_vgprs + 1u);
   std::vector<uint32_t> words;
   words.reserve(total_words);
   words.push_back(original_access[0]);
@@ -2171,8 +2241,8 @@ build_v_mov_b32_e32_vgpr_word(uint16_t vdst, uint16_t src_vgpr, rj_code_arch_t a
       return std::nullopt;
     }
     words.push_back(*chunk_cmp_ne);
-    words.push_back(*skip_trap);
-    words.push_back(*trap);
+    words.push_back(*skip_action);
+    words.insert(words.end(), mismatch_action->begin(), mismatch_action->end());
   }
   words.push_back(restore_vcc);
   return words;
@@ -2279,9 +2349,14 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
       auto required_vgprs = lds_dword_count(site);
       if (!required_vgprs)
         continue;
+      auto action_words = mismatch_action_word_count(options, arch, result.errors,
+                                                     "DBI SuperCollider LDS check/trap proof");
+      if (!action_words)
+        return;
+      const uint32_t scratch_vgprs = *required_vgprs + report_action_scratch_vgprs(options);
       const uint64_t requested_words = 2u + lds_check_trap_predelay_setup_words(site) +
                                        static_cast<uint64_t>(*delay_words) + 2u + 1u + 1u +
-                                       3u * *required_vgprs + 1u;
+                                       (2u + *action_words) * *required_vgprs + 1u;
       if (requested_words > 256u) {
         skipped_supported_site_for_excessive_delay = true;
         continue;
@@ -2291,7 +2366,7 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
           find_instruction_at_text_offset(KernelBlockScope(block_ptrs), site.text_offset);
       auto scratch =
           choose_scratch_vgpr(site, options, site_inst, liveness.get(), min_auto_scratch_vgpr,
-                              max_auto_scratch_vgpr, *required_vgprs);
+                              max_auto_scratch_vgpr, scratch_vgprs);
       if (!scratch)
         continue;
       auto vcc_save = choose_vcc_save_sgpr(site_inst, liveness.get(), min_preferred_vcc_save_sgpr);
@@ -2629,14 +2704,19 @@ void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_cod
     auto required_vgprs = flat_dword_count(site);
     if (!required_vgprs)
       return;
+    auto action_words = mismatch_action_word_count(options, arch, result.errors,
+                                                   "DBI SuperCollider flat check/trap proof");
+    if (!action_words)
+      return;
+    const uint32_t scratch_vgprs = *required_vgprs + report_action_scratch_vgprs(options);
     const uint64_t requested_words =
-        3u + static_cast<uint64_t>(*delay_words) + 3u + 1u + 3u * *required_vgprs;
+        3u + static_cast<uint64_t>(*delay_words) + 3u + 1u + (2u + *action_words) * *required_vgprs;
     if (requested_words > 256u) {
       skipped_supported_site_for_excessive_delay = true;
       return;
     }
     const uint32_t padding_words = static_cast<uint32_t>(requested_words - 3u);
-    auto scratch = choose_flat_scratch_vgpr(site, options, *required_vgprs);
+    auto scratch = choose_flat_scratch_vgpr(site, options, scratch_vgprs);
     if (!scratch)
       return;
     ++scratchable_candidate_count;
@@ -2670,6 +2750,8 @@ void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_cod
     for (const SuperColliderDbiFlatSite &site : function.flat_sites)
       visit_site(site);
   }
+  if (!result.errors.empty())
+    return;
 
   auto candidate_order = [](const FlatCheckTrapCandidate &lhs, const FlatCheckTrapCandidate &rhs) {
     if (lhs.site->file_offset != rhs.site->file_offset)
@@ -2754,9 +2836,7 @@ void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_cod
   };
 
   const auto wait_dscnt = build_s_wait_dscnt_word(0, arch);
-  const auto skip_trap = build_s_cbranch_vccz_word(1, arch);
-  const auto trap = build_s_trap_word(0, arch);
-  if (!wait_dscnt || !skip_trap || !trap) {
+  if (!wait_dscnt) {
     result.errors.emplace_back("DBI SuperCollider flat check/trap proof could not encode sequence");
     return;
   }
@@ -2815,6 +2895,25 @@ void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_cod
       return;
     planned.words.insert(planned.words.end(), duplicate_load->begin(), duplicate_load->end());
     planned.words.push_back(*wait_dscnt);
+    const uint16_t report_scratch_vgpr =
+        static_cast<uint16_t>(candidate.scratch_vgpr + static_cast<uint16_t>(*required_vgprs));
+    auto mismatch_action =
+        build_mismatch_action_words(options, arch, report_scratch_vgpr, result.errors,
+                                    "DBI SuperCollider flat check/trap proof");
+    if (!mismatch_action)
+      return;
+    if (mismatch_action->size() > static_cast<size_t>(std::numeric_limits<int16_t>::max())) {
+      result.errors.emplace_back("DBI SuperCollider flat check/trap proof mismatch action is too "
+                                 "large");
+      return;
+    }
+    const auto skip_action =
+        build_s_cbranch_vccz_word(static_cast<int16_t>(mismatch_action->size()), arch);
+    if (!skip_action) {
+      result.errors.emplace_back("DBI SuperCollider flat check/trap proof could not encode "
+                                 "mismatch-action branch");
+      return;
+    }
     for (uint16_t i = 0; i < *required_vgprs; ++i) {
       const auto chunk_cmp_ne =
           build_v_cmp_ne_u32_e32_word(static_cast<uint16_t>(*compare_vgpr + i),
@@ -2825,8 +2924,8 @@ void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_cod
         return;
       }
       planned.words.push_back(*chunk_cmp_ne);
-      planned.words.push_back(*skip_trap);
-      planned.words.push_back(*trap);
+      planned.words.push_back(*skip_action);
+      planned.words.insert(planned.words.end(), mismatch_action->begin(), mismatch_action->end());
     }
 
     if (candidate.use_local_cave) {

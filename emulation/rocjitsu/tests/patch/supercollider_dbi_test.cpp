@@ -1832,6 +1832,78 @@ TEST(SuperColliderDbi, ProbeLdsCheckTrapModeRewritesPaddedStoreInPlace) {
   EXPECT_EQ(rewritten_words, expected_words);
 }
 
+TEST(SuperColliderDbi, ProbeLdsCheckTrapModeCanReportMismatchToMarkerBuffer) {
+  const std::array<uint32_t, 24> text_words = {
+      0xD8340000u,
+      0x00000102u, // ds_store_b32 v2, v1
+      0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u,
+      0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u,
+      0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u, 0xBF800000u,
+      0xBFB00000u, // s_endpgm
+  };
+  const std::vector<uint8_t> bytes = make_rdna4_lds_code_object(text_words);
+  SuperColliderDbiOptions options;
+  options.enabled = true;
+  options.probe_lds_check_trap = true;
+  options.scratch_vgpr = 3;
+  options.report_buffer_address = 0x1234567887654321ull;
+  options.report_marker = 0xABCDEF01u;
+
+  const auto result = try_patch_supercollider_dbi(bytes, options);
+
+  ASSERT_TRUE(result.errors.empty()) << (result.errors.empty() ? "" : result.errors.front());
+  ASSERT_TRUE(result.warnings.empty()) << (result.warnings.empty() ? "" : result.warnings.front());
+  EXPECT_TRUE(result.modified);
+  ASSERT_EQ(result.patches.size(), 1u);
+  EXPECT_EQ(result.patches.front().kind, SuperColliderDbiPatchKind::InlineLdsStoreCheckTrap);
+  EXPECT_EQ(result.patches.front().anchor_offset, 0u);
+  EXPECT_EQ(result.patches.front().trampoline_offset, 8u);
+  EXPECT_EQ(result.patches.front().original_size, 84u);
+  ASSERT_TRUE(result.patches.front().scratch_vgpr);
+  EXPECT_EQ(*result.patches.front().scratch_vgpr, 3u);
+  ASSERT_EQ(result.elf_bytes.size(), bytes.size());
+
+  const auto mov_report_lo = build_v_mov_b32_e64_literal(4, 0x87654321u, ROCJITSU_CODE_ARCH_RDNA4);
+  const auto mov_report_hi = build_v_mov_b32_e64_literal(5, 0x12345678u, ROCJITSU_CODE_ARCH_RDNA4);
+  const auto mov_marker = build_v_mov_b32_e64_literal(6, 0xABCDEF01u, ROCJITSU_CODE_ARCH_RDNA4);
+  const auto store_marker = build_flat_store_b32_vaddr_vsrc(4, 6, ROCJITSU_CODE_ARCH_RDNA4);
+  ASSERT_TRUE(mov_report_lo);
+  ASSERT_TRUE(mov_report_hi);
+  ASSERT_TRUE(mov_marker);
+  ASSERT_TRUE(store_marker);
+
+  const std::array<uint32_t, 24> expected_words = {
+      0xD8340000u,
+      0x00000102u, // original ds_store_b32 v2, v1
+      0xD8D80000u,
+      0x03000002u, // readback ds_load_b32 v3, v2
+      0xBFC60000u, // s_wait_dscnt 0
+      build_s_mov_b32(0, kRdna4VccLo, ROCJITSU_CODE_ARCH_RDNA4),
+      0x7C9A0701u, // v_cmp_ne_u32_e32 vcc_lo, v1, v3
+      0xBFA3000Cu, // s_cbranch_vccz +12, skipping marker store when equal
+      (*mov_report_lo)[0],
+      (*mov_report_lo)[1],
+      (*mov_report_lo)[2],
+      (*mov_report_hi)[0],
+      (*mov_report_hi)[1],
+      (*mov_report_hi)[2],
+      (*mov_marker)[0],
+      (*mov_marker)[1],
+      (*mov_marker)[2],
+      (*store_marker)[0],
+      (*store_marker)[1],
+      (*store_marker)[2],
+      build_s_mov_b32(kRdna4VccLo, 0, ROCJITSU_CODE_ARCH_RDNA4),
+      0xBF800000u,
+      0xBF800000u,
+      0xBFB00000u, // original s_endpgm after padding
+  };
+  std::array<uint32_t, expected_words.size()> rewritten_words{};
+  std::memcpy(rewritten_words.data(), result.elf_bytes.data() + 0x100,
+              rewritten_words.size() * sizeof(uint32_t));
+  EXPECT_EQ(rewritten_words, expected_words);
+}
+
 TEST(SuperColliderDbi, ProbeLdsCheckTrapModeRewritesPaddedB64LoadInPlace) {
   const std::array<uint32_t, 16> text_words = {
       0xD9D80000u,

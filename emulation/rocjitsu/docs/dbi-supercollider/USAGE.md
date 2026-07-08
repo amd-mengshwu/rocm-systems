@@ -81,6 +81,14 @@ The MVP uses this HSA tools loader path. A separate waitcheck-style
 - `RJ_DBI_SC_REQUIRE_PATCH=1`: test guard. If a code object has a supported MVP
   site in the active check/trap scope but no patch is emitted, fail the load.
   Code objects with no supported sites still pass through.
+- `RJ_DBI_SC_REPORT_BUFFER=0xADDR`: opt-in prototype report-buffer ABI. On a
+  mismatch, the injected check writes one 32-bit marker to this caller-supplied
+  device-visible address and continues instead of executing `s_trap 0`. rocJITsu
+  does not allocate this buffer or pass it as a kernel argument; a test harness
+  must provide an address that patched device code can legally store to.
+- `RJ_DBI_SC_REPORT_MARKER=N`: marker value written to
+  `RJ_DBI_SC_REPORT_BUFFER`. The default is `1`. This is intentionally just a
+  sticky "a mismatch happened" flag, not a per-site or per-lane report record.
 - `RJ_DBI_SC_FAULT_DROP_BARRIER=1`: demo-only synchronization fault injection.
   After the primary proof/instrumentation pass, rewrite one decoded
   `s_barrier*` instruction to `s_nop 0`.
@@ -192,10 +200,12 @@ enough trailing `s_nop 0` padding to fit an in-place sequence:
 - likely group/LDS `flat_store_b64`
 - likely group/LDS `flat_store_b128`
 
-For loads, the patch duplicates the load after the requested NOP delay and traps
+For loads, the patch duplicates the load after the requested delay and reports
 if the two values differ. For stores, the patch reads back the stored LDS value
-after the requested NOP delay and traps if it differs from the original stored
-value. The injected compares preserve `vcc_lo` by saving it to a
+after the requested delay and reports if it differs from the original stored
+value. By default, reporting is `s_trap 0`. With `RJ_DBI_SC_REPORT_BUFFER`, the
+report action writes `RJ_DBI_SC_REPORT_MARKER` to the supplied buffer address
+instead. The injected compares preserve `vcc_lo` by saving it to a
 liveness-selected SGPR. For native DS and likely group flat helper sites, the
 patch may either use trailing padding or redirect through conservative uncovered
 local NOP caves, bounded by `RJ_DBI_SC_MAX_PATCHES`.
@@ -278,8 +288,8 @@ Keep GPU test fanout near 8.
   non-destructive check/trap path can patch eligible sites through padding or
   local NOP caves, bounded by `RJ_DBI_SC_MAX_PATCHES`, but it still does not
   prove that every decoded flat access is an LDS access.
-- No shadow memory and no non-trapping report buffer yet; `s_trap` is the MVP
-  signal.
+- No shadow memory or structured report records yet. The default signal is
+  `s_trap`; `RJ_DBI_SC_REPORT_BUFFER` provides only a one-word sticky marker.
 - Same-value races and unlucky schedules can be missed.
 - Appended trampoline/code-growth patching remains bring-up-only. Proof NOP
   mode is gated to candidate-bearing non-ROCclr code objects; use the padded or

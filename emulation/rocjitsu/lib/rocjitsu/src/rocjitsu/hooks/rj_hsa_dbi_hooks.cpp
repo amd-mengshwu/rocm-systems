@@ -73,8 +73,10 @@ struct HookConfig {
   rocjitsu::SuperColliderDbiDelayMode delay_mode = rocjitsu::SuperColliderDbiDelayMode::Nop;
   uint16_t delay_var_ssrc = 106;
   std::optional<uint16_t> scratch_vgpr;
+  std::optional<uint64_t> report_buffer_address;
   uint32_t delay_nops = 0;
   uint32_t max_patches = 1;
+  uint32_t report_marker = 1;
   int log_level = kLogDisabled;
   std::string dump_dir;
 };
@@ -242,6 +244,26 @@ flat_address_space_hint_name(rocjitsu::SuperColliderDbiFlatAddressSpaceHint hint
   return true;
 }
 
+[[nodiscard]] bool parse_u64_env(const char *name, uint64_t default_value, uint64_t *out) {
+  const char *value = std::getenv(name);
+  if (value == nullptr || *value == '\0') {
+    *out = default_value;
+    return true;
+  }
+
+  errno = 0;
+  char *end = nullptr;
+  const unsigned long long parsed = std::strtoull(value, &end, 0);
+  if (end == value || *end != '\0' || errno == ERANGE ||
+      parsed > std::numeric_limits<uint64_t>::max()) {
+    std::fprintf(stderr, "[rocjitsu-dbi-hooks] invalid %s='%s'; expected uint64\n", name, value);
+    return false;
+  }
+
+  *out = static_cast<uint64_t>(parsed);
+  return true;
+}
+
 [[nodiscard]] bool parse_delay_mode_env(rocjitsu::SuperColliderDbiDelayMode *out) {
   const char *value = std::getenv("RJ_DBI_SC_DELAY_MODE");
   if (value == nullptr || *value == '\0') {
@@ -369,6 +391,21 @@ flat_address_space_hint_name(rocjitsu::SuperColliderDbiFlatAddressSpaceHint hint
     std::fprintf(stderr, "[rocjitsu-dbi-hooks] invalid RJ_DBI_SC_MAX_PATCHES='0'; expected >=1\n");
     return std::nullopt;
   }
+  uint64_t report_buffer_address = 0;
+  if (const char *value = std::getenv("RJ_DBI_SC_REPORT_BUFFER");
+      value != nullptr && *value != '\0') {
+    if (!parse_u64_env("RJ_DBI_SC_REPORT_BUFFER", 0, &report_buffer_address))
+      return std::nullopt;
+    if (report_buffer_address == 0) {
+      std::fprintf(stderr,
+                   "[rocjitsu-dbi-hooks] invalid RJ_DBI_SC_REPORT_BUFFER='0'; expected nonzero "
+                   "device-visible address\n");
+      return std::nullopt;
+    }
+    config.report_buffer_address = report_buffer_address;
+  }
+  if (!parse_u32_env("RJ_DBI_SC_REPORT_MARKER", 1, &config.report_marker))
+    return std::nullopt;
   uint32_t delay_var_ssrc = 106;
   if (!parse_u32_env("RJ_DBI_SC_DELAY_VAR_SSRC", 106, &delay_var_ssrc))
     return std::nullopt;
@@ -864,8 +901,10 @@ hsa_status_t HSA_API rj_dbi_executable_load_agent_code_object(
     patch_options.delay_mode = config->delay_mode;
     patch_options.delay_var_ssrc = config->delay_var_ssrc;
     patch_options.scratch_vgpr = config->scratch_vgpr;
+    patch_options.report_buffer_address = config->report_buffer_address;
     patch_options.delay_nops = config->delay_nops;
     patch_options.max_patches = config->max_patches;
+    patch_options.report_marker = config->report_marker;
 
     log_message(kLogInfo, "SuperCollider DBI patch begin reader=%llu bytes=%zu",
                 static_cast<unsigned long long>(code_object_reader.handle), size);
@@ -896,7 +935,7 @@ hsa_status_t HSA_API rj_dbi_executable_load_agent_code_object(
         "probe_endpgm=%s probe_lds_endpgm=%s check_trap_mode=%s probe_lds_check_trap=%s "
         "probe_flat_check_trap=%s probe_flat_trap=%s fault_drop_barrier=%s "
         "fault_barrier_index=%u delay_mode=%s delay_var_ssrc=%u max_patches=%u tmp_vgpr=%s "
-        "require_patch=%s",
+        "report_buffer=%s report_marker=%u require_patch=%s",
         static_cast<unsigned long long>(code_object_reader.handle), patch_result.input_size,
         patch_result.visited_code_object ? "true" : "false",
         patch_result.modified ? "true" : "false", config->delay_nops,
@@ -909,7 +948,9 @@ hsa_status_t HSA_API rj_dbi_executable_load_agent_code_object(
         config->fault_barrier_index, delay_mode_name(config->delay_mode), config->delay_var_ssrc,
         config->max_patches,
         config->scratch_vgpr ? std::to_string(*config->scratch_vgpr).c_str() : "auto",
-        config->require_patch ? "true" : "false");
+        config->report_buffer_address ? std::to_string(*config->report_buffer_address).c_str()
+                                      : "disabled",
+        config->report_marker, config->require_patch ? "true" : "false");
     if (!patch_result.target_name.empty()) {
       log_message(kLogInfo,
                   "SuperCollider DBI code-object reader=%llu target=%s arch=%s text_sections=%zu "

@@ -13,8 +13,9 @@ DataCollider motivation describes the key redundant-read idea this way:
 > "the algorithm issues a redundant read to the same address, separated by a random delay"
 
 Our MVP preserves that value-checking idea, with deterministic NOP delay,
-deterministic `s_sleep`, or scalar-source `s_sleep_var`, and the report path is
-currently `s_trap`.
+deterministic `s_sleep`, or scalar-source `s_sleep_var`. The default report
+path is still `s_trap`, and there is also an opt-in one-word marker-buffer
+prototype.
 
 ## Where The Instrumentation Runs
 
@@ -48,7 +49,7 @@ The intended LDS/group-memory shape is:
 3. Repeat or read back the same address.
 4. Wait only as needed to consume the injected read result.
 5. Compare the original value or stored value with the duplicate/readback value.
-6. Report by trapping on mismatch.
+6. Report on mismatch.
 
 For loads, the duplicate access is another load from the same address into
 scratch VGPRs. For stores, the duplicate access is a synthesized readback from
@@ -58,6 +59,48 @@ This is intentionally not happens-before instrumentation. It accepts false
 negatives. The paper-level no-false-positive argument only applies when the
 instrumented access is actually shared/non-private and the injected check is
 itself correct.
+
+## Minimal Report-Buffer ABI
+
+The first report-buffer ABI is deliberately small:
+
+```sh
+RJ_DBI_SC_REPORT_BUFFER=0xADDR
+RJ_DBI_SC_REPORT_MARKER=1   # optional, default 1
+```
+
+`RJ_DBI_SC_REPORT_BUFFER` is a nonzero 64-bit device-visible address supplied
+by the caller. rocJITsu does not allocate the buffer, does not add a kernel
+argument, and does not manage lifetime. When this variable is absent, the
+mismatch action remains the default `s_trap 0`.
+
+When the variable is present, each mismatch action writes the 32-bit marker to
+that address and then lets the kernel continue. The ABI is only a sticky
+"something mismatched" signal. It does not yet record kernel identity, program
+counter, LDS address, lane id, original value, duplicate value, or a count. That
+is intentional for the prototype: the first useful feature is a non-trapping
+observable signal that a harness can inspect after a run.
+
+The injected RDNA4 marker action is:
+
+```text
+v_mov_b32_e64 scratch_addr_lo, literal low32(RJ_DBI_SC_REPORT_BUFFER)
+v_mov_b32_e64 scratch_addr_hi, literal high32(RJ_DBI_SC_REPORT_BUFFER)
+v_mov_b32_e64 scratch_value,   literal RJ_DBI_SC_REPORT_MARKER
+flat_store_b32 v[scratch_addr_lo:scratch_addr_hi], scratch_value
+```
+
+The preceding compare still uses `v_cmp_ne_u32` and
+`s_cbranch_vccz skip_action`. If any active lane mismatches, the whole active
+wave may write the same marker word. That is acceptable for the current ABI
+because every writer stores the same sticky nonzero value. A richer report
+format will need lane masking or atomics, but this prototype avoids that
+complexity.
+
+Report-buffer mode needs three extra scratch VGPRs per patch. The existing
+scratch selection therefore reserves those VGPRs only when
+`RJ_DBI_SC_REPORT_BUFFER` is set. This can make a compact site require more
+padding or a larger local/appended cave than the default trap mode.
 
 ## Demo-Only Barrier Fault Injection
 
@@ -152,8 +195,8 @@ duplicate ds_load_b* to scratch VGPRs
 s_wait_dscnt 0
 s_mov_b32 free_sgpr, vcc_lo
 v_cmp_ne_u32 per dword
-s_cbranch_vccz skip_trap
-s_trap 0
+s_cbranch_vccz skip_report
+report action: s_trap 0, or the marker-buffer store described above
 s_mov_b32 vcc_lo, free_sgpr
 ```
 
@@ -174,8 +217,8 @@ synthesized ds_load_b* readback to scratch VGPRs
 s_wait_dscnt 0
 s_mov_b32 free_sgpr, vcc_lo
 v_cmp_ne_u32 per dword against original data VGPRs
-s_cbranch_vccz skip_trap
-s_trap 0
+s_cbranch_vccz skip_report
+report action: s_trap 0, or the marker-buffer store described above
 s_mov_b32 vcc_lo, free_sgpr
 ```
 
@@ -401,7 +444,9 @@ Divergent:
   `RJ_DBI_SC_DELAY_MODE=sleep_var` mode emits one `s_sleep_var` instruction
   from a scalar source operand. Its default source is `vcc_lo`, so this is
   variable perturbation rather than a full randomized sampling policy.
-- The paper reports through a runtime buffer; this MVP reports with `s_trap`.
+- The paper reports through a runtime buffer. This MVP defaults to `s_trap`,
+  with an opt-in one-word marker-buffer prototype instead of a structured
+  runtime report record.
 - The paper can reason from compiler IR address spaces; this DBI path has to
   infer flat/generic address space from final machine-code dataflow.
 - The paper has same-address intra-warp store checks for same-value lost
@@ -440,7 +485,7 @@ patch kind is `local-cave-flat-store-check-trap`.
 - What is the right sampled seed source for a SuperCollider-like `s_sleep_var`
   delay window?
 - How much scratch VGPR or descriptor growth is acceptable for a DBI MVP?
-- Should the next reporting step be a fixed device-visible report buffer, a
-  trap with richer metadata dumps, or both?
+- Should the marker-buffer prototype grow into fixed structured records, a
+  trap-with-metadata path, or both?
 - How soon do we need same-address intra-wave store checks for same-value LDS
   races?
