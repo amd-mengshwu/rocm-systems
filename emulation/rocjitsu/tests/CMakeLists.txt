@@ -31,6 +31,7 @@ set(RJ_OBJECT_LIBS
     rocjitsu_plugin_race_detector
     rocjitsu_vm_risc_v
     rocjitsu_config
+    rocjitsu_dbt_config
 )
 
 if(RJ_INSTALL_TESTS)
@@ -424,7 +425,6 @@ target_link_libraries(
     PRIVATE
         ${RJ_OBJECT_LIBS}
         rocjitsu_kmd
-        rocjitsu_dbt_config
         util
         flatbuffers
         Threads::Threads
