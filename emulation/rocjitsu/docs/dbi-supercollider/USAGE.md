@@ -19,13 +19,22 @@ The HSA tools library built by the first command is:
 emulation/rocjitsu/build/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so
 ```
 
+The commands below assume these paths are set for the local checkout/builds:
+
+```sh
+export ROCJITSU_BUILD_DIR=/path/to/rocm-systems/emulation/rocjitsu/build
+export HIP_MOI_BUILD_DIR=/path/to/hip-moi-build
+export IREE_BUILD_DIR=/path/to/iree-build
+export ROCM_DIST_DIR=/path/to/rocm
+```
+
 ## How The Hook Is Loaded
 
 Use the HSA tools path:
 
 ```sh
 env \
-  HSA_TOOLS_LIB=/home/benoit/workspace/TheRock/rocm-systems/emulation/rocjitsu/build/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so \
+  HSA_TOOLS_LIB="$ROCJITSU_BUILD_DIR/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so" \
   RJ_DBI_SUPERCOLLIDER=1 \
   RJ_DBI_LOG=1 \
   RJ_DBI_SC_DELAY=2 \
@@ -59,9 +68,9 @@ The MVP uses this HSA tools loader path. A separate waitcheck-style
   `llvm-readelf` / `llvm-objdump` inspection.
 - `RJ_DBI_SC_CHECK_TRAP_MODE=all|lds|flat`: restrict the primary check/trap
   instrumentation scope. The default is `all`: try native `ds_*` LDS
-  instrumentation first, then try likely group/LDS `flat_*` instrumentation if
-  the native DS pass did not patch that code object. Use `lds` or `flat` only
-  for targeted debugging.
+  instrumentation first, then let likely group/LDS `flat_*` instrumentation use
+  any remaining patch budget when the existing DS patch ranges still map into
+  the original code object. Use `lds` or `flat` only for targeted debugging.
 - `RJ_DBI_SC_DELAY=N`: configure the delay between the original LDS/flat access
   and the duplicate/readback check.
 - `RJ_DBI_SC_DELAY_MODE=nop|sleep|sleep_var`: choose the delay encoding. The
@@ -77,7 +86,9 @@ The MVP uses this HSA tools loader path. A separate waitcheck-style
   Selection is file-ordered and rejects overlapping inline ranges, anchor
   rewrites, and local NOP caves.
 - `RJ_DBI_SC_TMP_VGPR=N`: force a scratch VGPR. Use this for hand-shaped tests
-  whose kernel descriptor reserves the selected VGPR.
+  whose kernel descriptor reserves the selected VGPR. Normal auto-selection
+  first prefers descriptor-covered scratch and can grow the descriptor as a
+  fallback for native-DS sites when no ordinary candidate is available.
 - `RJ_DBI_SC_REQUIRE_PATCH=1`: test guard. If a code object has a supported MVP
   site in the active check/trap scope but no patch is emitted, fail the load.
   Code objects with no supported sites still pass through.
@@ -108,6 +119,13 @@ If the DS pass used appended `.text` growth, flat composition skips that object
 instead of guessing at shifted ELF offsets. Barrier fault injection is
 composable because it runs after the selected check/trap path. The bring-up-only
 probes below are explicit debug overrides of the default check/trap path.
+
+Native-DS scratch selection first stays inside the AMDHSA kernel descriptor's
+allocated VGPR count. If that prevents all inline or local-cave native-DS
+patches for a code object, rocJITsu may select liveness-free scratch above the
+original allocation and grow
+`COMPUTE_PGM_RSRC1.GRANULATED_WORKITEM_VGPR_COUNT`. That growth is
+fallback-only; an ordinary in-descriptor patch wins whenever one exists.
 
 Additional bring-up-only probes also exist:
 
@@ -143,8 +161,8 @@ Interpretation:
 - `local-cave-lds-load-check-trap` / `local-cave-lds-store-check-trap` patch
   logs mean a compact native DS site was redirected through uncovered local NOP
   slack and returned to the original fallthrough. The focused IREE WMMA
-  ROCm/HIP e2e object now patches one `ds_load_2addr_b64` site this way and
-  passes under `RJ_DBI_SC_REQUIRE_PATCH=1`.
+  ROCm/HIP e2e object patches one `ds_load_2addr_b64` site this way and passes
+  under `RJ_DBI_SC_REQUIRE_PATCH=1`.
 - `flat_sites>0`: flat/generic memory sites were decoded and logged at
   `RJ_DBI_LOG=2`.
 - `function_flat_maybe_group_hints>0`: helper-function flat sites are likely
@@ -156,7 +174,7 @@ Interpretation:
 - `local-cave-flat-load-check-trap` / `local-cave-flat-store-check-trap` patch
   logs mean an unpadded flat helper site was redirected through uncovered local
   NOP slack and returned to the original fallthrough. The focused hip-moi
-  `NoPipelineProd16x8` object now patches one such site and passes cleanly.
+  `NoPipelineProd16x8` object patches one such site and passes cleanly.
 - `skips>0` with `modified=false`: the hook observed the code object but chose
   pass-through for policy or coverage reasons.
 - `rejects>0`: the hook found something it considered unsafe or unsupported.
@@ -170,21 +188,20 @@ Interpretation:
   `local_cave_reachable_candidates=...` so the local-cave/code-growth gap is
   measurable. In the focused hip-moi `NoPipelineProd16x8` object, appended
   end-of-text caves are not directly reachable, but conservative uncovered NOP
-  caves are reachable for all 31 likely group flat helper candidates observed so
-  far.
+  caves are reachable for the likely group flat helper candidates.
 
-The broad hip-moi matmul kernels observed so far use flat/generic and scratch
-forms rather than native `ds_load/store_*`. The focused IREE e2e kernels do
-expose compact native DS sites. The current hook can identify and destructively
-trap likely group/LDS flat helper-function sites. The non-destructive
-race-checking paths currently cover padded native DS sites, compact native DS
-sites when local caves are reachable, padded likely group flat sites, and
-unpadded likely group flat sites when conservative local NOP caves are reachable.
+The broad hip-moi matmul kernels use flat/generic and scratch forms rather than
+native `ds_load/store_*`. The focused IREE e2e kernels expose compact native DS
+sites. The hook can identify and destructively trap likely group/LDS
+flat helper-function sites. The non-destructive race-checking paths cover padded
+native DS sites, compact native DS sites through local or appended caves, native
+DS descriptor-growth fallback cases, padded likely group flat sites, and
+unpadded likely group flat sites when conservative local NOP caves are
+reachable.
 
 ## What The MVP Instruments
 
-The current live-safe path instruments native non-atomic LDS instructions with
-enough trailing `s_nop 0` padding to fit an in-place sequence:
+The live-safe path instruments these native non-atomic LDS instructions:
 
 - `ds_load_b32`
 - `ds_load_b64`
@@ -193,9 +210,14 @@ enough trailing `s_nop 0` padding to fit an in-place sequence:
 - `ds_load_2addr_b64`
 - `ds_load_2addr_stride64_b32`
 - `ds_load_2addr_stride64_b64`
+- `ds_load_u16_d16`
+- `ds_load_u16_d16_hi`
 - `ds_store_b32`
 - `ds_store_b64`
 - `ds_store_b128`
+
+It also instruments likely group/LDS VFLAT instructions:
+
 - likely group/LDS `flat_load_b32`
 - likely group/LDS `flat_load_b64`
 - likely group/LDS `flat_load_b128`
@@ -210,15 +232,18 @@ value. By default, reporting is `s_trap 0`. With `RJ_DBI_SC_REPORT_BUFFER`, the
 report action writes `RJ_DBI_SC_REPORT_MARKER` to the supplied buffer address
 instead. The injected compares preserve `vcc_lo` by saving it to a
 liveness-selected SGPR. For native DS and likely group flat helper sites, the
-patch may either use trailing padding or redirect through conservative uncovered
-local NOP caves, bounded by `RJ_DBI_SC_MAX_PATCHES`.
+patch may use trailing padding, redirect through conservative uncovered local
+NOP caves, or use an appended `.text` cave for native DS when that is the safe
+placement. Native DS can also grow the descriptor VGPR allocation as a fallback
+when no ordinary in-descriptor patch candidate exists. All of these paths are
+bounded by `RJ_DBI_SC_MAX_PATCHES`.
 
 ## Repeatable Local Tests
 
 rocJITsu positive/negative regression:
 
 ```sh
-ctest --test-dir /home/benoit/workspace/TheRock/rocm-systems/emulation/rocjitsu/build \
+ctest --test-dir "$ROCJITSU_BUILD_DIR" \
   -R 'DbiSuperColliderLdsTest' \
   --parallel 1 \
   --output-on-failure
@@ -240,11 +265,11 @@ Selected hip-moi smoke:
 
 ```sh
 env \
-  HSA_TOOLS_LIB=/home/benoit/workspace/TheRock/rocm-systems/emulation/rocjitsu/build/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so \
+  HSA_TOOLS_LIB="$ROCJITSU_BUILD_DIR/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so" \
   RJ_DBI_SUPERCOLLIDER=1 \
   RJ_DBI_LOG=1 \
   RJ_DBI_SC_DELAY=2 \
-  ctest --test-dir /home/benoit/workspace/hip-moi-build \
+  ctest --test-dir "$HIP_MOI_BUILD_DIR" \
     -R 'JakubRdna4MatmulReference|HipMoiRdna4Pingpong' \
     --parallel 8 \
     --output-on-failure
@@ -254,11 +279,11 @@ Focused hip-moi flat local-cave smoke:
 
 ```sh
 env \
-  HSA_TOOLS_LIB=/home/benoit/workspace/TheRock/rocm-systems/emulation/rocjitsu/build/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so \
+  HSA_TOOLS_LIB="$ROCJITSU_BUILD_DIR/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so" \
   RJ_DBI_SUPERCOLLIDER=1 \
   RJ_DBI_LOG=1 \
   RJ_DBI_SC_DELAY=1 \
-  ctest --test-dir /home/benoit/workspace/hip-moi-build \
+  ctest --test-dir "$HIP_MOI_BUILD_DIR" \
     -R NoPipelineProd16x8 \
     --parallel 1 \
     --output-on-failure -V
@@ -268,29 +293,31 @@ Focused IREE ROCM/ROCDL smoke:
 
 ```sh
 env \
-  HSA_TOOLS_LIB=/home/benoit/workspace/TheRock/rocm-systems/emulation/rocjitsu/build/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so \
+  HSA_TOOLS_LIB="$ROCJITSU_BUILD_DIR/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so" \
   RJ_DBI_SUPERCOLLIDER=1 \
   RJ_DBI_LOG=1 \
   RJ_DBI_SC_DELAY=2 \
-  ctest --test-dir /home/benoit/workspace/iree-build \
+  ctest --test-dir "$IREE_BUILD_DIR" \
     -R 'iree/compiler/plugins/target/ROCM/test/smoketest.mlir.test|iree/compiler/plugins/target/ROCM/test/smoketest_hsaco.mlir.test|iree/compiler/Codegen/LLVMGPU/test/convert_to_rocdl_gfx1201.mlir.test|iree/compiler/Codegen/LLVMGPU/test/ROCDL/config_tile_and_fuse_gfx1201.mlir.test|iree/compiler/Codegen/LLVMGPU/test/ROCDL/pipeline_full_smoketests.mlir.test' \
     --parallel 8 \
     --output-on-failure
 ```
 
-Focused IREE native-DS local-cave smoke:
+IREE HIP/ROCm e2e patch-required inventory:
 
 ```sh
 env \
-  HSA_TOOLS_LIB=/home/benoit/workspace/TheRock/rocm-systems/emulation/rocjitsu/build/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so \
-  LD_LIBRARY_PATH=/home/benoit/workspace/TheRock-build/dist/rocm/lib:$LD_LIBRARY_PATH \
+  HSA_TOOLS_LIB="$ROCJITSU_BUILD_DIR/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so" \
+  LD_LIBRARY_PATH="$ROCM_DIST_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
   RJ_DBI_SUPERCOLLIDER=1 \
   RJ_DBI_LOG=1 \
-  RJ_DBI_SC_DELAY=2 \
+  RJ_DBI_SC_DELAY_MODE=sleep \
+  RJ_DBI_SC_DELAY=1 \
+  RJ_DBI_SC_MAX_PATCHES=4 \
   RJ_DBI_SC_REQUIRE_PATCH=1 \
-  ctest --test-dir /home/benoit/workspace/iree-build \
-    -R 'rocm_hip_wmma_matmul_f16_wmma_matmul_f16' \
-    --parallel 1 \
+  ctest --test-dir "$IREE_BUILD_DIR" \
+    -R '^iree/tests/e2e/(encoding|linalg|math|matmul|rocm_specific|stablehlo_ops)/.*(rocm_hip|rocm-rocm)' \
+    --parallel 8 \
     --output-on-failure
 ```
 
@@ -309,8 +336,9 @@ Keep GPU test fanout near 8.
 - Appended trampoline/code-growth patching remains bring-up-only. Proof NOP
   mode is gated to candidate-bearing non-ROCclr code objects; use the padded or
   local-cave check/trap paths for MVP race checks.
-- Scratch selection is liveness-based and fail-closed. The patcher does not grow
-  the kernel's VGPR allocation metadata or spill arbitrary live registers, so a
-  site with no free scratch VGPR/SGPR run is skipped.
+- Scratch selection is liveness-based and fail-closed. The patcher can grow the
+  native-DS kernel descriptor's VGPR allocation as a fallback, but it does not
+  spill arbitrary live registers; a site with no free scratch VGPR/SGPR run is
+  skipped.
 - Atomic, fence-heavy, global-memory, async-copy, and barrier-epoch cases are
   unsupported and should be skipped or rejected with diagnostics.

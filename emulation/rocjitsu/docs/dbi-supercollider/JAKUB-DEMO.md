@@ -9,11 +9,12 @@ path, inspects final native RDNA4 / `gfx1201` machine code, and rewrites
 selected LDS instructions before the code object is loaded.
 
 The main demo runs IREE e2e tests while requiring rocJITsu to actually rewrite
-instrumentable LDS code. Two useful slices pass under that requirement: the full
-13-test RDNA4 ROCm/HIP matmul e2e set exposed by this build, and a focused
-10-test linalg/matmul/StableHLO set. The clearest concrete example is one IREE
-WMMA kernel where rocJITsu rewrites a compact `ds_load_2addr_b64` into a branch
-to a local NOP cave containing:
+instrumentable LDS code. The configured HIP/ROCm IREE e2e inventory in this
+build passes under that requirement: 152 tests across `encoding`, `linalg`,
+`math`, `matmul`, `rocm_specific`, and `stablehlo_ops`.
+
+The clearest concrete example is one IREE WMMA kernel where rocJITsu rewrites a
+compact `ds_load_2addr_b64` into a branch to a local NOP cave containing:
 
 - the original LDS load,
 - a delay,
@@ -132,8 +133,8 @@ is not translating the code object to another architecture.
 The SuperCollider DBI hook defaults to a combined check/trap scope:
 
 - try native `ds_*` LDS instrumentation first,
-- if no native DS patch is emitted for that code object, try likely group/LDS
-  `flat_*` instrumentation.
+- then let likely group/LDS `flat_*` instrumentation use remaining patch budget
+  when the DS patch ranges still map cleanly into the original code object.
 
 This removes the normal need to choose between IREE-style native DS code and
 HIP/hip-moi-style helper functions that use final `flat_*` instructions for
@@ -141,23 +142,29 @@ shared memory. For targeted debugging, `RJ_DBI_SC_CHECK_TRAP_MODE=lds` restricts
 the scope to native DS and `RJ_DBI_SC_CHECK_TRAP_MODE=flat` restricts it to
 flat/VFLAT.
 
-Same-code-object composition is now supported for the common non-overlapping
-case: native DS is selected first, and flat/VFLAT can consume the remaining
+Same-code-object composition supports the common non-overlapping case: native
+DS is selected first, and flat/VFLAT can consume the remaining
 `RJ_DBI_SC_MAX_PATCHES` budget if the existing patch ranges still map into the
 original code object. If the native DS pass grows `.text`, flat/VFLAT skips that
 object rather than patching with stale offsets. Barrier fault injection is also
 composable: `RJ_DBI_SC_FAULT_DROP_BARRIER=1` runs after the check/trap pass.
 
-## Compatibility Smoke: Full RDNA4 Matmul e2e
+## Main Demo: Require Real LDS Patches
 
-This broad compatibility check verifies that the HSA tools hook sits underneath
-IREE's HIP HAL path for the complete RDNA4 ROCm/HIP matmul e2e set exposed by
-this build. Run it with the patch-required environment from the main demo
-section below.
+This is the main demo. It uses the default combined check/trap scope and sets
+`RJ_DBI_SC_REQUIRE_PATCH=1`. For these IREE kernels, the supported sites are
+native `ds_*` LDS accesses, so the run only passes if rocJITsu either finds no
+supported site in a loaded code object or successfully rewrites at least one
+supported native LDS site before loading it.
 
 ```sh
+export RJ_DBI_SC_DELAY_MODE=sleep
+export RJ_DBI_SC_DELAY=1
+export RJ_DBI_SC_MAX_PATCHES=4
+export RJ_DBI_SC_REQUIRE_PATCH=1
+
 ctest --test-dir "$IREE_BUILD_DIR" \
-  -R 'iree/tests/e2e/matmul/.*rocm_hip' \
+  -R '^iree/tests/e2e/(encoding|linalg|math|matmul|rocm_specific|stablehlo_ops)/.*(rocm_hip|rocm-rocm)' \
   --parallel 8 \
   --output-on-failure
 ```
@@ -165,13 +172,18 @@ ctest --test-dir "$IREE_BUILD_DIR" \
 Observed result:
 
 ```text
-100% tests passed, 0 tests failed out of 13
+100% tests passed, 0 tests failed out of 152
 ```
 
-Covered tests include f16/f8/i8 WMMA, TileAndFuse WMMA, transposed-B variants,
-and RDNA4 DT f16/f8/i8 matmul tests.
+That 152-test set includes:
 
-Representative DBI inventory from IREE e2e runs:
+- 1 `encoding` test,
+- 12 `linalg` tests,
+- 13 RDNA4 `matmul` tests,
+- 1 `rocm_specific` WMMA test,
+- 125 `stablehlo_ops` tests.
+
+Representative LDS-heavy coverage:
 
 ```text
 rocm_specific WMMA: kernels=2 candidates=2 supported_lds_sites=32
@@ -189,44 +201,17 @@ i8 TileAndFuse transposed-B matmul: supported_lds_sites=41
 The inventory confirms that IREE e2e provides compact native `ds_*` kernels and
 concrete LDS-heavy runtime workloads under the hook.
 
-## Main Demo: Require A Real LDS Patch
+Focused examples worth pointing at:
 
-This is the main demo. It uses the default combined check/trap scope and sets
-`RJ_DBI_SC_REQUIRE_PATCH=1`. For these IREE kernels, the supported sites are
-native `ds_*` LDS accesses, so the run only passes if rocJITsu either finds no
-supported site in a loaded code object or successfully rewrites at least one
-supported native LDS site before loading it.
-
-```sh
-export RJ_DBI_SC_DELAY_MODE=sleep
-export RJ_DBI_SC_DELAY=1
-export RJ_DBI_SC_MAX_PATCHES=4
-export RJ_DBI_SC_REQUIRE_PATCH=1
-
-ctest --test-dir "$IREE_BUILD_DIR" \
-  -R 'check_rocm_hip_narrow_n_matmuls|e2e_matmul_rocm_f16_large_rdna4_tileandfusewmma(_tb)?_rocm_hip|e2e_matmul_rocm_f8E4M3FN_large_rdna4_tileandfusewmma_rocm_hip|e2e_matmul_rocm_f8e4M3FN_large_rdna4_tileandfusewmma_tb_rocm_hip|e2e_matmul_rocm_i8_large_rdna4_tileandfusewmma_tb_rocm_hip|e2e_matmul_rdna4_dt_f8E4M3FN_rocm_hip|check_rocm_hip_stream_dot' \
-  --parallel 1 \
-  --output-on-failure
-```
-
-Observed result:
-
-```text
-100% tests passed, 0 tests failed out of 10
-```
-
-| Test | Result | What the pass proves |
+| Test or family | Result | What the pass proves |
 | --- | --- | --- |
-| `check_rocm_hip_narrow_n_matmuls.mlir` | PASS | Multi-site local-cave LDS instrumentation no longer trips an illegal instruction |
+| `check_rocm_hip_narrow_n_matmuls.mlir` | PASS | Multi-site local-cave LDS instrumentation executes without an illegal instruction |
 | `e2e_matmul_rocm_f16_large_rdna4_tileandfusewmma_rocm_hip` | PASS | Compact TileAndFuse kernels can be patched through the appended `.text` cave fallback |
-| `e2e_matmul_rocm_f16_large_rdna4_tileandfusewmma_tb_rocm_hip` | PASS | The transposed-B TileAndFuse local-cave case passes with descriptor-bounded scratch selection |
-| `e2e_matmul_rocm_f8E4M3FN_large_rdna4_tileandfusewmma_rocm_hip` | PASS | The same DBI mode covers another TileAndFuse datatype variant |
-| `e2e_matmul_rocm_f8e4M3FN_large_rdna4_tileandfusewmma_tb_rocm_hip` | PASS | The transposed-B TileAndFuse f8 variant passes under the same guard |
-| `e2e_matmul_rocm_i8_large_rdna4_tileandfusewmma_tb_rocm_hip` | PASS | The TileAndFuse i8 transposed-B variant loads and executes under the hook |
-| `e2e_matmul_rdna4_dt_f8E4M3FN_rocm_hip` | PASS | The DT f8 store/readback path no longer trips an illegal instruction |
-| `check_rocm_hip_stream_dot.mlir` | PASS | StableHLO dot remains correct after the patcher skips an unsafe descriptor-edge B64 duplicate-load site and patches another supported site |
-| `check_rocm_hip_stream_dot_bf16.mlir` | PASS | The StableHLO BF16 dot variant is compatible with the patch-required DBI mode |
-| `check_rocm_hip_stream_dot_general.mlir` | PASS | The broader StableHLO dot_general path is compatible with the same hook/configuration |
+| `e2e_matmul_rocm_f16_large_rdna4_tileandfusewmma_tb_rocm_hip` | PASS | The transposed-B TileAndFuse local-cave case passes with descriptor-aware scratch selection |
+| `e2e_matmul_rocm_f8*` and `e2e_matmul_rocm_i8*` | PASS | The same DBI mode covers f8 and i8 RDNA4 matmul variants |
+| `e2e_matmul_rdna4_dt_f8E4M3FN_rocm_hip` | PASS | The DT f8 store/readback path executes under DBI without an illegal instruction |
+| `check_rocm_hip_stream_dot*.mlir` and matching `rocm-rocm` variants | PASS | StableHLO dot/dot_bf16/dot_general remain correct under the patch-required DBI mode |
+| `check_rocm_hip_stream_fft_complex.mlir` and `check_rocm-rocm_fft_complex.mlir` | PASS | High-pressure FFT kernels patch successfully when rocJITsu must grow the kernel descriptor's VGPR allocation as a fallback |
 
 A compact WMMA example used in the patch anatomy logs:
 
@@ -439,8 +424,15 @@ compiler variant.
 The native LDS check/trap path uses the following guardrails for compact IREE
 kernels:
 
-- automatic scratch VGPR selection is bounded by the AMDHSA kernel
-  descriptor's allocated VGPR count,
+- automatic scratch VGPR selection first looks for liveness-free registers
+  inside the AMDHSA kernel descriptor's allocated VGPR count,
+- if no inline or local-cave patch can be selected inside that original
+  allocation, rocJITsu may choose liveness-free scratch above the allocation and
+  grow `COMPUTE_PGM_RSRC1.GRANULATED_WORKITEM_VGPR_COUNT` in the kernel
+  descriptor,
+- descriptor growth is fallback-only: if an ordinary in-descriptor candidate is
+  available in the same code object, rocJITsu takes that lower-risk patch
+  instead,
 - injected VCC-preserving compares prefer a free SGPR above the kernel's maximum
   referenced SGPR,
 - local-cave selection is limited to one patch per kernel, avoiding overlapping
@@ -448,8 +440,9 @@ kernels:
 - if a code object has a single `.text` section and no inline or local cave is
   selected, rocJITsu can append a small trampoline cave to `.text` and branch to
   it,
-- plain `ds_load_b64` and compact B64 two-address loads avoid using a duplicate
-  scratch register run that ends exactly at the descriptor allocation edge.
+- plain `ds_load_b64` and compact B64 two-address loads reserve one extra VGPR
+  of headroom when descriptor growth is needed, avoiding the descriptor-edge
+  duplicate-load case that can produce an illegal instruction on `gfx1201`.
 
 The native LDS IREE matrix uses the same "reject if we should have patched but
 could not" guard:
@@ -461,23 +454,15 @@ export RJ_DBI_SC_MAX_PATCHES=4
 export RJ_DBI_SC_REQUIRE_PATCH=1
 ```
 
-The covered test families are:
-
-- `tests/e2e/linalg/check_rocm_hip_narrow_n_matmuls.mlir`
-- `tests/e2e/matmul/*tileandfusewmma*rocm_hip`
-- `tests/e2e/stablehlo_ops/check_rocm_hip_stream_dot.mlir`
-- `tests/e2e/stablehlo_ops/check_rocm_hip_stream_dot_bf16.mlir`
-- `tests/e2e/stablehlo_ops/check_rocm_hip_stream_dot_general.mlir`
-
-The result:
+The broad configured IREE HIP/ROCm e2e inventory passes under that guard:
 
 ```text
-100% tests passed, 0 tests failed out of 10
+100% tests passed, 0 tests failed out of 152
 ```
 
 rocJITsu patches selected compact IREE LDS kernels through inline padding, local
-caves, or appended `.text` caves, and those tests still pass under the HSA tools
-path on native `gfx1201`.
+caves, or appended `.text` caves, and those tests pass under the HSA tools path
+on native `gfx1201`.
 
 ## Current IREE Native-DS Demo Scope
 
@@ -517,7 +502,8 @@ source-level intent is shared/LDS memory. Since final machine code no longer
 carries a clean source-language address-space label, rocJITsu only treats flat
 accesses as LDS candidates when its provenance heuristic classifies them as
 likely group memory. In the default combined scope, these sites are considered
-after native DS instrumentation fails to patch the code object.
+after native DS selection and can use any remaining patch budget when the
+existing DS patch ranges still map into the original code object.
 
 The flat/VFLAT path can patch padded sites and compact likely-group sites
 through reachable local NOP caves, bounded by `RJ_DBI_SC_MAX_PATCHES` and

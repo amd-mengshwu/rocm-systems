@@ -29,6 +29,7 @@ RJ_DIAGNOSTIC_POP
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -107,18 +108,110 @@ namespace kd = rocr::llvm::amdhsa;
   return 64;
 }
 
+[[nodiscard]] uint16_t descriptor_vgpr_allocation_count(const KD &desc, rj_code_arch_t arch) {
+  const uint32_t wavefront_size = descriptor_wavefront_size(arch, desc);
+  const uint32_t granularity = descriptor_vgpr_granularity_for_wavefront(arch, wavefront_size);
+  const uint32_t granulated =
+      AMDHSA_BITS_GET(desc.compute_pgm_rsrc1, kd::COMPUTE_PGM_RSRC1_GRANULATED_WORKITEM_VGPR_COUNT);
+  const uint32_t allocated = (granulated + 1u) * std::max(granularity, 1u);
+  return static_cast<uint16_t>(std::min<uint32_t>(allocated, REGISTER_SET_MAX_VGPRS));
+}
+
 [[nodiscard]] std::optional<uint16_t>
 descriptor_vgpr_allocation_count(std::span<const uint8_t> image, uint64_t descriptor_file_offset,
                                  rj_code_arch_t arch) {
   if (descriptor_file_offset > image.size() || sizeof(KD) > image.size() - descriptor_file_offset)
     return std::nullopt;
   const auto *desc = reinterpret_cast<const KD *>(image.data() + descriptor_file_offset);
-  const uint32_t wavefront_size = descriptor_wavefront_size(arch, *desc);
-  const uint32_t granularity = descriptor_vgpr_granularity_for_wavefront(arch, wavefront_size);
-  const uint32_t granulated = AMDHSA_BITS_GET(desc->compute_pgm_rsrc1,
-                                              kd::COMPUTE_PGM_RSRC1_GRANULATED_WORKITEM_VGPR_COUNT);
-  const uint32_t allocated = (granulated + 1u) * std::max(granularity, 1u);
-  return static_cast<uint16_t>(std::min<uint32_t>(allocated, REGISTER_SET_MAX_VGPRS));
+  return descriptor_vgpr_allocation_count(*desc, arch);
+}
+
+[[nodiscard]] bool grow_descriptor_vgpr_allocation(KD &desc, uint16_t required_count,
+                                                   rj_code_arch_t arch) {
+  if (required_count > REGISTER_SET_MAX_VGPRS)
+    return false;
+  if (required_count <= descriptor_vgpr_allocation_count(desc, arch))
+    return true;
+
+  const uint32_t wavefront_size = descriptor_wavefront_size(arch, desc);
+  const uint32_t granularity =
+      std::max<uint32_t>(descriptor_vgpr_granularity_for_wavefront(arch, wavefront_size), 1u);
+  const uint32_t rounded =
+      ((std::max<uint32_t>(required_count, 1u) + granularity - 1u) / granularity) * granularity;
+  if (rounded > REGISTER_SET_MAX_VGPRS)
+    return false;
+  const uint32_t granulated = rounded / granularity - 1u;
+  AMDHSA_BITS_SET(desc.compute_pgm_rsrc1, kd::COMPUTE_PGM_RSRC1_GRANULATED_WORKITEM_VGPR_COUNT,
+                  granulated);
+  return true;
+}
+
+struct DescriptorVgprGrowth {
+  uint64_t descriptor_file_offset = 0;
+  uint16_t required_count = 0;
+};
+
+[[nodiscard]] std::unordered_map<uint64_t, uint16_t>
+merge_descriptor_vgpr_growths(std::span<const DescriptorVgprGrowth> growths) {
+  std::unordered_map<uint64_t, uint16_t> merged;
+  for (const DescriptorVgprGrowth &growth : growths) {
+    auto [it, inserted] = merged.emplace(growth.descriptor_file_offset, growth.required_count);
+    if (!inserted)
+      it->second = std::max(it->second, growth.required_count);
+  }
+  return merged;
+}
+
+[[nodiscard]] bool
+apply_descriptor_vgpr_growths_to_bytes(std::span<uint8_t> image,
+                                       std::span<const DescriptorVgprGrowth> growths,
+                                       rj_code_arch_t arch, std::vector<std::string> &errors) {
+  for (const auto &[descriptor_file_offset, required_count] :
+       merge_descriptor_vgpr_growths(growths)) {
+    if (descriptor_file_offset > image.size() ||
+        sizeof(KD) > image.size() - descriptor_file_offset) {
+      errors.emplace_back(
+          "DBI SuperCollider LDS check/trap proof descriptor VGPR growth exceeds ELF bytes");
+      return false;
+    }
+    auto *desc = reinterpret_cast<KD *>(image.data() + descriptor_file_offset);
+    if (!grow_descriptor_vgpr_allocation(*desc, required_count, arch)) {
+      errors.emplace_back(
+          "DBI SuperCollider LDS check/trap proof could not grow descriptor VGPR allocation");
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool
+apply_descriptor_vgpr_growths_to_patcher(CodeObjectPatcher &patcher,
+                                         std::span<const uint8_t> original_image,
+                                         std::span<const DescriptorVgprGrowth> growths,
+                                         rj_code_arch_t arch, std::vector<std::string> &errors) {
+  for (const auto &[descriptor_file_offset, required_count] :
+       merge_descriptor_vgpr_growths(growths)) {
+    if (descriptor_file_offset > original_image.size() ||
+        sizeof(KD) > original_image.size() - descriptor_file_offset) {
+      errors.emplace_back(
+          "DBI SuperCollider LDS check/trap proof descriptor VGPR growth exceeds ELF bytes");
+      return false;
+    }
+    KD desc{};
+    std::memcpy(&desc, original_image.data() + descriptor_file_offset, sizeof(desc));
+    if (!grow_descriptor_vgpr_allocation(desc, required_count, arch)) {
+      errors.emplace_back(
+          "DBI SuperCollider LDS check/trap proof could not grow descriptor VGPR allocation");
+      return false;
+    }
+    if (!patcher.patch_kernel_descriptor(
+            descriptor_file_offset, {reinterpret_cast<const uint8_t *>(&desc), sizeof(desc)})) {
+      errors.emplace_back(
+          "DBI SuperCollider LDS check/trap proof could not patch descriptor VGPR allocation");
+      return false;
+    }
+  }
+  return true;
 }
 
 [[nodiscard]] rj_code_arch_t arch_for_target(rj_code_target_id_t target) {
@@ -1387,6 +1480,17 @@ build_ds_load_word0_from_vds_word0(uint32_t word0, uint32_t width_bits, rj_code_
 }
 
 [[nodiscard]] std::optional<uint16_t>
+required_descriptor_vgpr_allocation_for_scratch(const SuperColliderDbiLdsSite &site,
+                                                uint16_t scratch_vgpr, uint16_t required_vgprs) {
+  uint32_t required_count = static_cast<uint32_t>(scratch_vgpr) + required_vgprs;
+  if (needs_scratch_headroom_at_descriptor_edge(site))
+    ++required_count;
+  if (required_count > REGISTER_SET_MAX_VGPRS)
+    return std::nullopt;
+  return static_cast<uint16_t>(required_count);
+}
+
+[[nodiscard]] std::optional<uint16_t>
 find_liveness_scratch_vgpr(const SuperColliderDbiLdsSite &site, const Instruction *inst,
                            const LivenessAnalysis *liveness,
                            std::optional<uint16_t> min_auto_scratch_vgpr,
@@ -2335,12 +2439,14 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
     const SuperColliderDbiLdsSite *site = nullptr;
     const LocalNopCave *local_cave = nullptr;
     uint64_t kernel_entry_text_offset = 0;
+    uint64_t descriptor_file_offset = 0;
     uint64_t appended_cave_text_offset = 0;
     uint16_t scratch_vgpr = 0;
     uint16_t vcc_save_sgpr = 0;
     uint64_t requested_words = 0;
     bool use_local_cave = false;
     bool use_appended_cave = false;
+    std::optional<uint16_t> required_vgpr_allocation_count;
   };
 
   std::vector<LdsCheckTrapCandidate> inline_candidates;
@@ -2406,8 +2512,19 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
       auto scratch =
           choose_scratch_vgpr(site, options, site_inst, liveness.get(), min_auto_scratch_vgpr,
                               max_auto_scratch_vgpr, scratch_vgprs);
+      if (!scratch && !options.scratch_vgpr && max_auto_scratch_vgpr) {
+        scratch = choose_scratch_vgpr(site, options, site_inst, liveness.get(),
+                                      min_auto_scratch_vgpr, std::nullopt, scratch_vgprs);
+      }
       if (!scratch)
         continue;
+      auto required_allocation =
+          required_descriptor_vgpr_allocation_for_scratch(site, *scratch, scratch_vgprs);
+      if (!required_allocation)
+        continue;
+      std::optional<uint16_t> descriptor_growth;
+      if (max_auto_scratch_vgpr && *required_allocation > *max_auto_scratch_vgpr)
+        descriptor_growth = *required_allocation;
       auto vcc_save = choose_vcc_save_sgpr(site_inst, liveness.get(), min_preferred_vcc_save_sgpr);
       if (!vcc_save)
         continue;
@@ -2424,9 +2541,18 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
           if (compute_sopp_branch_simm16(site.text_offset, appended_cave_offset) &&
               compute_sopp_branch_simm16(return_branch_pc, site.text_offset + site.size)) {
             ++append_cave_reachable_candidate_count;
-            appended_cave_candidates.push_back({&site, nullptr, kernel.entry_text_offset,
-                                                appended_cave_offset, *scratch, *vcc_save,
-                                                requested_words, false, true});
+            LdsCheckTrapCandidate candidate{&site,
+                                            nullptr,
+                                            kernel.entry_text_offset,
+                                            kernel.descriptor_file_offset,
+                                            appended_cave_offset,
+                                            *scratch,
+                                            *vcc_save,
+                                            requested_words,
+                                            false,
+                                            true,
+                                            descriptor_growth};
+            appended_cave_candidates.push_back(candidate);
           }
         }
         const std::vector<const LocalNopCave *> caves =
@@ -2434,18 +2560,42 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
         if (!caves.empty())
           ++local_cave_reachable_candidate_count;
         for (const LocalNopCave *cave : caves) {
-          local_cave_candidates.push_back({&site, cave, kernel.entry_text_offset, 0, *scratch,
-                                           *vcc_save, requested_words, true, false});
+          LdsCheckTrapCandidate candidate{&site,
+                                          cave,
+                                          kernel.entry_text_offset,
+                                          kernel.descriptor_file_offset,
+                                          0,
+                                          *scratch,
+                                          *vcc_save,
+                                          requested_words,
+                                          true,
+                                          false,
+                                          descriptor_growth};
+          local_cave_candidates.push_back(candidate);
         }
       }
       if (observed_padding < padding_words)
         continue;
-      inline_candidates.push_back({&site, nullptr, kernel.entry_text_offset, 0, *scratch, *vcc_save,
-                                   requested_words, false, false});
+      LdsCheckTrapCandidate candidate{&site,
+                                      nullptr,
+                                      kernel.entry_text_offset,
+                                      kernel.descriptor_file_offset,
+                                      0,
+                                      *scratch,
+                                      *vcc_save,
+                                      requested_words,
+                                      false,
+                                      false,
+                                      descriptor_growth};
+      inline_candidates.push_back(candidate);
     }
   }
 
   auto candidate_order = [](const LdsCheckTrapCandidate &lhs, const LdsCheckTrapCandidate &rhs) {
+    const bool lhs_grows_descriptor = lhs.required_vgpr_allocation_count.has_value();
+    const bool rhs_grows_descriptor = rhs.required_vgpr_allocation_count.has_value();
+    if (lhs_grows_descriptor != rhs_grows_descriptor)
+      return !lhs_grows_descriptor;
     if (lhs.site->file_offset != rhs.site->file_offset)
       return lhs.site->file_offset < rhs.site->file_offset;
     if (lhs.use_local_cave != rhs.use_local_cave)
@@ -2463,8 +2613,11 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
   selected_candidates.reserve(max_patches);
   std::vector<ByteRange> reserved_ranges;
   std::unordered_set<uint64_t> selected_local_cave_kernels;
-  auto try_select_candidate = [&](const LdsCheckTrapCandidate &candidate) {
+  auto try_select_candidate = [&](const LdsCheckTrapCandidate &candidate,
+                                  bool allow_descriptor_growth) {
     if (selected_candidates.size() >= max_patches)
+      return;
+    if (!allow_descriptor_growth && candidate.required_vgpr_allocation_count)
       return;
     const SuperColliderDbiLdsSite &site = *candidate.site;
     if (candidate.use_local_cave) {
@@ -2494,9 +2647,15 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
   };
 
   for (const LdsCheckTrapCandidate &candidate : inline_candidates)
-    try_select_candidate(candidate);
+    try_select_candidate(candidate, false);
   for (const LdsCheckTrapCandidate &candidate : local_cave_candidates)
-    try_select_candidate(candidate);
+    try_select_candidate(candidate, false);
+  if (selected_candidates.empty()) {
+    for (const LdsCheckTrapCandidate &candidate : inline_candidates)
+      try_select_candidate(candidate, true);
+    for (const LdsCheckTrapCandidate &candidate : local_cave_candidates)
+      try_select_candidate(candidate, true);
+  }
   if (selected_candidates.empty()) {
     for (const LdsCheckTrapCandidate &candidate : appended_cave_candidates) {
       const SuperColliderDbiLdsSite &site = *candidate.site;
@@ -2540,6 +2699,8 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
     SuperColliderDbiPatchInfo info;
     bool use_local_cave = false;
     bool use_appended_cave = false;
+    uint64_t descriptor_file_offset = 0;
+    std::optional<uint16_t> required_vgpr_allocation_count;
   };
 
   std::vector<PlannedLdsCheckTrapPatch> planned_patches;
@@ -2558,6 +2719,8 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
     planned.words = std::move(*words);
     planned.use_local_cave = candidate.use_local_cave;
     planned.use_appended_cave = candidate.use_appended_cave;
+    planned.descriptor_file_offset = candidate.descriptor_file_offset;
+    planned.required_vgpr_allocation_count = candidate.required_vgpr_allocation_count;
     planned.info.kind =
         lds_check_trap_patch_kind(site, candidate.use_local_cave || candidate.use_appended_cave);
     planned.info.anchor_offset = site.text_offset;
@@ -2632,8 +2795,20 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
       std::ranges::any_of(planned_patches, [](const PlannedLdsCheckTrapPatch &patch) {
         return patch.use_appended_cave;
       });
+  std::vector<DescriptorVgprGrowth> descriptor_growths;
+  for (const PlannedLdsCheckTrapPatch &planned : planned_patches) {
+    if (planned.required_vgpr_allocation_count) {
+      descriptor_growths.push_back(
+          {planned.descriptor_file_offset, *planned.required_vgpr_allocation_count});
+    }
+  }
   if (uses_appended_cave) {
     CodeObjectPatcher patcher(code_object);
+    if (!apply_descriptor_vgpr_growths_to_patcher(patcher, original_bytes, descriptor_growths, arch,
+                                                  result.errors)) {
+      result.patches.clear();
+      return;
+    }
     std::span<const uint8_t> text_bytes = patcher.text_bytes();
     std::vector<uint8_t> new_text(text_bytes.begin(), text_bytes.end());
     for (const PlannedLdsCheckTrapPatch &planned : planned_patches) {
@@ -2666,6 +2841,11 @@ void try_apply_lds_load_check_trap_patch(const AmdGpuCodeObject &code_object, rj
 
   if (result.elf_bytes.empty())
     result.elf_bytes.assign(original_bytes.begin(), original_bytes.end());
+  if (!apply_descriptor_vgpr_growths_to_bytes(result.elf_bytes, descriptor_growths, arch,
+                                              result.errors)) {
+    result.patches.clear();
+    return;
+  }
   for (const PlannedLdsCheckTrapPatch &planned : planned_patches) {
     const SuperColliderDbiLdsSite &site = *planned.site;
     if (planned.use_local_cave) {

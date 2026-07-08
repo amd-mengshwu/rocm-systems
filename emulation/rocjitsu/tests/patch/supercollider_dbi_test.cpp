@@ -2113,7 +2113,7 @@ TEST(SuperColliderDbi, ProbeLdsCheckTrapModeAutoScratchUsesLiveness) {
   EXPECT_EQ(rewritten_words, expected_words);
 }
 
-TEST(SuperColliderDbi, ProbeLdsCheckTrapModeAutoScratchStaysWithinDescriptorVgprs) {
+TEST(SuperColliderDbi, ProbeLdsCheckTrapModeCanGrowDescriptorForAutoScratch) {
   const std::array<uint32_t, 14> text_words = {
       0xD8D80000u,
       0x01000002u, // ds_load_b32 v1, v2
@@ -2133,23 +2133,27 @@ TEST(SuperColliderDbi, ProbeLdsCheckTrapModeAutoScratchStaysWithinDescriptorVgpr
   const auto result = try_patch_supercollider_dbi(bytes, options);
 
   ASSERT_TRUE(result.errors.empty()) << (result.errors.empty() ? "" : result.errors.front());
-  EXPECT_FALSE(result.modified);
-  EXPECT_TRUE(result.elf_bytes.empty());
-  ASSERT_FALSE(result.warnings.empty());
+  ASSERT_TRUE(result.warnings.empty()) << (result.warnings.empty() ? "" : result.warnings.front());
+  EXPECT_TRUE(result.modified);
+  ASSERT_EQ(result.patches.size(), 1u);
+  EXPECT_EQ(result.patches.front().kind, SuperColliderDbiPatchKind::InlineLdsLoadCheckTrap);
+  ASSERT_TRUE(result.patches.front().scratch_vgpr);
+  EXPECT_EQ(*result.patches.front().scratch_vgpr, 4u);
+  ASSERT_EQ(result.elf_bytes.size(), bytes.size());
 
-  bool saw_descriptor_bound = false;
-  for (const std::string &warning : result.warnings)
-    saw_descriptor_bound |= warning.find("supported_candidates=2") != std::string::npos &&
-                            warning.find("scratchable_candidates=0") != std::string::npos;
-  EXPECT_TRUE(saw_descriptor_bound);
+  const uint64_t descriptor_offset = 0x100 + text_words.size() * sizeof(uint32_t);
+  KD descriptor{};
+  std::memcpy(&descriptor, result.elf_bytes.data() + descriptor_offset, sizeof(descriptor));
+  const uint32_t granulated = AMDHSA_BITS_GET(descriptor.compute_pgm_rsrc1,
+                                              kd::COMPUTE_PGM_RSRC1_GRANULATED_WORKITEM_VGPR_COUNT);
+  EXPECT_EQ(granulated, 1u);
 }
 
-TEST(SuperColliderDbi, ProbeLdsCheckTrapModeSkipsDescriptorEdgeB64LoadScratch) {
-  const std::array<uint32_t, 5> text_words = {
+TEST(SuperColliderDbi, ProbeLdsCheckTrapModeCanGrowDescriptorForB64ScratchHeadroom) {
+  const std::array<uint32_t, 4> text_words = {
       0xD9D80000u,
       0x01000009u, // ds_load_b64 v[1:2], v9
-      0xD8D80000u,
-      0x0D000002u, // ds_load_b32 v13, v2
+      build_v_mov_b32_e32(13, vector_source_vgpr(13), ROCJITSU_CODE_ARCH_RDNA4),
       0xBFB00000u, // s_endpgm
   };
   const uint32_t sixteen_vgprs_granulated = 3;
@@ -2167,11 +2171,69 @@ TEST(SuperColliderDbi, ProbeLdsCheckTrapModeSkipsDescriptorEdgeB64LoadScratch) {
   EXPECT_TRUE(result.modified);
   ASSERT_EQ(result.patches.size(), 1u);
   EXPECT_EQ(result.patches.front().kind, SuperColliderDbiPatchKind::LocalCaveLdsLoadCheckTrap);
-  EXPECT_EQ(result.patches.front().anchor_offset, 8u);
+  EXPECT_EQ(result.patches.front().anchor_offset, 0u);
   EXPECT_EQ(result.patches.front().trampoline_offset, text_words.size() * sizeof(uint32_t));
   EXPECT_EQ(result.patches.front().original_size, 8u);
   ASSERT_TRUE(result.patches.front().scratch_vgpr);
   EXPECT_EQ(*result.patches.front().scratch_vgpr, 14u);
+  EXPECT_GT(result.elf_bytes.size(), bytes.size());
+
+  AmdGpuCodeObject patched(result.elf_bytes.data(), result.elf_bytes.size());
+  ASSERT_TRUE(patched.is_valid());
+  ASSERT_EQ(patched.kernels().size(), 1u);
+  KD descriptor{};
+  std::memcpy(&descriptor,
+              result.elf_bytes.data() + patched.kernels().front().descriptor_file_offset,
+              sizeof(descriptor));
+  const uint32_t granulated = AMDHSA_BITS_GET(descriptor.compute_pgm_rsrc1,
+                                              kd::COMPUTE_PGM_RSRC1_GRANULATED_WORKITEM_VGPR_COUNT);
+  EXPECT_EQ(granulated, 4u);
+}
+
+TEST(SuperColliderDbi, ProbeLdsCheckTrapModePrefersDescriptorCoveredCandidate) {
+  const std::array<uint32_t, 15> text_words = {
+      0xD9D80000u,
+      0x01000009u, // ds_load_b64 v[1:2], v9; would need descriptor growth
+      build_v_mov_b32_e32(13, vector_source_vgpr(13), ROCJITSU_CODE_ARCH_RDNA4),
+      0xD8D80000u,
+      0x01000002u, // ds_load_b32 v1, v2; can use descriptor-covered v14
+      0xBF800000u,
+      0xBF800000u,
+      0xBF800000u,
+      0xBF800000u,
+      0xBF800000u,
+      0xBF800000u,
+      0xBF800000u,
+      0xBF800000u,
+      0xBF800000u,
+      0xBFB00000u, // s_endpgm
+  };
+  const uint32_t sixteen_vgprs_granulated = 3;
+  const std::vector<uint8_t> bytes =
+      make_rdna4_lds_code_object(text_words, "lds_probe", sixteen_vgprs_granulated);
+  SuperColliderDbiOptions options;
+  options.enabled = true;
+  options.probe_lds_check_trap = true;
+  options.delay_nops = 1;
+
+  const auto result = try_patch_supercollider_dbi(bytes, options);
+
+  ASSERT_TRUE(result.errors.empty()) << (result.errors.empty() ? "" : result.errors.front());
+  ASSERT_TRUE(result.warnings.empty()) << (result.warnings.empty() ? "" : result.warnings.front());
+  EXPECT_TRUE(result.modified);
+  ASSERT_EQ(result.patches.size(), 1u);
+  EXPECT_EQ(result.patches.front().kind, SuperColliderDbiPatchKind::InlineLdsLoadCheckTrap);
+  EXPECT_EQ(result.patches.front().anchor_offset, 3u * sizeof(uint32_t));
+  ASSERT_TRUE(result.patches.front().scratch_vgpr);
+  EXPECT_EQ(*result.patches.front().scratch_vgpr, 14u);
+  ASSERT_EQ(result.elf_bytes.size(), bytes.size());
+
+  const uint64_t descriptor_offset = 0x100 + text_words.size() * sizeof(uint32_t);
+  KD descriptor{};
+  std::memcpy(&descriptor, result.elf_bytes.data() + descriptor_offset, sizeof(descriptor));
+  const uint32_t granulated = AMDHSA_BITS_GET(descriptor.compute_pgm_rsrc1,
+                                              kd::COMPUTE_PGM_RSRC1_GRANULATED_WORKITEM_VGPR_COUNT);
+  EXPECT_EQ(granulated, sixteen_vgprs_granulated);
 }
 
 TEST(SuperColliderDbi, ProbeLdsCheckTrapModeUsesReachableUncoveredNopCave) {

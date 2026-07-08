@@ -125,8 +125,9 @@ Implementation shape:
 
 1. Run normal inventory/preflight.
 2. Run the primary proof/instrumentation mode. The default scope is `all`: try
-   native LDS check/trap first, and if that pass does not modify the code
-   object, try the likely-group flat/VFLAT check/trap path.
+   native LDS check/trap first, then let likely-group flat/VFLAT instrumentation
+   use any remaining patch budget when the existing patch ranges still map into
+   the original code object.
 3. Decode kernel and local-function ranges again.
 4. Select the Nth decoded 4-byte `s_barrier*` instruction.
 5. Rewrite that single instruction to `s_nop 0` in the current output ELF
@@ -193,9 +194,9 @@ conservative: native DS is considered first, candidates are considered in file
 order within each pass, and selected inline ranges, anchor rewrites, and local
 NOP caves may not overlap. Flat/VFLAT patching starts from the already-modified
 byte vector when a prior DS pass succeeded, as long as the prior patch ranges
-still map into the original code object. If an earlier DS patch grew `.text`,
-flat composition skips that code object rather than patching with stale file
-offset assumptions.
+still map into the original code object. If the DS patch grew `.text`, flat
+composition skips that code object rather than patching with stale file offset
+assumptions.
 
 For a load:
 
@@ -235,25 +236,33 @@ s_mov_b32 vcc_lo, free_sgpr
 
 The `v_cmp_ne_u32` instructions write VCC, so the patcher saves and restores
 `vcc_lo` in a liveness-selected SGPR around the injected compare/trap sequence.
-This matters for compact IREE kernels: the WMMA kernel that first exposed this
-path had live VCC state used by later scalar branches, and clobbering VCC caused
-wrong output even when the duplicated LDS read matched.
+This matters for compact IREE kernels: the representative WMMA kernel has live
+VCC state used by later scalar branches, and clobbering VCC causes wrong output
+even when the duplicated LDS read matches.
 
 Automatic scratch VGPR selection is deliberately conservative. The patcher
-starts above the maximum VGPR referenced by the kernel, caps the chosen run by
-the AMDHSA kernel descriptor's allocated VGPR count, and does not grow the
-descriptor behind the loader's back. For injected compares, it similarly prefers
-a free SGPR above the kernel's maximum referenced SGPR before falling back to
-lower liveness-proven SGPRs.
+starts above the maximum VGPR referenced by the kernel and first tries to keep
+the chosen run inside the AMDHSA kernel descriptor's allocated VGPR count. For
+injected compares, it similarly prefers a free SGPR above the kernel's maximum
+referenced SGPR before falling back to lower liveness-proven SGPRs.
 
-One RDNA4 edge case is intentionally skipped: when a plain `ds_load_b64` or a
-compact B64 two-address load would use a duplicate scratch run ending exactly at
-the descriptor's allocated VGPR boundary, the patcher declines that site and
-continues searching. That rule came from StableHLO stream-dot debugging, where a
-descriptor-edge `v14:v15` duplicate B64 load was legal-looking but produced an
-illegal-instruction failure on the real `gfx1201` path. A later supported LDS
-site in the same code object can still be patched, so this is a candidate
-selection guard rather than a whole-code-object skip.
+If no inline or local-cave native DS patch can be selected inside the original
+VGPR allocation, the patcher has a fallback: choose a liveness-free scratch run
+above the current allocation and grow
+`COMPUTE_PGM_RSRC1.GRANULATED_WORKITEM_VGPR_COUNT` in the AMDHSA kernel
+descriptor. This is intentionally fallback-only. When the same code object has
+an ordinary in-descriptor candidate, rocJITsu uses that lower-risk patch and
+does not perturb the descriptor.
+
+The descriptor-growth fallback also handles one RDNA4 B64 edge case. A plain
+`ds_load_b64` or compact B64 two-address load needs one extra VGPR of headroom
+when the duplicate scratch run would otherwise end exactly at the descriptor's
+allocated VGPR boundary. That rule came from StableHLO stream-dot debugging,
+where a descriptor-edge `v14:v15` duplicate B64 load was legal-looking but
+produced an illegal-instruction failure on the real `gfx1201` path. A later
+supported LDS site in the same code object can still be patched without
+descriptor growth; only code objects with no ordinary candidate use the growth
+fallback.
 
 For local-cave native DS patches, the original 8-byte DS instruction is replaced
 with:
@@ -270,8 +279,8 @@ The cave body contains the original DS access, the check sequence, and an
 If no inline or local-cave placement is selected and the code object has a
 single `.text` section, the patcher can append a cave to `.text`, branch to the
 new code, then branch back to the original fallthrough. This is the placement
-that unblocked compact IREE TileAndFuse kernels with many supported LDS sites
-but no large enough reachable uncovered local NOP cave.
+used for compact IREE TileAndFuse kernels with many supported LDS sites but no
+large enough reachable uncovered local NOP cave.
 
 The two-address native DS loads need special width accounting. For example,
 `ds_load_2addr_b64` performs two 64-bit LDS loads in one 8-byte instruction, so
@@ -279,17 +288,18 @@ the destination spans four VGPR dwords and the duplicate/check sequence needs
 four scratch VGPRs and four comparisons. The patcher intentionally does not
 treat that as a plain two-dword `b64` load.
 
-This path is unit-proven for b32/b64/b128 padded sites, native-DS local caves,
-appended `.text` caves, and `ds_load_2addr_b64` local caves. It is live-proven
-on hand-shaped padded tests and on the IREE ROCm/HIP e2e demo set. The focused
-WMMA example patches:
+This path is unit-proven for b32/b64/b128 padded sites, d16 loads, native-DS
+local caves, appended `.text` caves, descriptor VGPR growth, and
+`ds_load_2addr_b64` local caves. It is live-proven on hand-shaped padded tests
+and on the configured IREE HIP/ROCm e2e inventory: 152/152 tests pass with
+`RJ_DBI_SC_REQUIRE_PATCH=1`. The focused WMMA example patches:
 
 ```text
 kind=local-cave-lds-load-check-trap anchor=0x3cc trampoline=0x810 original_size=8 scratch_vgpr=104
 ```
 
-Ordinary hip-moi matmul code did not provide the native `ds_*` sites we
-initially expected, which is why the flat path below is still important.
+Ordinary hip-moi matmul code does not provide the native `ds_*` sites needed by
+the native-DS path, which is why the flat path below is important.
 
 ## Why Flat/VFLAT Is In Scope
 
@@ -351,12 +361,11 @@ several AMDGPU address spaces.
 On AMDGPU, `flat_*` does not mean "global only." It is the generic memory path.
 An address derived from the shared/LDS aperture can still reach LDS through a
 flat instruction. The signal we used to recover this was the pointer
-construction around `src_shared_base`: Session 23 found that the likely
-group/LDS helper-function flat sites are reached by tracking pointer halves
-from `src_shared_base` through vector add/carry address construction. The
-disassembly/log evidence lines are therefore consistent with "LDS accessed
-through a flat pointer," not with "the compiler put `__shared__` storage in
-global memory."
+construction around `src_shared_base`: the likely group/LDS helper-function flat
+sites are reached by tracking pointer halves from `src_shared_base` through
+vector add/carry address construction. The disassembly/log evidence lines are
+therefore consistent with "LDS accessed through a flat pointer," not with "the
+compiler put `__shared__` storage in global memory."
 
 A useful mental model:
 

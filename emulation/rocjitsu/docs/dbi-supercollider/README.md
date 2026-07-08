@@ -16,8 +16,8 @@ device-visible address.
 - [DESIGN.md](DESIGN.md): technical design and comparison with the
   SuperCollider paper, including flat/generic access handling.
 - [USAGE.md](USAGE.md): commands, environment variables, and test runbook.
-- [JAKUB-DEMO.md](JAKUB-DEMO.md): compact evidence packet from the one-hour
-  Jakub demo pass.
+- [JAKUB-DEMO.md](JAKUB-DEMO.md): compact IREE-focused evidence packet for
+  Jakub.
 
 ## Current Demo Claim
 
@@ -40,12 +40,16 @@ the focused IREE WMMA ROCm/HIP e2e test has logged a native-DS patch:
 kind=local-cave-lds-load-check-trap anchor=0x3cc trampoline=0x810 original_size=8 scratch_vgpr=104
 ```
 
-and passed. Broader IREE coverage also passes under the same patch-required
-configuration:
+and passed. The broader configured IREE HIP/ROCm e2e inventory also passes
+under the same patch-required configuration:
 
-- 13/13 for the full RDNA4 ROCm/HIP matmul e2e set exposed by this build,
-- 10/10 for a focused linalg/matmul/StableHLO slice covering narrow matmul,
-  f16/f8/i8 TileAndFuse variants, DT f8, and StableHLO stream-dot variants.
+```text
+100% tests passed, 0 tests failed out of 152
+```
+
+That inventory covers `encoding`, `linalg`, `math`, `matmul`,
+`rocm_specific`, and `stablehlo_ops` tests, including the RDNA4 matmul e2e set,
+TileAndFuse variants, WMMA, StableHLO dot, and FFT cases.
 
 The same focused WMMA control passes with `RJ_DBI_SC_DELAY_MODE=sleep` and with
 `RJ_DBI_SC_DELAY_MODE=sleep_var`.
@@ -63,16 +67,23 @@ The current check/trap proof paths cover:
 - padded native LDS `ds_store_b{32,64,128}`,
 - compact native LDS sites through a local NOP cave when one is reachable, or an
   appended `.text` cave when that is the safe available placement,
+- compact native LDS sites that need scratch above the original VGPR allocation,
+  by growing the AMDHSA kernel descriptor as a fallback,
 - likely group/LDS `flat_load_b{32,64,128}`,
 - likely group/LDS `flat_store_b{32,64,128}`.
 
 Native DS sites can use enough trailing `s_nop 0` padding for an in-place
 sequence, or reachable local NOP caves for compact sites. Flat/VFLAT sites use
 the same total `RJ_DBI_SC_MAX_PATCHES` budget for non-overlapping padded sites
-and reachable local NOP caves, and can now compose after native DS patches when
+and reachable local NOP caves, and can compose after native DS patches when
 patch ranges remain mappable in the original code object. Ordinary hip-moi
 matmul helper code has shown likely group/LDS flat sites rather than native
 `ds_*`, which is why the flat path matters.
+
+Descriptor VGPR growth is deliberately fallback-only: rocJITsu first prefers
+scratch registers already covered by the kernel descriptor, and only grows the
+descriptor when no ordinary native-DS patch can be selected for that code
+object.
 
 See [DESIGN.md](DESIGN.md) for the exact instruction policy and the current
 address-space provenance heuristic.
@@ -88,7 +99,7 @@ address-space provenance heuristic.
   ranges and reachable local NOP caves.
 - Default reporting is still `s_trap`, but `RJ_DBI_SC_REPORT_BUFFER=0x...`
   enables a simple marker-buffer prototype. On mismatch, the injected sequence
-  writes one 32-bit marker word and continues. The rocJITsu HIP smoke tests now
+  writes one 32-bit marker word and continues. The rocJITsu HIP smoke tests
   allocate such a report word and verify both clean and racy outcomes.
 - Current flat provenance is conservative and heuristic. `MaybeGroup` is useful
   for MVP bring-up, but it is not the same as a formal proof that an arbitrary
