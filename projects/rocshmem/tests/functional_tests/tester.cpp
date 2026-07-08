@@ -101,6 +101,7 @@ Tester::Tester(TesterArguments args) : args(args) {
     case WAVEGetNBITestType:
     case WAVEPutTestType:
     case WAVEPutNBITestType:
+    case FcollectWaveTestType:
       num_timers = args.num_wgs * num_warps;
       break;
     default:
