@@ -4,9 +4,11 @@
 
 rocprofiler_activate_clang_tidy()
 
-set(TOOL_HEADERS config.hpp execution_profile.hpp helper.hpp stream_stack.hpp)
+set(TOOL_HEADERS config.hpp execution_profile.hpp helper.hpp kernel_filter_range.hpp
+                 kernel_iteration_filter.hpp stream_stack.hpp)
 
-set(TOOL_SOURCES config.cpp main.c tool.cpp stream_stack.cpp)
+set(TOOL_SOURCES config.cpp kernel_filter_range.cpp kernel_iteration_filter.cpp main.c
+                 tool.cpp stream_stack.cpp)
 
 add_library(rocprofiler-sdk-tool SHARED)
 target_sources(rocprofiler-sdk-tool PRIVATE ${TOOL_SOURCES} ${TOOL_HEADERS})
