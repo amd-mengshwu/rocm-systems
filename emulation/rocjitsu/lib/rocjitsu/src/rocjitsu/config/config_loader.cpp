@@ -683,17 +683,7 @@ LoadedConfig build_from_fb(const rocjitsu::fb::SimulationConfig *fb_config) {
     result.device = kfd_device_from_fb(fb_config->vm()->gpu()->device());
   }
 
-  if (auto *guest = fb_config->dbt_guest()) {
-    result.dbt_guest.enabled = guest->enabled();
-    if (guest->guest_isa())
-      result.dbt_guest.guest_isa = guest->guest_isa()->str();
-    if (guest->host_isa())
-      result.dbt_guest.host_isa = guest->host_isa()->str();
-    result.dbt_guest.host_gpu_id = guest->host_gpu_id();
-    result.dbt_guest.log_level = guest->log_level();
-    result.dbt_guest.signal_backtrace = guest->signal_backtrace();
-    result.dbt_guest.guest_device = kfd_device_from_fb(guest->guest_device());
-  }
+  result.dbt_guest = dbt_guest_from_fb(fb_config->dbt_guest());
 
   if (fb_config->vm() && fb_config->vm()->gpu())
     result.num_gpus = std::max(1u, fb_config->vm()->gpu()->num_gpus());
