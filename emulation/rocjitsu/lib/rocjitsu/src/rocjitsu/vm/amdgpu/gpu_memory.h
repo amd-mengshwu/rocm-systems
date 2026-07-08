@@ -193,7 +193,7 @@ public:
           std::min<uint32_t>(size - copied, static_cast<uint32_t>(PAGE_SIZE - page_offset));
       if (auto *p = translate(ea, vmid)) {
         std::memcpy(dst + copied, p + page_offset, chunk);
-      } else {
+      } else if (vmid <= 0 || !read_client_memory(ea, dst + copied, chunk, vmid)) {
         SparseMemory::read_block(ea, dst + copied, chunk);
       }
       copied += chunk;
@@ -255,7 +255,7 @@ public:
           std::min<uint32_t>(size - copied, static_cast<uint32_t>(PAGE_SIZE - page_offset));
       if (auto *p = translate(ea, vmid)) {
         std::memcpy(p + page_offset, src + copied, chunk);
-      } else {
+      } else if (vmid <= 0 || !write_client_memory(ea, src + copied, chunk, vmid)) {
         SparseMemory::write_block(ea, src + copied, chunk);
       }
       copied += chunk;

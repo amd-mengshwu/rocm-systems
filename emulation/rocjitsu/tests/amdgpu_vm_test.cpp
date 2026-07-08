@@ -25,15 +25,21 @@ RJ_DIAGNOSTIC_POP
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <new>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -43,6 +49,24 @@ constexpr uint32_t SOPP_S_NOP = 0xBF800000;
 constexpr uint32_t SOPP_S_ENDPGM = 0xBF810000;
 
 using namespace rocjitsu;
+
+uint64_t write_kernel_image(amdgpu::GpuMemory *mem, uint64_t addr, const void *code,
+                            size_t code_size, uint32_t sgprs = 104, uint32_t vgprs = 256,
+                            uint32_t user_sgprs = 2) {
+  using namespace rocr::llvm::amdhsa;
+  kernel_descriptor_t kd{};
+  kd.kernel_code_entry_byte_offset = sizeof(kernel_descriptor_t);
+  AMDHSA_BITS_SET(kd.compute_pgm_rsrc1, COMPUTE_PGM_RSRC1_GRANULATED_WORKITEM_VGPR_COUNT,
+                  ((vgprs / 8) - 1));
+  AMDHSA_BITS_SET(kd.compute_pgm_rsrc1, COMPUTE_PGM_RSRC1_GRANULATED_WAVEFRONT_SGPR_COUNT,
+                  ((sgprs / 8) - 1));
+  AMDHSA_BITS_SET(kd.compute_pgm_rsrc2, COMPUTE_PGM_RSRC2_USER_SGPR_COUNT, user_sgprs);
+
+  mem->load_image(reinterpret_cast<const uint8_t *>(&kd), sizeof(kd), addr);
+  mem->load_image(static_cast<const uint8_t *>(code), code_size,
+                  addr + sizeof(kernel_descriptor_t));
+  return addr;
+}
 
 struct VmFixture {
   std::unique_ptr<simdojo::SimulationEngine> engine;
@@ -102,25 +126,37 @@ struct VmFixture {
   /// Returns the kernel_object address.
   uint64_t write_kernel(uint64_t addr, const void *code, size_t code_size, uint32_t sgprs = 104,
                         uint32_t vgprs = 256, uint32_t user_sgprs = 2) {
-    using namespace rocr::llvm::amdhsa;
-    kernel_descriptor_t kd{};
-    kd.kernel_code_entry_byte_offset = sizeof(kernel_descriptor_t);
-    AMDHSA_BITS_SET(kd.compute_pgm_rsrc1, COMPUTE_PGM_RSRC1_GRANULATED_WORKITEM_VGPR_COUNT,
-                    ((vgprs / 8) - 1));
-    AMDHSA_BITS_SET(kd.compute_pgm_rsrc1, COMPUTE_PGM_RSRC1_GRANULATED_WAVEFRONT_SGPR_COUNT,
-                    ((sgprs / 8) - 1));
-    AMDHSA_BITS_SET(kd.compute_pgm_rsrc2, COMPUTE_PGM_RSRC2_USER_SGPR_COUNT, user_sgprs);
-
-    mem()->load_image(reinterpret_cast<const uint8_t *>(&kd), sizeof(kd), addr);
-    mem()->load_image(static_cast<const uint8_t *>(code), code_size,
-                      addr + sizeof(kernel_descriptor_t));
-    return addr;
+    return write_kernel_image(mem(), addr, code, code_size, sgprs, vgprs, user_sgprs);
   }
 };
 
 class NonSerialHookPluginGroup final : public ExecutionPluginGroup {
 public:
   bool requires_serial_execution() const override { return false; }
+};
+
+class WorkgroupPlacementPlugin final : public ExecutionPlugin {
+public:
+  WorkgroupPlacementPlugin() : ExecutionPlugin("workgroup_placement") {}
+
+  void onAmdgpuWorkgroupDispatched(uint32_t /*dispatch_id*/, uint32_t /*wg_id*/,
+                                   uint32_t /*physical_vgpr_count*/, uint32_t /*sgpr_count*/,
+                                   std::span<amdgpu::Wavefront *> wavefronts) override {
+    if (!wavefronts.empty())
+      cu_paths.insert(wavefronts.front()->cu().full_path());
+  }
+
+  void onAmdgpuWorkgroupCompleted(uint32_t /*dispatch_id*/, uint32_t /*wg_id*/) override {
+    ++completed_workgroups;
+  }
+
+  bool saw_xcd(std::string_view xcd_name) const {
+    return std::any_of(cu_paths.begin(), cu_paths.end(),
+                       [&](const auto &path) { return path.find(xcd_name) != std::string::npos; });
+  }
+
+  std::set<std::string> cu_paths;
+  uint32_t completed_workgroups = 0;
 };
 
 enum class SubmitTrigger { DispatchBegin, AfterInstruction };
@@ -317,6 +353,47 @@ TEST(GpuMemoryTest, RegisteredVmidPassthroughMissRespectsUserSpaceLimit) {
   EXPECT_EQ(memory.resolve_host_ptr(kUserSpaceLimit + KfdProcess::kPageSize + 0x123, kPid),
             nullptr);
   EXPECT_EQ(memory.resolve_host_ptr(0x4000, kPid), reinterpret_cast<uint8_t *>(0x4000));
+}
+
+TEST(GpuMemoryTest, RegisteredVmidBlockMissUsesClientMemory) {
+  amdgpu::GpuMemory memory("memory");
+  constexpr uint32_t kPid = 7;
+  constexpr size_t kMappingSize = KfdProcess::kPageSize * 2;
+
+  void *raw_mapping =
+      mmap(nullptr, kMappingSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(raw_mapping, MAP_FAILED);
+  struct Mapping {
+    uint8_t *data = nullptr;
+    size_t size = 0;
+    ~Mapping() {
+      if (data)
+        munmap(data, size);
+    }
+  } mapping{static_cast<uint8_t *>(raw_mapping), kMappingSize};
+
+  for (size_t i = 0; i < kMappingSize; ++i)
+    mapping.data[i] = static_cast<uint8_t>((i * 17 + 3) & 0xff);
+
+  KfdProcess process(kPid);
+  memory.register_process(kPid, &process.page_table_, &process.page_table_mutex_,
+                          &process.page_table_generation_);
+  memory.set_process_client_pid(kPid, getpid());
+
+  constexpr size_t kAccessOffset = KfdProcess::kPageSize - 8;
+  constexpr size_t kAccessSize = 32;
+  const uint64_t addr = reinterpret_cast<uint64_t>(mapping.data + kAccessOffset);
+
+  std::array<uint8_t, kAccessSize> actual{};
+  memory.read_block(addr, actual.data(), actual.size(), kPid);
+  EXPECT_TRUE(std::equal(actual.begin(), actual.end(), mapping.data + kAccessOffset));
+
+  std::array<uint8_t, kAccessSize> replacement{};
+  for (size_t i = 0; i < replacement.size(); ++i)
+    replacement[i] = static_cast<uint8_t>(0xa0 + i);
+
+  memory.write_block(addr, replacement.data(), replacement.size(), kPid);
+  EXPECT_TRUE(std::equal(replacement.begin(), replacement.end(), mapping.data + kAccessOffset));
 }
 
 TEST(VmLifecycleTest, CreateAndDestroy) {
@@ -950,6 +1027,89 @@ TEST(AqlDispatchTest, DeferredRescanFiresLateCompletionSignalSerialWorker) {
 
 TEST(AqlDispatchTest, DeferredRescanFiresLateCompletionSignalParallelWorkers) {
   run_deferred_rescan_late_completion_test(3, SubmitTrigger::AfterInstruction);
+}
+
+TEST(AqlDispatchTest, SocDispatchPrimaryCpCompletesWorkgroupsAcrossXcds) {
+  const char *json = R"({
+    "max_ticks":10000,
+    "num_threads":1,
+    "vm":{"arch":"cdna3"},
+    "topology":{
+      "root":{
+        "name":"soc","type":"soc",
+        "children":[
+          {"name":"vram","type":"gpu_memory"},
+          {"name":"xcd0","type":"xcd","children":[
+            {"name":"l2","type":"l2_cache"},
+            {"name":"cp","type":"command_processor"},
+            {"name":"se0","type":"shader_engine","children":[
+              {"name":"cu0","type":"compute_unit","config":[
+                {"key":"num_wf_slots","value":"1"},
+                {"key":"sgprs_per_wf","value":"104"},
+                {"key":"vgprs_per_wf","value":"256"},
+                {"key":"lds_size_kb","value":"64"}
+              ]}
+            ]}
+          ]},
+          {"name":"xcd1","type":"xcd","children":[
+            {"name":"l2","type":"l2_cache"},
+            {"name":"cp","type":"command_processor"},
+            {"name":"se0","type":"shader_engine","children":[
+              {"name":"cu0","type":"compute_unit","config":[
+                {"key":"num_wf_slots","value":"1"},
+                {"key":"sgprs_per_wf","value":"104"},
+                {"key":"vgprs_per_wf","value":"256"},
+                {"key":"lds_size_kb","value":"64"}
+              ]}
+            ]}
+          ]}
+        ]
+      }
+    }
+  })";
+
+  auto loaded = config::load_config_from_string(json, rocjitsu::kEmbeddedSchema);
+  auto *soc = loaded.soc();
+  auto *mem = loaded.memory();
+  ASSERT_NE(soc, nullptr);
+  ASSERT_NE(mem, nullptr);
+  soc->set_soc_dispatch(true);
+
+  auto engine = std::make_unique<simdojo::SimulationEngine>(loaded.engine_config);
+  engine->topology().set_root(loaded.take_root());
+  loaded.wire_links(engine->topology());
+  engine->build();
+
+  auto *primary_cp = soc->xcd(0)->command_processor();
+  ASSERT_NE(primary_cp, nullptr);
+  EXPECT_EQ(soc->assign_queue_cp(), primary_cp);
+  EXPECT_EQ(soc->assign_queue_cp(), primary_cp);
+  ASSERT_EQ(primary_cp->compute_units().size(), 2u);
+  EXPECT_EQ(primary_cp->compute_units()[0], soc->xcd(0)->shader_engine(0)->compute_unit(0));
+  EXPECT_EQ(primary_cp->compute_units()[1], soc->xcd(1)->shader_engine(0)->compute_unit(0));
+
+  auto pg = std::make_shared<NonSerialHookPluginGroup>();
+  auto plugin = std::make_unique<WorkgroupPlacementPlugin>();
+  auto *placement = plugin.get();
+  ASSERT_TRUE(pg->add(std::move(plugin)));
+  soc->set_plugin_group(pg);
+
+  const uint32_t code[] = {SOPP_S_ENDPGM};
+  const uint64_t ko = write_kernel_image(mem, 0x1000, code, sizeof(code));
+  constexpr uint64_t kSignal = 0xF0030000;
+  init_completion_signal(mem, kSignal);
+
+  test::AqlQueue queue(mem, primary_cp);
+  queue.submit(make_dispatch_packet(ko, kSignal, /*grid_size_x=*/128));
+
+  for (uint32_t i = 0; i < 10000 && completion_signal_value(mem, kSignal) != 0; ++i)
+    ASSERT_TRUE(engine->step());
+
+  EXPECT_EQ(completion_signal_value(mem, kSignal), 0);
+  EXPECT_EQ(placement->completed_workgroups, 2u);
+  EXPECT_EQ(placement->cu_paths.size(), 2u);
+  EXPECT_TRUE(placement->saw_xcd("xcd0"));
+  EXPECT_TRUE(placement->saw_xcd("xcd1"));
 }
 
 TEST_P(IsaTest, EngineRunsToCompletion) {
@@ -1720,8 +1880,10 @@ TEST(L1ScalarCacheVmidTest, WritebackAllUsesLineOwnerVmidNotCaller) {
   alignas(4096) std::array<uint8_t, 4096> backing_b{};
   proc_a.map_pages(kSharedVa, backing_a.data(), backing_a.size());
   proc_b.map_pages(kSharedVa, backing_b.data(), backing_b.size());
-  mem.register_process(kVmidA, &proc_a.page_table_, &proc_a.page_table_mutex_);
-  mem.register_process(kVmidB, &proc_b.page_table_, &proc_b.page_table_mutex_);
+  mem.register_process(kVmidA, &proc_a.page_table_, &proc_a.page_table_mutex_,
+                       &proc_a.page_table_generation_);
+  mem.register_process(kVmidB, &proc_b.page_table_, &proc_b.page_table_mutex_,
+                       &proc_b.page_table_generation_);
 
   amdgpu::L2Cache l2("test.l2");
   l2.set_backing_memory(&mem);
