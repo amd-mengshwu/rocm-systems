@@ -64,10 +64,8 @@ namespace
 {
 namespace fs = ::rocprofiler::common::filesystem;
 
-constexpr uint32_t kInvalidFirmwareVersion = ROCPROFILER_FIRMWARE_VERSION_NONE;
-
 constexpr rocprofiler_agent_firmware_info_v0_t
-make_default_firmware_info(uint32_t default_value = kInvalidFirmwareVersion)
+make_default_firmware_info(uint32_t default_value = ROCPROFILER_FIRMWARE_VERSION_NONE)
 {
     return rocprofiler_agent_firmware_info_v0_t{.mec2_version     = default_value,
                                                 .mec_version      = default_value,
@@ -634,20 +632,20 @@ read_fw_info(std::string_view fname, uint32_t drm_render_minor)
     if(!fw_file)
     {
         ROCP_WARNING << "Failed to open firmware version file: " << fw_path;
-        return kInvalidFirmwareVersion;
+        return ROCPROFILER_FIRMWARE_VERSION_NONE;
     }
 
     auto fw_value = std::string{};
     if(!std::getline(fw_file, fw_value))
     {
         ROCP_WARNING << "Failed to read firmware version from file: " << fw_path;
-        return kInvalidFirmwareVersion;
+        return ROCPROFILER_FIRMWARE_VERSION_NONE;
     }
 
     if(fw_value.empty())
     {
         ROCP_WARNING << "Firmware version file is empty: " << fw_path;
-        return kInvalidFirmwareVersion;
+        return ROCPROFILER_FIRMWARE_VERSION_NONE;
     }
 
     auto tokens = sdk::parse::tokenize(fw_value, " \t\n\r");
@@ -656,7 +654,7 @@ read_fw_info(std::string_view fname, uint32_t drm_render_minor)
         ROCP_WARNING << fmt::format("Unexpected content in firmware version file '{}': '{}'",
                                     fw_path,
                                     fw_value);
-        return kInvalidFirmwareVersion;
+        return ROCPROFILER_FIRMWARE_VERSION_NONE;
     }
 
     try
@@ -672,7 +670,7 @@ read_fw_info(std::string_view fname, uint32_t drm_render_minor)
                                     fw_path,
                                     e.what());
     }
-    return kInvalidFirmwareVersion;
+    return ROCPROFILER_FIRMWARE_VERSION_NONE;
 }
 
 auto
@@ -801,7 +799,7 @@ read_topology()
         agent_info.vendor_name  = "";
         memset(&agent_info.uuid.bytes, 0, sizeof(agent_info.uuid.bytes));
 
-        agent_info.firmware_info = make_default_firmware_info();
+        agent_info.fw_info = make_default_firmware_info();
         if(agent_info.type == ROCPROFILER_AGENT_TYPE_GPU)
         {
             constexpr auto workgrp_max = 1024;
@@ -830,31 +828,31 @@ read_topology()
 
             agent_info.uuid = static_cast<rocprofiler_uuid_t>(_uuid);
 
-            agent_info.firmware_info.mec2_version =
+            agent_info.fw_info.mec2_version =
                 read_fw_info("mec2_fw_version", agent_info.drm_render_minor);
-            agent_info.firmware_info.mec_version =
+            agent_info.fw_info.mec_version =
                 read_fw_info("mec_fw_version", agent_info.drm_render_minor);
-            agent_info.firmware_info.rlc_version =
+            agent_info.fw_info.rlc_version =
                 read_fw_info("rlc_fw_version", agent_info.drm_render_minor);
-            agent_info.firmware_info.rlc_srlc_version =
+            agent_info.fw_info.rlc_srlc_version =
                 read_fw_info("rlc_srlc_fw_version", agent_info.drm_render_minor);
-            agent_info.firmware_info.rlc_srlg_version =
+            agent_info.fw_info.rlc_srlg_version =
                 read_fw_info("rlc_srlg_fw_version", agent_info.drm_render_minor);
-            agent_info.firmware_info.rlc_srls_version =
+            agent_info.fw_info.rlc_srls_version =
                 read_fw_info("rlc_srls_fw_version", agent_info.drm_render_minor);
-            agent_info.firmware_info.sdma2_version =
+            agent_info.fw_info.sdma2_version =
                 read_fw_info("sdma2_fw_version", agent_info.drm_render_minor);
-            agent_info.firmware_info.sdma_version =
+            agent_info.fw_info.sdma_version =
                 read_fw_info("sdma_fw_version", agent_info.drm_render_minor);
-            agent_info.firmware_info.smc_version =
+            agent_info.fw_info.smc_version =
                 read_fw_info("smc_fw_version", agent_info.drm_render_minor);
-            agent_info.firmware_info.sos_version =
+            agent_info.fw_info.sos_version =
                 read_fw_info("sos_fw_version", agent_info.drm_render_minor);
-            agent_info.firmware_info.ta_ras_version =
+            agent_info.fw_info.ta_ras_version =
                 read_fw_info("ta_ras_fw_version", agent_info.drm_render_minor);
-            agent_info.firmware_info.ta_xgmi_version =
+            agent_info.fw_info.ta_xgmi_version =
                 read_fw_info("ta_xgmi_fw_version", agent_info.drm_render_minor);
-            agent_info.firmware_info.vcn_version =
+            agent_info.fw_info.vcn_version =
                 read_fw_info("vcn_fw_version", agent_info.drm_render_minor);
 
             if(int drm_fd = 0; (drm_fd = drmOpenRender(agent_info.drm_render_minor)) >= 0)

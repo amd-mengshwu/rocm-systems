@@ -48,7 +48,6 @@ namespace
 
 #define PC_SAMPLING_IOCTL_COMPUTE_VERSION(major, minor) ROCPROFILER_COMPUTE_VERSION(major, minor, 0)
 
-constexpr uint32_t INVALID_PC_SAMPLING_FIRMWARE_VERSION     = ROCPROFILER_FIRMWARE_VERSION_NONE;
 constexpr uint32_t MINIMUM_PC_SAMPLING_MI300_MEC_FW_VERSION = 0x000000b9;
 constexpr uint32_t MINIMUM_PC_SAMPLING_MI300_SOS_FW_VERSION = 0x00360259;
 
@@ -466,7 +465,7 @@ convert_ioctl_pcs_config_to_rocp(const rocprofiler_ioctl_pc_sampling_info_t& ioc
 
     return ROCPROFILER_STATUS_SUCCESS;
 }
-}  // namespace
+
 
 rocprofiler_status_t
 check_firmware_compatibility(const rocprofiler_agent_t*       agent,
@@ -475,49 +474,51 @@ check_firmware_compatibility(const rocprofiler_agent_t*       agent,
     if(!agent) return ROCPROFILER_STATUS_ERROR_AGENT_NOT_FOUND;
 
     // firmware check is needed only for gfx942 for now
-    if(std::string(agent->name) != "gfx942") return ROCPROFILER_STATUS_SUCCESS;
+    std::string_view agent_name = agent->name;
+    if(agent_name != "gfx942") return ROCPROFILER_STATUS_SUCCESS;
 
     if(method == ROCPROFILER_PC_SAMPLING_METHOD_STOCHASTIC)
     {
-        if(agent->firmware_info.mec_version == INVALID_PC_SAMPLING_FIRMWARE_VERSION)
+        if(agent->fw_info.mec_version == ROCPROFILER_FIRMWARE_VERSION_NONE)
         {
             ROCP_WARNING << "Cannot determine MEC firmware version for agent-" << agent->node_id
                          << "\nStochastic PC sampling may not work correctly.\n";
             return ROCPROFILER_STATUS_ERROR_INCOMPATIBLE_FIRMWARE;
         }
 
-        if(agent->firmware_info.mec_version < MINIMUM_PC_SAMPLING_MI300_MEC_FW_VERSION)
+        if(agent->fw_info.mec_version < MINIMUM_PC_SAMPLING_MI300_MEC_FW_VERSION)
         {
             ROCP_WARNING << "Stochastic PC sampling is not supported on agent-" << agent->node_id
                          << " due to a firmware version mismatch\n"
                          << "Minimum required MEC firmware version is "
                          << MINIMUM_PC_SAMPLING_MI300_MEC_FW_VERSION << ", but found "
-                         << agent->firmware_info.mec_version << "\n";
+                         << agent->fw_info.mec_version << "\n";
             return ROCPROFILER_STATUS_ERROR_INCOMPATIBLE_FIRMWARE;
         }
     }
 
     if(method == ROCPROFILER_PC_SAMPLING_METHOD_HOST_TRAP)
     {
-        if(agent->firmware_info.sos_version == INVALID_PC_SAMPLING_FIRMWARE_VERSION)
+        if(agent->fw_info.sos_version == ROCPROFILER_FIRMWARE_VERSION_NONE)
         {
             ROCP_WARNING << "Cannot determine SOS firmware version for agent-" << agent->node_id
                          << "\nHost-Trap PC sampling may not work correctly.\n";
             return ROCPROFILER_STATUS_ERROR_INCOMPATIBLE_FIRMWARE;
         }
 
-        if(agent->firmware_info.sos_version < MINIMUM_PC_SAMPLING_MI300_SOS_FW_VERSION)
+        if(agent->fw_info.sos_version < MINIMUM_PC_SAMPLING_MI300_SOS_FW_VERSION)
         {
             ROCP_WARNING << "Host-Trap PC sampling is not supported on agent-" << agent->node_id
                          << " due to a firmware version mismatch\n"
                          << "Minimum required SOS firmware version is "
                          << MINIMUM_PC_SAMPLING_MI300_SOS_FW_VERSION << ", but found "
-                         << agent->firmware_info.sos_version << "\n";
+                         << agent->fw_info.sos_version << "\n";
             return ROCPROFILER_STATUS_ERROR_INCOMPATIBLE_FIRMWARE;
         }
     }
     return ROCPROFILER_STATUS_SUCCESS;
 }
+}  // namespace
 
 int
 get_kfd_fd()

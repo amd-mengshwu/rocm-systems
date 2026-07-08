@@ -123,6 +123,7 @@ ROCPROFILER_CXX_CODE(
  * This struct contains the firmware version numbers for various GPU microcontrollers and engines.
  * All fields are 32-bit unsigned integers representing the firmware version as reported by the
  * corresponding sysfs files in /sys/class/drm/renderD{}/device/fw_version/
+ * A value of 0 for a field means no version info was found for the corresponding engine.
  */
 typedef struct rocprofiler_agent_firmware_info_v0_t
 {
@@ -235,7 +236,7 @@ typedef struct rocprofiler_agent_v0_t
     rocprofiler_agent_runtime_visiblity_t runtime_visibility;
     rocprofiler_uuid_t                    uuid;  ///< GPU only. Universally unique identifier.
     rocprofiler_agent_firmware_info_v0_t
-        firmware_info;  ///< GPU only. Detailed firmware version information
+        fw_info;  ///< GPU only. Detailed firmware version information
                         ///< for the agent's microcontrollers and engines.
 
     /// @var fw_version

@@ -304,7 +304,7 @@ load(ArchiveT& ar, rocprofiler_agent_v0_t& data)
     ROCP_SDK_LOAD_DATA_FIELD(node_id);
     ROCP_SDK_LOAD_DATA_FIELD(logical_node_id);
     ROCP_SDK_LOAD_DATA_FIELD(logical_node_type_id);
-    ROCP_SDK_LOAD_DATA_FIELD(firmware_info);
+    ROCP_SDK_LOAD_DATA_FIELD(fw_info);
 
     auto generate = [&](auto name, const auto*& value, auto& size) {
         using value_type =
@@ -325,7 +325,7 @@ load(ArchiveT& ar, rocprofiler_agent_v0_t& data)
 
 template <typename ArchiveT>
 void
-load(ArchiveT& ar, rocprofiler_agent_firmware_info_v0_t data)
+load(ArchiveT& ar, rocprofiler_agent_firmware_info_v0_t& data)
 {
     ROCP_SDK_LOAD_DATA_FIELD(mec2_version);
     ROCP_SDK_LOAD_DATA_FIELD(mec_version);

@@ -143,7 +143,7 @@ constexpr rocprofiler_agent_t default_agent =
                         .logical_node_type_id       = 0,
                         .runtime_visibility         = {0, 0, 0, 0, 0},
                         .uuid          = static_cast<rocprofiler_uuid_t>(agent::uuid_view_t{}),
-                        .firmware_info = {.mec2_version     = ROCPROFILER_FIRMWARE_VERSION_NONE,
+                        .fw_info = {.mec2_version     = ROCPROFILER_FIRMWARE_VERSION_NONE,
                                           .mec_version      = ROCPROFILER_FIRMWARE_VERSION_NONE,
                                           .rlc_version      = ROCPROFILER_FIRMWARE_VERSION_NONE,
                                           .rlc_srlc_version = ROCPROFILER_FIRMWARE_VERSION_NONE,

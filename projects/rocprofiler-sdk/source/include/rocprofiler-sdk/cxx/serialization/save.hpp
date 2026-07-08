@@ -1213,7 +1213,7 @@ save(ArchiveT& ar, const rocprofiler_agent_v0_t& data)
     ROCP_SDK_SAVE_DATA_FIELD(logical_node_type_id);
     ROCP_SDK_SAVE_DATA_FIELD(runtime_visibility);
     ROCP_SDK_SAVE_DATA_FIELD(uuid);
-    ROCP_SDK_SAVE_DATA_FIELD(firmware_info);
+    ROCP_SDK_SAVE_DATA_FIELD(fw_info);
 
     auto generate = [&](auto name, const auto* value, uint64_t size) {
         using value_type = std::remove_const_t<std::remove_pointer_t<decltype(value)>>;
