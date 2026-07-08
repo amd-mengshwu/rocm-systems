@@ -2593,19 +2593,24 @@ void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_cod
   for (const LocalNopCave &cave : local_nop_caves)
     max_uncovered_nop_cave_words = std::max(max_uncovered_nop_cave_words, cave.word_count);
 
-  const SuperColliderDbiFlatSite *selected = nullptr;
-  uint16_t scratch_vgpr = 0;
-  const SuperColliderDbiFlatSite *local_cave_selected = nullptr;
-  const LocalNopCave *selected_local_cave = nullptr;
-  uint16_t local_cave_scratch_vgpr = 0;
+  struct FlatCheckTrapCandidate {
+    const SuperColliderDbiFlatSite *site = nullptr;
+    const LocalNopCave *local_cave = nullptr;
+    uint16_t scratch_vgpr = 0;
+    uint64_t requested_words = 0;
+    bool use_local_cave = false;
+  };
+
+  std::vector<FlatCheckTrapCandidate> inline_candidates;
+  std::vector<FlatCheckTrapCandidate> local_cave_candidates;
   bool skipped_supported_site_for_excessive_delay = false;
   size_t supported_candidate_count = 0;
   size_t scratchable_candidate_count = 0;
   size_t append_cave_reachable_candidate_count = 0;
   size_t local_cave_reachable_candidate_count = 0;
   uint32_t max_observed_padding_words = 0;
-  auto reachable_local_cave = [&](const SuperColliderDbiFlatSite &site,
-                                  uint64_t requested_words) -> const LocalNopCave * {
+  auto reachable_local_caves = [&](const SuperColliderDbiFlatSite &site, uint64_t requested_words) {
+    std::vector<const LocalNopCave *> caves;
     const uint64_t cave_words = requested_words + 1u;
     for (const LocalNopCave &cave : local_nop_caves) {
       if (cave.word_count < cave_words)
@@ -2613,9 +2618,9 @@ void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_cod
       const uint64_t return_branch_pc = cave.text_offset + requested_words * sizeof(uint32_t);
       if (compute_sopp_branch_simm16(site.text_offset, cave.text_offset) &&
           compute_sopp_branch_simm16(return_branch_pc, site.text_offset + site.size))
-        return &cave;
+        caves.push_back(&cave);
     }
-    return nullptr;
+    return caves;
   };
   auto visit_site = [&](const SuperColliderDbiFlatSite &site) {
     if (!is_supported_flat_check_trap_site(site))
@@ -2644,20 +2649,15 @@ void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_cod
           compute_sopp_branch_simm16(return_branch_pc, site.text_offset + site.size))
         ++append_cave_reachable_candidate_count;
     }
-    if (const LocalNopCave *cave = reachable_local_cave(site, requested_words)) {
+    const std::vector<const LocalNopCave *> caves = reachable_local_caves(site, requested_words);
+    if (!caves.empty())
       ++local_cave_reachable_candidate_count;
-      if (local_cave_selected == nullptr || site.file_offset < local_cave_selected->file_offset) {
-        local_cave_selected = &site;
-        selected_local_cave = cave;
-        local_cave_scratch_vgpr = *scratch;
-      }
+    for (const LocalNopCave *cave : caves) {
+      local_cave_candidates.push_back({&site, cave, *scratch, requested_words, true});
     }
     if (observed_padding < padding_words)
       return;
-    if (selected == nullptr || site.file_offset < selected->file_offset) {
-      selected = &site;
-      scratch_vgpr = *scratch;
-    }
+    inline_candidates.push_back({&site, nullptr, *scratch, requested_words, false});
   };
 
   for (const SuperColliderDbiKernelInfo &kernel : result.kernels) {
@@ -2671,14 +2671,55 @@ void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_cod
       visit_site(site);
   }
 
-  bool use_local_cave = false;
-  if (selected == nullptr && local_cave_selected != nullptr) {
-    selected = local_cave_selected;
-    scratch_vgpr = local_cave_scratch_vgpr;
-    use_local_cave = true;
-  }
+  auto candidate_order = [](const FlatCheckTrapCandidate &lhs, const FlatCheckTrapCandidate &rhs) {
+    if (lhs.site->file_offset != rhs.site->file_offset)
+      return lhs.site->file_offset < rhs.site->file_offset;
+    if (lhs.use_local_cave != rhs.use_local_cave)
+      return !lhs.use_local_cave;
+    const uint64_t lhs_cave = lhs.local_cave ? lhs.local_cave->file_offset : 0;
+    const uint64_t rhs_cave = rhs.local_cave ? rhs.local_cave->file_offset : 0;
+    return lhs_cave < rhs_cave;
+  };
+  std::ranges::sort(inline_candidates, candidate_order);
+  std::ranges::sort(local_cave_candidates, candidate_order);
 
-  if (selected == nullptr) {
+  const uint32_t max_patches = std::max<uint32_t>(options.max_patches, 1u);
+  std::vector<FlatCheckTrapCandidate> selected_candidates;
+  selected_candidates.reserve(max_patches);
+  std::vector<ByteRange> reserved_ranges;
+  auto try_select_candidate = [&](const FlatCheckTrapCandidate &candidate) {
+    if (selected_candidates.size() >= max_patches)
+      return;
+    const SuperColliderDbiFlatSite &site = *candidate.site;
+    if (candidate.use_local_cave) {
+      if (candidate.local_cave == nullptr)
+        return;
+      const ByteRange anchor_range{site.file_offset, site.file_offset + site.size};
+      const uint64_t cave_bytes = (candidate.requested_words + 1u) * sizeof(uint32_t);
+      const ByteRange cave_range{candidate.local_cave->file_offset,
+                                 candidate.local_cave->file_offset + cave_bytes};
+      if (overlaps_reserved_range(reserved_ranges, anchor_range) ||
+          overlaps_reserved_range(reserved_ranges, cave_range))
+        return;
+      reserved_ranges.push_back(anchor_range);
+      reserved_ranges.push_back(cave_range);
+      selected_candidates.push_back(candidate);
+      return;
+    }
+
+    const uint64_t patch_bytes = candidate.requested_words * sizeof(uint32_t);
+    const ByteRange patch_range{site.file_offset, site.file_offset + patch_bytes};
+    if (!reserve_byte_range(reserved_ranges, patch_range))
+      return;
+    selected_candidates.push_back(candidate);
+  };
+
+  for (const FlatCheckTrapCandidate &candidate : inline_candidates)
+    try_select_candidate(candidate);
+  for (const FlatCheckTrapCandidate &candidate : local_cave_candidates)
+    try_select_candidate(candidate);
+
+  if (selected_candidates.empty()) {
     if (skipped_supported_site_for_excessive_delay) {
       result.warnings.emplace_back(
           "DBI SuperCollider flat check/trap proof skipped: requested delay needs too much "
@@ -2686,10 +2727,13 @@ void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_cod
       return;
     }
     result.warnings.emplace_back(
-        "DBI SuperCollider flat check/trap proof found no padded likely "
-        "group flat_load/store_b{32,64,128} site; supported_candidates=" +
+        "DBI SuperCollider flat check/trap proof found no selectable padded or "
+        "local-cave-reachable likely group flat_load/store_b{32,64,128} site; "
+        "supported_candidates=" +
         std::to_string(supported_candidate_count) +
         " scratchable_candidates=" + std::to_string(scratchable_candidate_count) +
+        " inline_candidates=" + std::to_string(inline_candidates.size()) +
+        " local_cave_candidates=" + std::to_string(local_cave_candidates.size()) +
         " max_observed_padding_words=" + std::to_string(max_observed_padding_words) +
         " append_cave_reachable_candidates=" +
         std::to_string(append_cave_reachable_candidate_count) +
@@ -2699,142 +2743,180 @@ void try_apply_flat_check_trap_patch(const AmdGpuCodeObject &code_object, rj_cod
     return;
   }
 
-  auto required_vgprs = flat_dword_count(*selected);
-  auto compare_vgpr = flat_check_trap_compare_vgpr(*selected);
-  if (!required_vgprs || !compare_vgpr) {
-    result.errors.emplace_back("DBI SuperCollider flat check/trap proof selected unsupported site");
-    return;
-  }
-  const uint32_t total_words =
-      static_cast<uint32_t>(3u + *delay_words + 3u + 1u + 3u * *required_vgprs);
+  struct PlannedFlatCheckTrapPatch {
+    const SuperColliderDbiFlatSite *site = nullptr;
+    const LocalNopCave *local_cave = nullptr;
+    std::vector<uint32_t> words;
+    std::vector<uint32_t> cave_words;
+    std::array<uint32_t, 3> anchor_words{};
+    SuperColliderDbiPatchInfo info;
+    bool use_local_cave = false;
+  };
 
-  std::array<uint32_t, 3> original_access{};
-  if (!read_words_at(original_bytes, selected->file_offset, std::span<uint32_t>(original_access))) {
-    result.errors.emplace_back("DBI SuperCollider flat check/trap proof could not read access");
-    return;
-  }
-
-  std::optional<std::array<uint32_t, 3>> duplicate_load;
-  SuperColliderDbiPatchKind patch_kind = use_local_cave
-                                             ? SuperColliderDbiPatchKind::LocalCaveFlatLoadCheckTrap
-                                             : SuperColliderDbiPatchKind::InlineFlatLoadCheckTrap;
-  if (selected->kind == SuperColliderDbiLdsAccessKind::Read) {
-    duplicate_load = retarget_flat_load_vdst(original_access, scratch_vgpr);
-  } else if (selected->kind == SuperColliderDbiLdsAccessKind::Write) {
-    duplicate_load =
-        build_flat_load_from_flat_store(original_access, selected->width_bits, scratch_vgpr);
-    patch_kind = use_local_cave ? SuperColliderDbiPatchKind::LocalCaveFlatStoreCheckTrap
-                                : SuperColliderDbiPatchKind::InlineFlatStoreCheckTrap;
-  }
-  if (!duplicate_load) {
-    result.errors.emplace_back("DBI SuperCollider flat check/trap proof could not encode readback");
-    return;
-  }
-
-  auto wait_dscnt = build_s_wait_dscnt_word(0, arch);
-  auto skip_trap = build_s_cbranch_vccz_word(1, arch);
-  auto trap = build_s_trap_word(0, arch);
+  const auto wait_dscnt = build_s_wait_dscnt_word(0, arch);
+  const auto skip_trap = build_s_cbranch_vccz_word(1, arch);
+  const auto trap = build_s_trap_word(0, arch);
   if (!wait_dscnt || !skip_trap || !trap) {
     result.errors.emplace_back("DBI SuperCollider flat check/trap proof could not encode sequence");
     return;
   }
 
-  std::vector<uint32_t> words;
-  words.reserve(total_words);
-  words.insert(words.end(), original_access.begin(), original_access.end());
-  if (!append_delay_words(words, arch, options, result.errors,
-                          "DBI SuperCollider flat check/trap proof"))
-    return;
-  words.insert(words.end(), duplicate_load->begin(), duplicate_load->end());
-  words.push_back(*wait_dscnt);
-  for (uint16_t i = 0; i < *required_vgprs; ++i) {
-    auto chunk_cmp_ne = build_v_cmp_ne_u32_e32_word(static_cast<uint16_t>(*compare_vgpr + i),
-                                                    static_cast<uint16_t>(scratch_vgpr + i), arch);
-    if (!chunk_cmp_ne) {
-      result.errors.emplace_back(
-          "DBI SuperCollider flat check/trap proof could not encode chunk compare");
+  std::vector<PlannedFlatCheckTrapPatch> planned_patches;
+  planned_patches.reserve(selected_candidates.size());
+  for (const FlatCheckTrapCandidate &candidate : selected_candidates) {
+    if (candidate.site == nullptr) {
+      result.errors.emplace_back("DBI SuperCollider flat check/trap proof selected missing site");
       return;
     }
-    words.push_back(*chunk_cmp_ne);
-    words.push_back(*skip_trap);
-    words.push_back(*trap);
+    const SuperColliderDbiFlatSite &site = *candidate.site;
+    const auto required_vgprs = flat_dword_count(site);
+    const auto compare_vgpr = flat_check_trap_compare_vgpr(site);
+    if (!required_vgprs || !compare_vgpr) {
+      result.errors.emplace_back(
+          "DBI SuperCollider flat check/trap proof selected unsupported site");
+      return;
+    }
+
+    std::array<uint32_t, 3> original_access{};
+    if (!read_words_at(original_bytes, site.file_offset, std::span<uint32_t>(original_access))) {
+      result.errors.emplace_back("DBI SuperCollider flat check/trap proof could not read access");
+      return;
+    }
+
+    std::optional<std::array<uint32_t, 3>> duplicate_load;
+    SuperColliderDbiPatchKind patch_kind =
+        candidate.use_local_cave ? SuperColliderDbiPatchKind::LocalCaveFlatLoadCheckTrap
+                                 : SuperColliderDbiPatchKind::InlineFlatLoadCheckTrap;
+    if (site.kind == SuperColliderDbiLdsAccessKind::Read) {
+      duplicate_load = retarget_flat_load_vdst(original_access, candidate.scratch_vgpr);
+    } else if (site.kind == SuperColliderDbiLdsAccessKind::Write) {
+      duplicate_load =
+          build_flat_load_from_flat_store(original_access, site.width_bits, candidate.scratch_vgpr);
+      patch_kind = candidate.use_local_cave ? SuperColliderDbiPatchKind::LocalCaveFlatStoreCheckTrap
+                                            : SuperColliderDbiPatchKind::InlineFlatStoreCheckTrap;
+    }
+    if (!duplicate_load) {
+      result.errors.emplace_back(
+          "DBI SuperCollider flat check/trap proof could not encode readback");
+      return;
+    }
+
+    PlannedFlatCheckTrapPatch planned;
+    planned.site = &site;
+    planned.local_cave = candidate.local_cave;
+    planned.use_local_cave = candidate.use_local_cave;
+    planned.info.kind = patch_kind;
+    planned.info.anchor_offset = site.text_offset;
+    planned.info.scratch_vgpr = candidate.scratch_vgpr;
+    planned.words.reserve(static_cast<size_t>(candidate.requested_words));
+    planned.words.insert(planned.words.end(), original_access.begin(), original_access.end());
+    if (!append_delay_words(planned.words, arch, options, result.errors,
+                            "DBI SuperCollider flat check/trap proof"))
+      return;
+    planned.words.insert(planned.words.end(), duplicate_load->begin(), duplicate_load->end());
+    planned.words.push_back(*wait_dscnt);
+    for (uint16_t i = 0; i < *required_vgprs; ++i) {
+      const auto chunk_cmp_ne =
+          build_v_cmp_ne_u32_e32_word(static_cast<uint16_t>(*compare_vgpr + i),
+                                      static_cast<uint16_t>(candidate.scratch_vgpr + i), arch);
+      if (!chunk_cmp_ne) {
+        result.errors.emplace_back(
+            "DBI SuperCollider flat check/trap proof could not encode chunk compare");
+        return;
+      }
+      planned.words.push_back(*chunk_cmp_ne);
+      planned.words.push_back(*skip_trap);
+      planned.words.push_back(*trap);
+    }
+
+    if (candidate.use_local_cave) {
+      if (candidate.local_cave == nullptr) {
+        result.errors.emplace_back(
+            "DBI SuperCollider flat check/trap proof selected missing local cave");
+        return;
+      }
+      if (site.size != 3u * sizeof(uint32_t)) {
+        result.errors.emplace_back(
+            "DBI SuperCollider flat check/trap proof local cave expects a 12-byte flat site");
+        return;
+      }
+
+      const auto fwd =
+          compute_sopp_branch_simm16(site.text_offset, candidate.local_cave->text_offset);
+      const uint64_t return_branch_pc =
+          candidate.local_cave->text_offset + planned.words.size() * sizeof(uint32_t);
+      const auto ret = compute_sopp_branch_simm16(return_branch_pc, site.text_offset + site.size);
+      if (!fwd || !ret) {
+        result.errors.emplace_back(
+            "DBI SuperCollider flat check/trap proof local cave branch exceeds s_branch simm16");
+        return;
+      }
+
+      planned.cave_words = planned.words;
+      planned.cave_words.push_back(build_s_branch(*ret, arch));
+      if (candidate.local_cave->word_count < planned.cave_words.size()) {
+        result.errors.emplace_back(
+            "DBI SuperCollider flat check/trap proof local cave is too small");
+        return;
+      }
+
+      planned.anchor_words = {build_s_branch(*fwd, arch), build_s_nop(0, arch),
+                              build_s_nop(0, arch)};
+      planned.info.trampoline_offset = candidate.local_cave->text_offset;
+      planned.info.original_size = site.size;
+    } else {
+      planned.info.trampoline_offset = site.text_offset + site.size;
+      planned.info.original_size = static_cast<uint32_t>(planned.words.size() * sizeof(uint32_t));
+    }
+
+    planned_patches.push_back(std::move(planned));
   }
 
   result.elf_bytes.assign(original_bytes.begin(), original_bytes.end());
-  SuperColliderDbiPatchInfo info;
-  info.kind = patch_kind;
-  info.anchor_offset = selected->text_offset;
-  info.scratch_vgpr = scratch_vgpr;
+  for (const PlannedFlatCheckTrapPatch &planned : planned_patches) {
+    const SuperColliderDbiFlatSite &site = *planned.site;
+    if (planned.use_local_cave) {
+      if (planned.local_cave == nullptr) {
+        result.errors.emplace_back(
+            "DBI SuperCollider flat check/trap proof selected missing local cave");
+        result.elf_bytes.clear();
+        result.patches.clear();
+        result.modified = false;
+        return;
+      }
+      const uint64_t anchor_bytes = planned.anchor_words.size() * sizeof(uint32_t);
+      const uint64_t cave_bytes = planned.cave_words.size() * sizeof(uint32_t);
+      if (site.file_offset > result.elf_bytes.size() ||
+          anchor_bytes > result.elf_bytes.size() - site.file_offset ||
+          planned.local_cave->file_offset > result.elf_bytes.size() ||
+          cave_bytes > result.elf_bytes.size() - planned.local_cave->file_offset) {
+        result.errors.emplace_back("DBI SuperCollider flat check/trap proof exceeds ELF bytes");
+        result.elf_bytes.clear();
+        result.patches.clear();
+        result.modified = false;
+        return;
+      }
 
-  if (use_local_cave) {
-    if (selected_local_cave == nullptr) {
-      result.errors.emplace_back(
-          "DBI SuperCollider flat check/trap proof selected missing local cave");
-      result.elf_bytes.clear();
-      return;
-    }
-    if (selected->size != 3u * sizeof(uint32_t)) {
-      result.errors.emplace_back(
-          "DBI SuperCollider flat check/trap proof local cave expects a 12-byte flat site");
-      result.elf_bytes.clear();
-      return;
-    }
-
-    const auto fwd =
-        compute_sopp_branch_simm16(selected->text_offset, selected_local_cave->text_offset);
-    const uint64_t return_branch_pc =
-        selected_local_cave->text_offset + words.size() * sizeof(uint32_t);
-    const auto ret =
-        compute_sopp_branch_simm16(return_branch_pc, selected->text_offset + selected->size);
-    if (!fwd || !ret) {
-      result.errors.emplace_back(
-          "DBI SuperCollider flat check/trap proof local cave branch exceeds s_branch simm16");
-      result.elf_bytes.clear();
-      return;
-    }
-
-    std::vector<uint32_t> cave_words = words;
-    cave_words.push_back(build_s_branch(*ret, arch));
-    if (selected_local_cave->word_count < cave_words.size()) {
-      result.errors.emplace_back("DBI SuperCollider flat check/trap proof local cave is too small");
-      result.elf_bytes.clear();
-      return;
-    }
-
-    const std::array<uint32_t, 3> anchor_words = {build_s_branch(*fwd, arch), build_s_nop(0, arch),
-                                                  build_s_nop(0, arch)};
-    const uint64_t anchor_bytes = anchor_words.size() * sizeof(uint32_t);
-    const uint64_t cave_bytes = cave_words.size() * sizeof(uint32_t);
-    if (selected->file_offset > result.elf_bytes.size() ||
-        anchor_bytes > result.elf_bytes.size() - selected->file_offset ||
-        selected_local_cave->file_offset > result.elf_bytes.size() ||
-        cave_bytes > result.elf_bytes.size() - selected_local_cave->file_offset) {
-      result.errors.emplace_back("DBI SuperCollider flat check/trap proof exceeds ELF bytes");
-      result.elf_bytes.clear();
-      return;
+      std::memcpy(result.elf_bytes.data() + site.file_offset, planned.anchor_words.data(),
+                  static_cast<size_t>(anchor_bytes));
+      std::memcpy(result.elf_bytes.data() + planned.local_cave->file_offset,
+                  planned.cave_words.data(), static_cast<size_t>(cave_bytes));
+    } else {
+      const uint64_t patch_bytes = static_cast<uint64_t>(planned.words.size() * sizeof(uint32_t));
+      if (site.file_offset > result.elf_bytes.size() ||
+          patch_bytes > result.elf_bytes.size() - site.file_offset) {
+        result.errors.emplace_back("DBI SuperCollider flat check/trap proof exceeds ELF bytes");
+        result.elf_bytes.clear();
+        result.patches.clear();
+        result.modified = false;
+        return;
+      }
+      std::memcpy(result.elf_bytes.data() + site.file_offset, planned.words.data(),
+                  static_cast<size_t>(patch_bytes));
     }
 
-    std::memcpy(result.elf_bytes.data() + selected->file_offset, anchor_words.data(),
-                static_cast<size_t>(anchor_bytes));
-    std::memcpy(result.elf_bytes.data() + selected_local_cave->file_offset, cave_words.data(),
-                static_cast<size_t>(cave_bytes));
-    info.trampoline_offset = selected_local_cave->text_offset;
-    info.original_size = selected->size;
-  } else {
-    const uint64_t patch_bytes = static_cast<uint64_t>(words.size() * sizeof(uint32_t));
-    if (selected->file_offset > result.elf_bytes.size() ||
-        patch_bytes > result.elf_bytes.size() - selected->file_offset) {
-      result.errors.emplace_back("DBI SuperCollider flat check/trap proof exceeds ELF bytes");
-      result.elf_bytes.clear();
-      return;
-    }
-    std::memcpy(result.elf_bytes.data() + selected->file_offset, words.data(),
-                static_cast<size_t>(patch_bytes));
-    info.trampoline_offset = selected->text_offset + selected->size;
-    info.original_size = static_cast<uint32_t>(patch_bytes);
+    result.patches.push_back(planned.info);
   }
-
-  result.patches.push_back(info);
   result.modified = true;
 }
 
@@ -2993,11 +3075,12 @@ SuperColliderDbiResult try_patch_supercollider_dbi(std::span<const uint8_t> code
   for (SuperColliderDbiFunctionInfo &function : result.functions)
     decode_function_stats(code_object_bytes, *decoder, arch, function, result.warnings);
 
-  if (options.probe_lds_check_trap)
-    try_apply_lds_load_check_trap_patch(code_object, arch, options, result);
-  else if (options.probe_flat_check_trap)
-    try_apply_flat_check_trap_patch(code_object, arch, options, result);
-  else if (options.probe_flat_trap)
+  if (options.probe_lds_check_trap || options.probe_flat_check_trap) {
+    if (options.probe_lds_check_trap)
+      try_apply_lds_load_check_trap_patch(code_object, arch, options, result);
+    if (options.probe_flat_check_trap && !result.modified && result.errors.empty())
+      try_apply_flat_check_trap_patch(code_object, arch, options, result);
+  } else if (options.probe_flat_trap)
     try_apply_flat_trap_patch(code_object, arch, result);
   else if (options.probe_lds_endpgm)
     try_apply_lds_endpgm_patch(code_object, arch, result);

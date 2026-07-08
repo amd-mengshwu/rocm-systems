@@ -57,11 +57,11 @@ The MVP uses this HSA tools loader path. A separate waitcheck-style
 - `RJ_DBI_DUMP_DIR=/tmp/rj-dbi-dump`: write original memory-backed code objects,
   and patched code objects when a patch is produced, as `.hsaco` files for
   `llvm-readelf` / `llvm-objdump` inspection.
-- `RJ_DBI_SC_CHECK_TRAP_MODE=lds|flat`: select the primary check/trap
-  instrumentation path. The default is `lds`, so normal native `ds_*` LDS
-  instrumentation only needs `RJ_DBI_SUPERCOLLIDER=1`. Set
-  `RJ_DBI_SC_CHECK_TRAP_MODE=flat` for likely group/LDS `flat_*`
-  instrumentation.
+- `RJ_DBI_SC_CHECK_TRAP_MODE=all|lds|flat`: restrict the primary check/trap
+  instrumentation scope. The default is `all`: try native `ds_*` LDS
+  instrumentation first, then try likely group/LDS `flat_*` instrumentation if
+  the native DS pass did not patch that code object. Use `lds` or `flat` only
+  for targeted debugging.
 - `RJ_DBI_SC_DELAY=N`: configure the delay between the original LDS/flat access
   and the duplicate/readback check.
 - `RJ_DBI_SC_DELAY_MODE=nop|sleep|sleep_var`: choose the delay encoding. The
@@ -72,15 +72,15 @@ The MVP uses this HSA tools loader path. A separate waitcheck-style
 - `RJ_DBI_SC_DELAY_VAR_SSRC=N`: scalar source operand encoding for
   `RJ_DBI_SC_DELAY_MODE=sleep_var`. The default is `106`, the RDNA4 `vcc_lo`
   operand encoding already preserved by the injected native-DS compare path.
-- `RJ_DBI_SC_MAX_PATCHES=N`: bound how many native-DS check/trap sites can be
-  instrumented in a single code object. The default is `1`. The first
-  multi-site implementation selects non-overlapping padded sites and distinct
-  reachable local NOP caves in file order.
+- `RJ_DBI_SC_MAX_PATCHES=N`: bound how many native-DS or flat/VFLAT check/trap
+  sites can be instrumented in a single code object. The default is `1`.
+  Selection is file-ordered and rejects overlapping inline ranges, anchor
+  rewrites, and local NOP caves.
 - `RJ_DBI_SC_TMP_VGPR=N`: force a scratch VGPR. Use this for hand-shaped tests
   whose kernel descriptor reserves the selected VGPR.
 - `RJ_DBI_SC_REQUIRE_PATCH=1`: test guard. If a code object has a supported MVP
-  site but no patch is emitted, fail the load. Code objects with no supported
-  sites still pass through.
+  site in the active check/trap scope but no patch is emitted, fail the load.
+  Code objects with no supported sites still pass through.
 - `RJ_DBI_SC_FAULT_DROP_BARRIER=1`: demo-only synchronization fault injection.
   After the primary proof/instrumentation pass, rewrite one decoded
   `s_barrier*` instruction to `s_nop 0`.
@@ -89,13 +89,14 @@ The MVP uses this HSA tools loader path. A separate waitcheck-style
 - `RJ_DBI_FAIL_CLOSED=1`: debugging guard that rejects unsupported kernels
   rather than quietly skipping them.
 
-The primary check/trap paths are selected by `RJ_DBI_SC_CHECK_TRAP_MODE`, not
-composed. The native LDS path is the default. The flat path is a separate pass
-because composing native DS and flat/VFLAT rewriting would need a shared
-patch-range reservation plan and patching from already-modified bytes. Barrier
-fault injection is composable because it runs after the selected primary mode.
-The bring-up-only probes below are explicit debug overrides of the default
-check/trap path.
+The default check/trap scope is combined but conservative. For a given code
+object, rocJITsu tries native DS first and falls back to flat/VFLAT only if the
+native DS pass did not already modify that object. Same-code-object composition
+of native DS and flat/VFLAT rewriting is still future work because it needs a
+shared patch-range reservation plan and patching from already-modified bytes.
+Barrier fault injection is composable because it runs after the selected
+check/trap path. The bring-up-only probes below are explicit debug overrides of
+the default check/trap path.
 
 Additional bring-up-only probes also exist:
 
@@ -137,10 +138,10 @@ Interpretation:
   `RJ_DBI_LOG=2`.
 - `function_flat_maybe_group_hints>0`: helper-function flat sites are likely
   LDS/shared accesses. The destructive flat proof can patch these with
-  `RJ_DBI_SC_PROBE_FLAT_TRAP=1`. Padded likely group flat loads and stores can
-  be checked with `RJ_DBI_SC_CHECK_TRAP_MODE=flat`; ordinary unpadded
-  hip-moi helper sites can now be checked one selected site at a time through a
-  conservative local NOP cave when one is reachable.
+  `RJ_DBI_SC_PROBE_FLAT_TRAP=1`. Padded likely group flat loads and stores are
+  checked by the default fallback when native DS did not patch the code object;
+  ordinary unpadded hip-moi helper sites can be checked through conservative
+  local NOP caves when they are reachable.
 - `local-cave-flat-load-check-trap` / `local-cave-flat-store-check-trap` patch
   logs mean an unpadded flat helper site was redirected through uncovered local
   NOP slack and returned to the original fallthrough. The focused hip-moi
@@ -151,11 +152,10 @@ Interpretation:
 - Proof-mode warnings such as `skipped ROCclr runtime helper code object` and
   `skipped code object without supported DBI candidate sites` mean the proof
   mode intentionally avoided an expensive or unsafe trampoline search.
-- For `RJ_DBI_SC_CHECK_TRAP_MODE=flat`, an unpadded skip warning now includes
-  `supported_candidates=...`, `scratchable_candidates=...`, and
-  `max_observed_padding_words=...`, and
-  `append_cave_reachable_candidates=...`, `uncovered_nop_caves=...`,
-  `max_uncovered_nop_cave_words=...`, and
+- For flat/VFLAT fallback, an unpadded skip warning includes
+  `supported_candidates=...`, `scratchable_candidates=...`,
+  `max_observed_padding_words=...`, `append_cave_reachable_candidates=...`,
+  `uncovered_nop_caves=...`, `max_uncovered_nop_cave_words=...`, and
   `local_cave_reachable_candidates=...` so the local-cave/code-growth gap is
   measurable. In the focused hip-moi `NoPipelineProd16x8` object, appended
   end-of-text caves are not directly reachable, but conservative uncovered NOP
@@ -166,10 +166,9 @@ The broad hip-moi matmul kernels observed so far use flat/generic and scratch
 forms rather than native `ds_load/store_*`. The focused IREE e2e kernels do
 expose compact native DS sites. The current hook can identify and destructively
 trap likely group/LDS flat helper-function sites. The non-destructive
-race-checking paths currently cover padded native DS sites, one selected compact
-native DS site when a local cave is reachable, padded likely group flat sites,
-and one selected unpadded likely group flat site when a conservative local NOP
-cave is reachable.
+race-checking paths currently cover padded native DS sites, compact native DS
+sites when local caves are reachable, padded likely group flat sites, and
+unpadded likely group flat sites when conservative local NOP caves are reachable.
 
 ## What The MVP Instruments
 
@@ -198,8 +197,8 @@ if the two values differ. For stores, the patch reads back the stored LDS value
 after the requested NOP delay and traps if it differs from the original stored
 value. The injected compares preserve `vcc_lo` by saving it to a
 liveness-selected SGPR. For native DS and likely group flat helper sites, the
-patch may either use trailing padding or redirect one selected site through a
-conservative uncovered local NOP cave.
+patch may either use trailing padding or redirect through conservative uncovered
+local NOP caves, bounded by `RJ_DBI_SC_MAX_PATCHES`.
 
 ## Repeatable Local Tests
 
@@ -233,7 +232,6 @@ env \
   HSA_TOOLS_LIB=/home/benoit/workspace/TheRock/rocm-systems/emulation/rocjitsu/build/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so \
   RJ_DBI_SUPERCOLLIDER=1 \
   RJ_DBI_LOG=1 \
-  RJ_DBI_SC_CHECK_TRAP_MODE=flat \
   RJ_DBI_SC_DELAY=1 \
   ctest --test-dir /home/benoit/workspace/hip-moi-build \
     -R NoPipelineProd16x8 \
@@ -277,9 +275,9 @@ Keep GPU test fanout near 8.
 
 - Flat/generic LDS provenance is conservative. The hook can identify likely
   group/LDS helper-function flat sites and destructively trap them. The
-  non-destructive check/trap path can now patch one selected ordinary unpadded
-  hip-moi helper site through a local NOP cave, but it does not yet instrument
-  every eligible flat site.
+  non-destructive check/trap path can patch eligible sites through padding or
+  local NOP caves, bounded by `RJ_DBI_SC_MAX_PATCHES`, but it still does not
+  prove that every decoded flat access is an LDS access.
 - No shadow memory and no non-trapping report buffer yet; `s_trap` is the MVP
   signal.
 - Same-value races and unlucky schedules can be missed.

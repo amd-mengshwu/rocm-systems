@@ -1,6 +1,6 @@
 # Jakub DBI Demo Notes: IREE e2e
 
-Date: 2026-07-07
+Date: 2026-07-08
 
 ## Summary
 
@@ -8,11 +8,12 @@ rocJITsu intercepts IREE ROCm/HIP GPU code-object loads through the HSA tools
 path, inspects final native RDNA4 / `gfx1201` machine code, and rewrites
 selected LDS instructions before the code object is loaded.
 
-The main demo runs selected IREE e2e tests while requiring rocJITsu to actually
-rewrite instrumentable LDS code. A 10-test IREE linalg/matmul/StableHLO set
-passes under that requirement. The clearest concrete example is one IREE WMMA
-kernel where rocJITsu rewrites a compact `ds_load_2addr_b64` into a branch to a
-local NOP cave containing:
+The main demo runs IREE e2e tests while requiring rocJITsu to actually rewrite
+instrumentable LDS code. Two useful slices pass under that requirement: the full
+13-test RDNA4 ROCm/HIP matmul e2e set exposed by this build, and a focused
+10-test linalg/matmul/StableHLO set. The clearest concrete example is one IREE
+WMMA kernel where rocJITsu rewrites a compact `ds_load_2addr_b64` into a branch
+to a local NOP cave containing:
 
 - the original LDS load,
 - a delay,
@@ -126,31 +127,32 @@ export RJ_DBI_LOG=1
 This is native `gfx1201` instrumentation through the HSA tools hook. rocJITsu
 is not translating the code object to another architecture.
 
-## Primary Patch Mode Selection
+## Primary Check/Trap Scope
 
-The SuperCollider DBI hook has one primary check/trap selector:
+The SuperCollider DBI hook defaults to a combined check/trap scope:
 
-- unset, or `RJ_DBI_SC_CHECK_TRAP_MODE=lds`: native `ds_*` LDS
-  instrumentation,
-- `RJ_DBI_SC_CHECK_TRAP_MODE=flat`: likely group/LDS `flat_*`
-  instrumentation.
+- try native `ds_*` LDS instrumentation first,
+- if no native DS patch is emitted for that code object, try likely group/LDS
+  `flat_*` instrumentation.
 
-The native LDS path is the default because it is the IREE demo path. The flat
-path is still available as a separate pass. The current patcher does not compose
-native DS and flat/VFLAT rewriting in one pass because that needs a shared
-patch-range reservation plan and patching from already-modified bytes. Barrier
-fault injection is different: `RJ_DBI_SC_FAULT_DROP_BARRIER=1` runs after the
-selected primary mode and is intentionally composable with native LDS
+This removes the normal need to choose between IREE-style native DS code and
+HIP/hip-moi-style helper functions that use final `flat_*` instructions for
+shared memory. For targeted debugging, `RJ_DBI_SC_CHECK_TRAP_MODE=lds` restricts
+the scope to native DS and `RJ_DBI_SC_CHECK_TRAP_MODE=flat` restricts it to
+flat/VFLAT.
+
+This is not yet full same-code-object composition. If the native DS pass already
+modifies a code object, the flat/VFLAT fallback does not also patch that same
+object. Barrier fault injection is different: `RJ_DBI_SC_FAULT_DROP_BARRIER=1`
+runs after the check/trap pass and is intentionally composable with native LDS
 check/trap.
-
-The IREE demo uses the native LDS mode. Flat/VFLAT support is documented later as
-a separate path.
 
 ## Compatibility Smoke: Full RDNA4 Matmul e2e
 
 This broad compatibility check verifies that the HSA tools hook sits underneath
 IREE's HIP HAL path for the complete RDNA4 ROCm/HIP matmul e2e set exposed by
-this build:
+this build. Run it with the patch-required environment from the main demo
+section below.
 
 ```sh
 ctest --test-dir "$IREE_BUILD_DIR" \
@@ -188,10 +190,11 @@ concrete LDS-heavy runtime workloads under the hook.
 
 ## Main Demo: Require A Real LDS Patch
 
-This is the main demo. It uses the default native LDS check/trap mode and sets
-`RJ_DBI_SC_REQUIRE_PATCH=1`, so the run only passes if rocJITsu either finds no
-supported LDS sites in a loaded code object or successfully rewrites at least
-one supported LDS site before loading it.
+This is the main demo. It uses the default combined check/trap scope and sets
+`RJ_DBI_SC_REQUIRE_PATCH=1`. For these IREE kernels, the supported sites are
+native `ds_*` LDS accesses, so the run only passes if rocJITsu either finds no
+supported site in a loaded code object or successfully rewrites at least one
+supported native LDS site before loading it.
 
 ```sh
 export RJ_DBI_SC_DELAY_MODE=sleep
@@ -263,9 +266,9 @@ Observed result:
 Test #1914 ... Passed 0.24 sec
 ```
 
-`RJ_DBI_SC_MAX_PATCHES=N` bounds native-DS multi-site instrumentation in a
-single code object. Selection is file-ordered and non-overlapping, and uses at
-most one selected site per local NOP cave.
+`RJ_DBI_SC_MAX_PATCHES=N` bounds native-DS and flat/VFLAT multi-site
+instrumentation in a single code object. Selection is file-ordered and
+non-overlapping across inline ranges, anchor rewrites, and local NOP caves.
 
 ## Patch Anatomy: WMMA `ds_load_2addr_b64`
 
@@ -499,7 +502,7 @@ Native-DS d16 load support covers padded `ds_load_u16_d16` and
 destination dword before repeating the halfword load, so the full-dword compare
 remains meaningful.
 
-## Flat/VFLAT Support Exists Separately
+## Flat/VFLAT Support
 
 The native-DS list is not the whole DBI SuperCollider scope. rocJITsu also has a
 conservative flat/VFLAT check/trap path for likely LDS/group-memory accesses:
@@ -507,21 +510,21 @@ conservative flat/VFLAT check/trap path for likely LDS/group-memory accesses:
 - `flat_load_b{32,64,128}`,
 - `flat_store_b{32,64,128}`.
 
-That path is separate from the IREE native-DS demo. It matters because some
-HIP-generated kernels, especially the hip-moi helper-function code we inspected,
-use final `flat_*` instructions even when the source-level intent is shared/LDS
-memory. Since final machine code no longer carries a clean source-language
-address-space label, rocJITsu only treats flat accesses as LDS candidates when
-its provenance heuristic classifies them as likely group memory.
+That path matters because some HIP-generated kernels, especially the hip-moi
+helper-function code we inspected, use final `flat_*` instructions even when the
+source-level intent is shared/LDS memory. Since final machine code no longer
+carries a clean source-language address-space label, rocJITsu only treats flat
+accesses as LDS candidates when its provenance heuristic classifies them as
+likely group memory. In the default combined scope, these sites are considered
+after native DS instrumentation fails to patch the code object.
 
-The flat/VFLAT path can patch padded sites, and can patch one selected unpadded
-likely-group site through a reachable local NOP cave. Broader multi-site flat
-instrumentation is still feature work.
+The flat/VFLAT path can patch padded sites and compact likely-group sites
+through reachable local NOP caves, bounded by `RJ_DBI_SC_MAX_PATCHES` and
+non-overlap checks.
 
 Not in scope for this demo:
 
 - other 8/16-bit native LDS forms beyond `ds_load_u16_d16(_hi)`,
-- flat check/trap multi-site instrumentation,
 - non-trapping report buffers,
 - randomized sleep sampling policy beyond the scalar-source
   `s_sleep_var` mechanism,

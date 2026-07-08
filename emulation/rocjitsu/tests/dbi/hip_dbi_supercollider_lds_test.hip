@@ -56,6 +56,8 @@ __global__ __launch_bounds__(64) void padded_lds_store(uint32_t *out, uint32_t r
                "s_nop 0\n\t"
                "s_nop 0\n\t"
                "s_nop 0\n\t"
+               "s_nop 0\n\t"
+               "s_nop 0\n\t"
                :
                : "v"(lds_addr), "v"(value)
                : "memory");

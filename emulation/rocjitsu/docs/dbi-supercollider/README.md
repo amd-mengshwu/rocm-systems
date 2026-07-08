@@ -19,27 +19,31 @@ not yet full SuperCollider race detection.
 
 ## Current Demo Claim
 
-With the default native-DS mode:
+With the default combined check/trap scope:
 
 ```sh
 export HSA_TOOLS_LIB="$ROCJITSU_BUILD_DIR/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so"
 export LD_LIBRARY_PATH="$ROCM_DIST_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export RJ_DBI_SUPERCOLLIDER=1
 export RJ_DBI_LOG=1
-export RJ_DBI_SC_DELAY=2
+export RJ_DBI_SC_DELAY_MODE=sleep
+export RJ_DBI_SC_DELAY=1
+export RJ_DBI_SC_MAX_PATCHES=4
 export RJ_DBI_SC_REQUIRE_PATCH=1
 ```
 
-the focused IREE WMMA ROCm/HIP e2e test has logged:
+the focused IREE WMMA ROCm/HIP e2e test has logged a native-DS patch:
 
 ```text
 kind=local-cave-lds-load-check-trap anchor=0x3cc trampoline=0x810 original_size=8 scratch_vgpr=104
 ```
 
-and passed. The broader IREE demo now also passes a 10-test patch-required
-matrix covering narrow matmul, f16/f8/i8 TileAndFuse variants, DT f8, and
-StableHLO stream-dot variants with `RJ_DBI_SC_DELAY_MODE=sleep`,
-`RJ_DBI_SC_MAX_PATCHES=4`, and `RJ_DBI_SC_REQUIRE_PATCH=1`.
+and passed. Broader IREE coverage also passes under the same patch-required
+configuration:
+
+- 13/13 for the full RDNA4 ROCm/HIP matmul e2e set exposed by this build,
+- 10/10 for a focused linalg/matmul/StableHLO slice covering narrow matmul,
+  f16/f8/i8 TileAndFuse variants, DT f8, and StableHLO stream-dot variants.
 
 The same focused WMMA control passes with `RJ_DBI_SC_DELAY_MODE=sleep` and with
 `RJ_DBI_SC_DELAY_MODE=sleep_var`.
@@ -58,10 +62,10 @@ The current check/trap proof paths cover:
 
 Native DS sites can use enough trailing `s_nop 0` padding for an in-place
 sequence, or reachable local NOP caves for compact sites, bounded by
-`RJ_DBI_SC_MAX_PATCHES`. Flat/VFLAT sites can use trailing padding or, for one
-selected site, a reachable local NOP cave. Ordinary hip-moi matmul helper code
-has shown likely group/LDS flat sites rather than native `ds_*`, which is why
-the flat path matters.
+`RJ_DBI_SC_MAX_PATCHES`. Flat/VFLAT sites use the same bound for non-overlapping
+padded sites and reachable local NOP caves. Ordinary hip-moi matmul helper code
+has shown likely group/LDS flat sites rather than native `ds_*`, which is why the
+flat path matters.
 
 See [DESIGN.md](DESIGN.md) for the exact instruction policy and the current
 address-space provenance heuristic.
@@ -72,15 +76,13 @@ address-space provenance heuristic.
   `RJ_DBI_SC_DELAY_MODE=sleep_var` emits `s_sleep_var` from a scalar source
   operand. The remaining delay gap is randomized sampling policy, not the basic
   sleep instruction mechanism.
-- `RJ_DBI_SC_MAX_PATCHES=N` can patch multiple native-DS check/trap sites in
-  one code object, bounded by non-overlapping in-place ranges and distinct
-  reachable local NOP caves.
+- `RJ_DBI_SC_MAX_PATCHES=N` can patch multiple native-DS or flat/VFLAT
+  check/trap sites in one code object, bounded by non-overlapping in-place
+  ranges and reachable local NOP caves.
 - Trap is still the report mechanism. A report-buffer ABI is deferred.
 - Current flat provenance is conservative and heuristic. `MaybeGroup` is useful
   for MVP bring-up, but it is not the same as a formal proof that an arbitrary
   flat access targets LDS.
-- Current live flat check/trap mode patches one selected site per code object.
-  Bounded multi-site instrumentation still needs a max-patches or sampling knob.
 - Native DS d16 support currently covers `ds_load_u16_d16` and
   `ds_load_u16_d16_hi`; other 8/16-bit LDS forms remain deferred.
 

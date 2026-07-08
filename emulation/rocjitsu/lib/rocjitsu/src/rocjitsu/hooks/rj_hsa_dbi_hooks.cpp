@@ -48,6 +48,7 @@ enum HookLogLevel : int {
 };
 
 enum class CheckTrapMode : uint8_t {
+  All,
   Lds,
   Flat,
 };
@@ -63,7 +64,7 @@ struct HookConfig {
   bool probe_trampoline_nop = false;
   bool probe_endpgm = false;
   bool probe_lds_endpgm = false;
-  CheckTrapMode check_trap_mode = CheckTrapMode::Lds;
+  CheckTrapMode check_trap_mode = CheckTrapMode::All;
   bool probe_lds_check_trap = false;
   bool probe_flat_check_trap = false;
   bool probe_flat_trap = false;
@@ -140,6 +141,8 @@ struct HookConfig {
 
 [[nodiscard]] const char *check_trap_mode_name(CheckTrapMode mode) {
   switch (mode) {
+  case CheckTrapMode::All:
+    return "all";
   case CheckTrapMode::Lds:
     return "lds";
   case CheckTrapMode::Flat:
@@ -268,7 +271,12 @@ flat_address_space_hint_name(rocjitsu::SuperColliderDbiFlatAddressSpaceHint hint
 [[nodiscard]] bool parse_check_trap_mode_env(CheckTrapMode *out) {
   const char *value = std::getenv("RJ_DBI_SC_CHECK_TRAP_MODE");
   if (value == nullptr || *value == '\0') {
-    *out = CheckTrapMode::Lds;
+    *out = CheckTrapMode::All;
+    return true;
+  }
+  if (ascii_iequals(value, "all") || ascii_iequals(value, "both") ||
+      ascii_iequals(value, "default")) {
+    *out = CheckTrapMode::All;
     return true;
   }
   if (ascii_iequals(value, "lds") || ascii_iequals(value, "ds") ||
@@ -284,7 +292,7 @@ flat_address_space_hint_name(rocjitsu::SuperColliderDbiFlatAddressSpaceHint hint
 
   std::fprintf(stderr,
                "[rocjitsu-dbi-hooks] invalid RJ_DBI_SC_CHECK_TRAP_MODE='%s'; "
-               "expected lds|flat\n",
+               "expected all|lds|flat\n",
                value);
   return false;
 }
@@ -342,8 +350,10 @@ flat_address_space_hint_name(rocjitsu::SuperColliderDbiFlatAddressSpaceHint hint
   if (!parse_bool_env("RJ_DBI_SC_PROBE_FLAT_TRAP", false, &config.probe_flat_trap))
     return std::nullopt;
   if (!has_explicit_primary_probe(config)) {
-    config.probe_lds_check_trap = config.check_trap_mode == CheckTrapMode::Lds;
-    config.probe_flat_check_trap = config.check_trap_mode == CheckTrapMode::Flat;
+    config.probe_lds_check_trap = config.check_trap_mode == CheckTrapMode::All ||
+                                  config.check_trap_mode == CheckTrapMode::Lds;
+    config.probe_flat_check_trap = config.check_trap_mode == CheckTrapMode::All ||
+                                   config.check_trap_mode == CheckTrapMode::Flat;
   }
   if (!parse_bool_env("RJ_DBI_SC_FAULT_DROP_BARRIER", false, &config.fault_drop_barrier))
     return std::nullopt;
@@ -385,17 +395,61 @@ flat_address_space_hint_name(rocjitsu::SuperColliderDbiFlatAddressSpaceHint hint
   return config;
 }
 
-[[nodiscard]] bool require_patch_applies_to(const rocjitsu::SuperColliderDbiResult &result) {
+[[nodiscard]] bool
+is_supported_require_patch_flat_site(const rocjitsu::SuperColliderDbiFlatSite &site) {
+  if (site.kind != rocjitsu::SuperColliderDbiLdsAccessKind::Read &&
+      site.kind != rocjitsu::SuperColliderDbiLdsAccessKind::Write)
+    return false;
+  if (site.size != 3u * sizeof(uint32_t) || !site.addr_vgpr)
+    return false;
+  if (site.width_bits != 32u && site.width_bits != 64u && site.width_bits != 128u)
+    return false;
+  if (site.kind == rocjitsu::SuperColliderDbiLdsAccessKind::Read) {
+    if (site.mnemonic != "flat_load_b32" && site.mnemonic != "flat_load_b64" &&
+        site.mnemonic != "flat_load_b128")
+      return false;
+    if (!site.dst_vgpr)
+      return false;
+  } else {
+    if (site.mnemonic != "flat_store_b32" && site.mnemonic != "flat_store_b64" &&
+        site.mnemonic != "flat_store_b128")
+      return false;
+    if (!site.data_vgpr)
+      return false;
+  }
+  return site.address_space_hint == rocjitsu::SuperColliderDbiFlatAddressSpaceHint::Group ||
+         site.address_space_hint == rocjitsu::SuperColliderDbiFlatAddressSpaceHint::MaybeGroup;
+}
+
+[[nodiscard]] bool require_patch_applies_to(const rocjitsu::SuperColliderDbiResult &result,
+                                            const HookConfig &config) {
   for (const rocjitsu::SuperColliderDbiKernelInfo &kernel : result.kernels) {
-    for (const rocjitsu::SuperColliderDbiLdsSite &site : kernel.lds_sites) {
-      if (site.supported_mvp &&
-          (site.mnemonic == "ds_load_b32" || site.mnemonic == "ds_load_b64" ||
-           site.mnemonic == "ds_load_b128" || site.mnemonic == "ds_load_2addr_b32" ||
-           site.mnemonic == "ds_load_2addr_b64" || site.mnemonic == "ds_load_2addr_stride64_b32" ||
-           site.mnemonic == "ds_load_2addr_stride64_b64" || site.mnemonic == "ds_load_u16_d16" ||
-           site.mnemonic == "ds_load_u16_d16_hi" || site.mnemonic == "ds_store_b32" ||
-           site.mnemonic == "ds_store_b64" || site.mnemonic == "ds_store_b128"))
-        return true;
+    if (config.probe_lds_check_trap) {
+      for (const rocjitsu::SuperColliderDbiLdsSite &site : kernel.lds_sites) {
+        if (site.supported_mvp &&
+            (site.mnemonic == "ds_load_b32" || site.mnemonic == "ds_load_b64" ||
+             site.mnemonic == "ds_load_b128" || site.mnemonic == "ds_load_2addr_b32" ||
+             site.mnemonic == "ds_load_2addr_b64" ||
+             site.mnemonic == "ds_load_2addr_stride64_b32" ||
+             site.mnemonic == "ds_load_2addr_stride64_b64" || site.mnemonic == "ds_load_u16_d16" ||
+             site.mnemonic == "ds_load_u16_d16_hi" || site.mnemonic == "ds_store_b32" ||
+             site.mnemonic == "ds_store_b64" || site.mnemonic == "ds_store_b128"))
+          return true;
+      }
+    }
+    if (config.probe_flat_check_trap) {
+      for (const rocjitsu::SuperColliderDbiFlatSite &site : kernel.flat_sites) {
+        if (is_supported_require_patch_flat_site(site))
+          return true;
+      }
+    }
+  }
+  if (config.probe_flat_check_trap) {
+    for (const rocjitsu::SuperColliderDbiFunctionInfo &function : result.functions) {
+      for (const rocjitsu::SuperColliderDbiFlatSite &site : function.flat_sites) {
+        if (is_supported_require_patch_flat_site(site))
+          return true;
+      }
     }
   }
   return false;
@@ -607,10 +661,13 @@ public:
         delay_mode_name(config.delay_mode), config.delay_var_ssrc, config.max_patches,
         config.scratch_vgpr ? std::to_string(*config.scratch_vgpr).c_str() : "auto",
         config.fault_drop_barrier
-            ? (config.probe_lds_check_trap    ? "proof-lds-check-trap+fault-drop-barrier"
+            ? (config.probe_lds_check_trap && config.probe_flat_check_trap
+                   ? "proof-check-trap-all+fault-drop-barrier"
+               : config.probe_lds_check_trap  ? "proof-lds-check-trap+fault-drop-barrier"
                : config.probe_flat_check_trap ? "proof-flat-check-trap+fault-drop-barrier"
                                               : "fault-drop-barrier")
-        : config.probe_lds_check_trap ? "proof-lds-check-trap"
+        : config.probe_lds_check_trap && config.probe_flat_check_trap ? "proof-check-trap-all"
+        : config.probe_lds_check_trap                                 ? "proof-lds-check-trap"
         : config.probe_flat_check_trap
             ? "proof-flat-check-trap"
             : (config.probe_flat_trap
@@ -1128,10 +1185,11 @@ hsa_status_t HSA_API rj_dbi_executable_load_agent_code_object(
                   static_cast<unsigned long long>(patch.trampoline_offset), patch.original_size,
                   scratch_vgpr.c_str());
     }
-    if (config->require_patch && !patch_result.modified && require_patch_applies_to(patch_result)) {
+    if (config->require_patch && !patch_result.modified &&
+        require_patch_applies_to(patch_result, *config)) {
       std::fprintf(stderr,
                    "[rocjitsu-dbi-hooks] RJ_DBI_SC_REQUIRE_PATCH requested, but no patch was "
-                   "applied to a code object with supported LDS sites\n");
+                   "applied to a code object with supported DBI SuperCollider sites\n");
       return HSA_STATUS_ERROR_INVALID_CODE_OBJECT;
     }
 

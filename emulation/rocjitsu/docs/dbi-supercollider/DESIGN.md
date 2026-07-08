@@ -75,9 +75,9 @@ in a real IREE code object and make the result observably wrong?"
 Implementation shape:
 
 1. Run normal inventory/preflight.
-2. Run the primary proof/instrumentation mode. By default this is native
-   LDS check/trap; use `RJ_DBI_SC_CHECK_TRAP_MODE=flat` to select the
-   flat/VFLAT path instead.
+2. Run the primary proof/instrumentation mode. The default scope is `all`: try
+   native LDS check/trap first, and if that pass does not modify the code
+   object, try the likely-group flat/VFLAT check/trap path.
 3. Decode kernel and local-function ranges again.
 4. Select the Nth decoded 4-byte `s_barrier*` instruction.
 5. Rewrite that single instruction to `s_nop 0` in the current output ELF
@@ -138,10 +138,10 @@ must have enough trailing `s_nop 0` padding to hold the check sequence. For
 compact native LDS sites without padding, the patcher can instead redirect
 selected 8-byte sites through reachable uncovered local NOP caves.
 
-`RJ_DBI_SC_MAX_PATCHES=N` bounds how many native-DS check/trap sites can be
-patched in one code object. Selection is greedy and conservative: candidates
-are considered in file order, selected byte ranges may not overlap, and each
-local cave is consumed at most once.
+`RJ_DBI_SC_MAX_PATCHES=N` bounds how many native-DS or flat/VFLAT check/trap
+sites can be patched in one code object. Selection is greedy and conservative:
+candidates are considered in file order, and selected inline ranges, anchor
+rewrites, and local NOP caves may not overlap.
 
 For a load:
 
@@ -435,8 +435,8 @@ patch kind is `local-cave-flat-store-check-trap`.
 
 ## Open Design Questions
 
-- Should `MaybeGroup` remain enabled by default for hip-moi, or become an
-  explicit "heuristic flat LDS" mode?
+- Should `MaybeGroup` stay in the default flat/VFLAT fallback, or should we add
+  a stricter sub-mode that only treats known `Group` provenance as LDS?
 - What is the right sampled seed source for a SuperCollider-like `s_sleep_var`
   delay window?
 - How much scratch VGPR or descriptor growth is acceptable for a DBI MVP?
